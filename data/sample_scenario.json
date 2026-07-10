@@ -1,0 +1,60 @@
+{
+  "id": "scenario-demo-01",
+  "name": "标准单仓协同调度演示场景",
+  "topologyId": "topology-demo-01",
+  "robots": [
+    {
+      "id": "ctu-01",
+      "type": "ctu",
+      "startNode": "node-ctu-x1",
+      "speed": 1.4,
+      "battery": 100,
+      "enabled": true
+    },
+    {
+      "id": "ctu-02",
+      "type": "ctu",
+      "startNode": "node-ctu-x3",
+      "speed": 1.4,
+      "battery": 88,
+      "enabled": true
+    },
+    {
+      "id": "shuttle-01",
+      "type": "shuttle",
+      "startNode": "node-shuttle-x1",
+      "speed": 1.1,
+      "battery": 96,
+      "enabled": true
+    },
+    {
+      "id": "shuttle-02",
+      "type": "shuttle",
+      "startNode": "node-shuttle-x3",
+      "speed": 1.1,
+      "battery": 90,
+      "enabled": true
+    }
+  ],
+  "orderGenerator": {
+    "ratePerMinute": 6,
+    "maxOrders": 18,
+    "linesPerOrderMin": 1,
+    "linesPerOrderMax": 3,
+    "urgentInsertionTick": 20
+  },
+  "dispatchPolicy": "greedy",
+  "pathPolicy": "astar",
+  "conveyorPolicy": {
+    "releaseThreshold": 0.8,
+    "fifo": true
+  },
+  "faultInjection": {
+    "robotFailureTick": 35,
+    "robotFailureId": "ctu-02",
+    "conveyorJammedTick": 45,
+    "conveyorEdgeId": "edge-transfer-mid-out"
+  },
+  "seed": 7,
+  "durationTicks": 90
+}

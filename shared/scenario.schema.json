@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScenarioPayload",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "topologyId",
+    "robots",
+    "orderGenerator",
+    "dispatchPolicy",
+    "pathPolicy",
+    "conveyorPolicy",
+    "faultInjection",
+    "seed"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "topologyId": { "type": "string" },
+    "robots": { "type": "array" },
+    "orderGenerator": { "type": "object" },
+    "dispatchPolicy": { "type": "string" },
+    "pathPolicy": { "type": "string" },
+    "conveyorPolicy": { "type": "object" },
+    "faultInjection": { "type": "object" },
+    "seed": { "type": "integer" }
+  }
+}

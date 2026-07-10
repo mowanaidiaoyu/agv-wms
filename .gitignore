@@ -1,0 +1,8 @@
+.venv/
+backend/app_data/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/package-lock.json
+__pycache__/
+*.pyc

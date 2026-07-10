@@ -1,0 +1,464 @@
+{
+  "id": "topology-demo-01",
+  "name": "智能仓储协同调度示例拓扑",
+  "meta": {
+    "version": "1.0.0",
+    "viewport": {
+      "x": 0,
+      "y": 0,
+      "zoom": 0.85
+    },
+    "tags": [
+      "mvp",
+      "ctu",
+      "shuttle",
+      "conveyor"
+    ]
+  },
+  "zones": [
+    {
+      "id": "zone-ctu",
+      "label": "CTU 拣选区",
+      "type": "ctu",
+      "x": 20,
+      "y": 40,
+      "width": 320,
+      "height": 300
+    },
+    {
+      "id": "zone-conveyor",
+      "label": "输送线与缓存区",
+      "type": "conveyor",
+      "x": 360,
+      "y": 100,
+      "width": 280,
+      "height": 180
+    },
+    {
+      "id": "zone-shuttle",
+      "label": "四向车库区",
+      "type": "shuttle",
+      "x": 680,
+      "y": 40,
+      "width": 320,
+      "height": 300
+    },
+    {
+      "id": "zone-station",
+      "label": "站台与入库口",
+      "type": "station",
+      "x": 360,
+      "y": 320,
+      "width": 280,
+      "height": 120
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node-ctu-a1",
+      "type": "storage",
+      "x": 120,
+      "y": 90,
+      "zoneId": "zone-ctu",
+      "capacity": 1,
+      "label": "CTU-A1"
+    },
+    {
+      "id": "node-ctu-a2",
+      "type": "storage",
+      "x": 120,
+      "y": 180,
+      "zoneId": "zone-ctu",
+      "capacity": 1,
+      "label": "CTU-A2"
+    },
+    {
+      "id": "node-ctu-a3",
+      "type": "storage",
+      "x": 120,
+      "y": 270,
+      "zoneId": "zone-ctu",
+      "capacity": 1,
+      "label": "CTU-A3"
+    },
+    {
+      "id": "node-ctu-x1",
+      "type": "intersection",
+      "x": 240,
+      "y": 90,
+      "zoneId": "zone-ctu",
+      "capacity": 2,
+      "label": "CTU-X1"
+    },
+    {
+      "id": "node-ctu-x2",
+      "type": "intersection",
+      "x": 240,
+      "y": 180,
+      "zoneId": "zone-ctu",
+      "capacity": 2,
+      "label": "CTU-X2"
+    },
+    {
+      "id": "node-ctu-x3",
+      "type": "intersection",
+      "x": 240,
+      "y": 270,
+      "zoneId": "zone-ctu",
+      "capacity": 2,
+      "label": "CTU-X3"
+    },
+    {
+      "id": "node-transfer-in",
+      "type": "conveyor_gate",
+      "x": 420,
+      "y": 160,
+      "zoneId": "zone-conveyor",
+      "capacity": 2,
+      "label": "Transfer-IN"
+    },
+    {
+      "id": "node-transfer-mid",
+      "type": "buffer",
+      "x": 500,
+      "y": 160,
+      "zoneId": "zone-conveyor",
+      "capacity": 4,
+      "label": "Buffer-MID"
+    },
+    {
+      "id": "node-transfer-out",
+      "type": "conveyor_gate",
+      "x": 580,
+      "y": 160,
+      "zoneId": "zone-conveyor",
+      "capacity": 2,
+      "label": "Transfer-OUT"
+    },
+    {
+      "id": "node-buffer-1",
+      "type": "buffer",
+      "x": 500,
+      "y": 230,
+      "zoneId": "zone-conveyor",
+      "capacity": 3,
+      "label": "BUF-01"
+    },
+    {
+      "id": "node-shuttle-s1",
+      "type": "storage",
+      "x": 780,
+      "y": 90,
+      "zoneId": "zone-shuttle",
+      "capacity": 1,
+      "label": "S-01"
+    },
+    {
+      "id": "node-shuttle-s2",
+      "type": "storage",
+      "x": 780,
+      "y": 180,
+      "zoneId": "zone-shuttle",
+      "capacity": 1,
+      "label": "S-02"
+    },
+    {
+      "id": "node-shuttle-s3",
+      "type": "storage",
+      "x": 780,
+      "y": 270,
+      "zoneId": "zone-shuttle",
+      "capacity": 1,
+      "label": "S-03"
+    },
+    {
+      "id": "node-shuttle-x1",
+      "type": "intersection",
+      "x": 900,
+      "y": 90,
+      "zoneId": "zone-shuttle",
+      "capacity": 2,
+      "label": "SH-X1"
+    },
+    {
+      "id": "node-shuttle-x2",
+      "type": "intersection",
+      "x": 900,
+      "y": 180,
+      "zoneId": "zone-shuttle",
+      "capacity": 2,
+      "label": "SH-X2"
+    },
+    {
+      "id": "node-shuttle-x3",
+      "type": "intersection",
+      "x": 900,
+      "y": 270,
+      "zoneId": "zone-shuttle",
+      "capacity": 2,
+      "label": "SH-X3"
+    },
+    {
+      "id": "node-entry-1",
+      "type": "entry",
+      "x": 420,
+      "y": 360,
+      "zoneId": "zone-station",
+      "capacity": 2,
+      "label": "Entry-01"
+    },
+    {
+      "id": "node-station-1",
+      "type": "station",
+      "x": 500,
+      "y": 360,
+      "zoneId": "zone-station",
+      "capacity": 2,
+      "label": "Station-01"
+    },
+    {
+      "id": "node-station-2",
+      "type": "station",
+      "x": 580,
+      "y": 360,
+      "zoneId": "zone-station",
+      "capacity": 2,
+      "label": "Station-02"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-ctu-a1-x1",
+      "from": "node-ctu-a1",
+      "to": "node-ctu-x1",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.4
+    },
+    {
+      "id": "edge-ctu-a2-x2",
+      "from": "node-ctu-a2",
+      "to": "node-ctu-x2",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.4
+    },
+    {
+      "id": "edge-ctu-a3-x3",
+      "from": "node-ctu-a3",
+      "to": "node-ctu-x3",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.4
+    },
+    {
+      "id": "edge-ctu-x1-x2",
+      "from": "node-ctu-x1",
+      "to": "node-ctu-x2",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 2,
+      "speedLimit": 1.4
+    },
+    {
+      "id": "edge-ctu-x2-x3",
+      "from": "node-ctu-x2",
+      "to": "node-ctu-x3",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 2,
+      "speedLimit": 1.4
+    },
+    {
+      "id": "edge-ctu-x2-transfer",
+      "from": "node-ctu-x2",
+      "to": "node-transfer-in",
+      "type": "cross_zone",
+      "length": 1.5,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1
+    },
+    {
+      "id": "edge-transfer-in-mid",
+      "from": "node-transfer-in",
+      "to": "node-transfer-mid",
+      "type": "conveyor",
+      "length": 1,
+      "bidirectional": false,
+      "capacity": 2,
+      "speedLimit": 0.8
+    },
+    {
+      "id": "edge-transfer-mid-out",
+      "from": "node-transfer-mid",
+      "to": "node-transfer-out",
+      "type": "conveyor",
+      "length": 1,
+      "bidirectional": false,
+      "capacity": 2,
+      "speedLimit": 0.8
+    },
+    {
+      "id": "edge-transfer-mid-buffer",
+      "from": "node-transfer-mid",
+      "to": "node-buffer-1",
+      "type": "conveyor",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 2,
+      "speedLimit": 0.7
+    },
+    {
+      "id": "edge-transfer-out-sh2",
+      "from": "node-transfer-out",
+      "to": "node-shuttle-x2",
+      "type": "cross_zone",
+      "length": 1.5,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1
+    },
+    {
+      "id": "edge-sh1-x1",
+      "from": "node-shuttle-s1",
+      "to": "node-shuttle-x1",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.1
+    },
+    {
+      "id": "edge-sh2-x2",
+      "from": "node-shuttle-s2",
+      "to": "node-shuttle-x2",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.1
+    },
+    {
+      "id": "edge-sh3-x3",
+      "from": "node-shuttle-s3",
+      "to": "node-shuttle-x3",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1.1
+    },
+    {
+      "id": "edge-sh-x1-x2",
+      "from": "node-shuttle-x1",
+      "to": "node-shuttle-x2",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 2,
+      "speedLimit": 1.1
+    },
+    {
+      "id": "edge-sh-x2-x3",
+      "from": "node-shuttle-x2",
+      "to": "node-shuttle-x3",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 2,
+      "speedLimit": 1.1
+    },
+    {
+      "id": "edge-entry-station-1",
+      "from": "node-entry-1",
+      "to": "node-station-1",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1
+    },
+    {
+      "id": "edge-station-1-station-2",
+      "from": "node-station-1",
+      "to": "node-station-2",
+      "type": "aisle",
+      "length": 1,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1
+    },
+    {
+      "id": "edge-transfer-in-entry",
+      "from": "node-transfer-in",
+      "to": "node-entry-1",
+      "type": "cross_zone",
+      "length": 1.2,
+      "bidirectional": true,
+      "capacity": 1,
+      "speedLimit": 1
+    }
+  ],
+  "resources": [
+    {
+      "id": "res-conveyor-main",
+      "type": "conveyor_segment",
+      "label": "主输送线",
+      "nodeIds": [
+        "node-transfer-in",
+        "node-transfer-mid",
+        "node-transfer-out"
+      ],
+      "edgeIds": [
+        "edge-transfer-in-mid",
+        "edge-transfer-mid-out"
+      ],
+      "capacity": 2,
+      "meta": {
+        "releaseThreshold": 0.8
+      }
+    },
+    {
+      "id": "res-buffer-01",
+      "type": "buffer_slot",
+      "label": "缓存位 01",
+      "nodeIds": [
+        "node-buffer-1"
+      ],
+      "edgeIds": [],
+      "capacity": 3,
+      "meta": {}
+    },
+    {
+      "id": "res-station-01",
+      "type": "station",
+      "label": "站台 01",
+      "nodeIds": [
+        "node-station-1"
+      ],
+      "edgeIds": [],
+      "capacity": 2,
+      "meta": {}
+    },
+    {
+      "id": "res-station-02",
+      "type": "station",
+      "label": "站台 02",
+      "nodeIds": [
+        "node-station-2"
+      ],
+      "edgeIds": [],
+      "capacity": 2,
+      "meta": {}
+    }
+  ]
+}

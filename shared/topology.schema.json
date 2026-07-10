@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TopologyPayload",
+  "type": "object",
+  "required": ["id", "name", "meta", "zones", "nodes", "edges", "resources"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "meta": { "type": "object" },
+    "zones": { "type": "array" },
+    "nodes": { "type": "array" },
+    "edges": { "type": "array" },
+    "resources": { "type": "array" }
+  }
+}

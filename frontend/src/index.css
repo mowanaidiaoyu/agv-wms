@@ -1,0 +1,593 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
+:root {
+  color-scheme: light;
+  font-family: 'Fira Sans', sans-serif;
+  --bg: #f8fafc;
+  --surface: rgba(255, 255, 255, 0.82);
+  --surface-strong: rgba(255, 255, 255, 0.94);
+  --line: #d6dde6;
+  --text: #334155;
+  --muted: #64748b;
+  --primary: #64748b;
+  --secondary: #94a3b8;
+  --accent: #f97316;
+  --danger: #dc2626;
+  --hud: rgba(51, 65, 85, 0.05);
+  --shadow: 0 20px 50px rgba(51, 65, 85, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, rgba(249, 115, 22, 0.12), transparent 32%),
+    radial-gradient(circle at top right, rgba(100, 116, 139, 0.16), transparent 28%),
+    linear-gradient(180deg, #f8fafc 0%, #eef4f8 100%);
+  color: var(--text);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding: 20px 18px;
+  border-right: 1px solid rgba(100, 116, 139, 0.16);
+  background: rgba(248, 250, 252, 0.92);
+  backdrop-filter: blur(14px);
+}
+
+.brand-card,
+.surface-card,
+.nav-link,
+.kpi-card,
+.robot-card,
+.alert-card,
+.list-item,
+.heatmap-cell,
+.resource-card,
+.resource-list-item {
+  background: var(--surface);
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  box-shadow: var(--shadow);
+}
+
+.brand-card {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 18px;
+  border-radius: 22px;
+  margin-bottom: 20px;
+}
+
+.brand-mark {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  color: white;
+  background: linear-gradient(135deg, var(--accent), #fb923c);
+  box-shadow: 0 16px 32px rgba(249, 115, 22, 0.25);
+}
+
+.brand-card h1,
+.hero-strip h2,
+.kpi-card h3 {
+  font-family: 'Fira Code', monospace;
+}
+
+.brand-card h1 {
+  font-size: 1.12rem;
+  margin: 4px 0 0;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+.nav-links {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  color: var(--text);
+  text-decoration: none;
+  transition: background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
+}
+
+.nav-link:hover,
+.nav-link:focus-visible {
+  border-color: rgba(249, 115, 22, 0.4);
+  transform: translateX(2px);
+}
+
+.nav-link-active {
+  background: linear-gradient(90deg, rgba(249, 115, 22, 0.14), rgba(249, 115, 22, 0.04));
+  border-color: rgba(249, 115, 22, 0.38);
+}
+
+.content-area {
+  padding: 24px;
+}
+
+.page-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.hero-surface {
+  overflow: hidden;
+}
+
+.surface-card {
+  position: relative;
+  border-radius: 26px;
+  padding: 20px;
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.surface-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, transparent 0%, rgba(249, 115, 22, 0.04) 40%, transparent 100%),
+    linear-gradient(180deg, rgba(100, 116, 139, 0.06), transparent 22%);
+}
+
+.surface-header {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.surface-title {
+  margin: 0;
+  font-family: 'Fira Code', monospace;
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.surface-subtitle,
+.muted-copy {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.surface-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.accent-button,
+.ghost-button,
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  transition: transform 180ms ease, border-color 180ms ease, background-color 180ms ease;
+}
+
+.accent-button {
+  background: linear-gradient(135deg, var(--accent), #fb923c);
+  color: white;
+  border-color: transparent;
+}
+
+.ghost-button {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.danger-button {
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--danger);
+}
+
+.accent-button:hover,
+.ghost-button:hover,
+.danger-button:hover {
+  transform: translateY(-1px);
+}
+
+.hero-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.hero-strip > div,
+.metrics-stack > div {
+  position: relative;
+  z-index: 1;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.64);
+  border: 1px solid rgba(100, 116, 139, 0.1);
+}
+
+.hero-strip h2 {
+  margin: 8px 0 6px;
+  font-size: 2rem;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.kpi-card {
+  position: relative;
+  z-index: 1;
+  padding: 16px;
+  border-radius: 18px;
+}
+
+.kpi-card p,
+.metrics-stack span {
+  margin: 0;
+  color: var(--muted);
+}
+
+.kpi-card h3,
+.metrics-stack strong {
+  margin: 10px 0 0;
+  font-size: 1.6rem;
+}
+
+.chart-frame {
+  position: relative;
+  z-index: 1;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  position: relative;
+  z-index: 1;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 12px 10px;
+  border-bottom: 1px solid rgba(100, 116, 139, 0.14);
+  white-space: nowrap;
+}
+
+thead th {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.topology-grid,
+.scenario-grid,
+.simulation-grid,
+.reports-grid,
+.lab-grid {
+  grid-template-columns: 2fr 1fr;
+}
+
+.topology-canvas-card {
+  min-height: 720px;
+}
+
+.topology-editor {
+  position: relative;
+  height: 620px;
+  border-radius: 24px;
+  overflow: hidden;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.zone-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.zone-box {
+  position: absolute;
+  border-radius: 24px;
+  border: 1px dashed rgba(100, 116, 139, 0.28);
+  background: rgba(100, 116, 139, 0.06);
+  display: flex;
+  align-items: flex-start;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.zone-ctu { background: rgba(249, 115, 22, 0.08); }
+.zone-shuttle { background: rgba(100, 116, 139, 0.08); }
+.zone-conveyor { background: rgba(14, 165, 233, 0.08); }
+
+.field-grid,
+.field-stack,
+.robot-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 14px;
+}
+
+.field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.robot-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+label {
+  display: grid;
+  gap: 8px;
+}
+
+label span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+input,
+select {
+  border-radius: 14px;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text);
+}
+
+.editor-toolbar,
+.run-status-bar,
+.metrics-stack,
+.stack-list,
+.dual-column,
+.experiment-summary,
+.demo-banner {
+  position: relative;
+  z-index: 1;
+}
+
+.editor-toolbar,
+.run-status-bar,
+.metrics-stack,
+.demo-banner {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.run-status-bar > div,
+.metrics-stack > div {
+  flex: 1;
+  min-width: 140px;
+}
+
+.list-item,
+.robot-card,
+.alert-card,
+.heatmap-cell,
+.resource-card,
+.resource-list-item {
+  border-radius: 18px;
+  padding: 14px;
+}
+
+.stack-list {
+  display: grid;
+  gap: 10px;
+}
+
+.list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.robot-card {
+  display: grid;
+  gap: 10px;
+}
+
+.dual-column {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 16px;
+}
+
+.alert-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.alert-card {
+  display: flex;
+  gap: 12px;
+}
+
+.alert-warning {
+  color: #9a3412;
+  background: rgba(249, 115, 22, 0.1);
+}
+
+.alert-error {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.alert-info {
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.resource-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  position: relative;
+  z-index: 1;
+}
+
+.resource-card {
+  display: grid;
+  gap: 8px;
+}
+
+.resource-card-head,
+.validation-panel {
+  position: relative;
+  z-index: 1;
+}
+
+.resource-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resource-list-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+}
+
+.resource-list-item-active {
+  border-color: rgba(249, 115, 22, 0.42);
+  background: linear-gradient(90deg, rgba(249, 115, 22, 0.14), rgba(249, 115, 22, 0.03));
+}
+
+.validation-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.validation-chip {
+  width: fit-content;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+}
+
+.validation-chip.valid {
+  color: #166534;
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.validation-chip.invalid {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.1);
+}
+
+.heatmap-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  position: relative;
+  z-index: 1;
+}
+
+.heatmap-cell {
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.heatmap-cell strong {
+  font-family: 'Fira Code', monospace;
+  font-size: 1.6rem;
+}
+
+@media (max-width: 1180px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: relative;
+    height: auto;
+  }
+
+  .topology-grid,
+  .scenario-grid,
+  .simulation-grid,
+  .reports-grid,
+  .lab-grid,
+  .hero-strip,
+  .kpi-grid,
+  .field-grid,
+  .robot-grid,
+  .dual-column,
+  .resource-grid,
+  .heatmap-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
