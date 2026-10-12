@@ -68,3 +68,84 @@ export interface TrajectorySample {
   world: [number, number, number]
   headingRadians: number
 }
+
+export interface MultiPathVehicleRequest {
+  vehicle_id: string
+  start_cell_id: string
+  goal_cell_id: string
+}
+
+export interface MultiPathDemoScenario {
+  id: 'parallel' | 'node-conflict' | 'edge-swap'
+  name: string
+  description: string
+  vehicles: MultiPathVehicleRequest[]
+}
+
+export interface MultiPathDemoScenariosResponse {
+  topology_id: string
+  topology_name: string
+  topology_version: string
+  largest_road_component_id: string
+  road_cells: PathDemoCell[]
+  scenarios: MultiPathDemoScenario[]
+}
+
+export interface MultiPathStep {
+  time_step: number
+  time_seconds: number
+  action: 'start' | 'move' | 'wait'
+  cell: PathDemoCell
+}
+
+export interface MultiPathVehiclePlan {
+  vehicle_id: string
+  start: PathDemoCell
+  goal: PathDemoCell
+  steps: MultiPathStep[]
+  total_distance: number
+  estimated_duration_seconds: number
+  wait_time_seconds: number
+  avoidance_count: number
+  visited_states: number
+}
+
+export interface MultiPathConflictMetrics {
+  detected_node_conflicts: number
+  detected_edge_conflicts: number
+  detected_geometry_conflicts: number
+  resolved_node_conflicts: number
+  resolved_edge_conflicts: number
+  resolved_geometry_conflicts: number
+  remaining_node_conflicts: number
+  remaining_edge_conflicts: number
+  remaining_geometry_conflicts: number
+}
+
+export interface MultiPathPlan {
+  topology_id: string
+  topology_name: string
+  topology_version: string
+  algorithm: PathDemoAlgorithm
+  planning_status: 'success'
+  error_reason: null
+  time_step_seconds: number
+  speed_cells_per_second: number
+  vehicle_width_cells: number
+  vehicle_length_cells: number
+  safety_distance_cells: number
+  makespan_steps: number
+  makespan_seconds: number
+  vehicles: MultiPathVehiclePlan[]
+  conflicts: MultiPathConflictMetrics
+  avoidance_count: number
+  planning_time_ms: number
+}
+
+export interface PathDemoVehicleView {
+  vehicleId: string
+  label: string
+  color: string
+  trajectory: TrajectoryPoint[]
+  sample: TrajectorySample | null
+}

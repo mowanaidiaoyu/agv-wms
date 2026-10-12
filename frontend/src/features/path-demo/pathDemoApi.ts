@@ -1,4 +1,11 @@
-import type { PathDemoAlgorithm, PathDemoPlan, PathDemoTopologyOptions } from './types'
+import type {
+  MultiPathDemoScenariosResponse,
+  MultiPathPlan,
+  MultiPathVehicleRequest,
+  PathDemoAlgorithm,
+  PathDemoPlan,
+  PathDemoTopologyOptions,
+} from './types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
 
@@ -32,6 +39,28 @@ export const pathDemoApi = {
         start_cell_id: startCellId,
         goal_cell_id: goalCellId,
         algorithm,
+      }),
+    })
+  },
+  multiScenarios(topologyId: string) {
+    return request<MultiPathDemoScenariosResponse>(`/path-demo/topologies/${topologyId}/multi-scenarios`)
+  },
+  planMulti(topologyId: string, vehicles: MultiPathVehicleRequest[], algorithm: PathDemoAlgorithm) {
+    return request<MultiPathPlan>('/path-demo/plan-multi', {
+      method: 'POST',
+      body: JSON.stringify({
+        topology_id: topologyId,
+        vehicles,
+        algorithm,
+        planning_config: {
+          time_step_seconds: 0.25,
+          speed_cells_per_second: 4,
+          max_time_steps: 512,
+          max_expanded_states: 200000,
+          vehicle_width_cells: 0.58,
+          vehicle_length_cells: 0.72,
+          safety_margin_cells: 0.05,
+        },
       }),
     })
   },

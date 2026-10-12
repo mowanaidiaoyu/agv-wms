@@ -104,6 +104,50 @@
 
 .path-demo-camera-buttons button { justify-content: center; }
 
+.path-demo-multi-config {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #273449;
+}
+
+.path-demo-vehicle-config {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #334155;
+  border-radius: 9px;
+}
+
+.path-demo-vehicle-config legend {
+  padding: 0 5px;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.path-demo-vehicle-config label { min-width: 0; }
+
+.path-demo-vehicle-results {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid #273449;
+}
+
+.path-demo-vehicle-results div {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.path-demo-vehicle-results strong { color: #e2e8f0; }
+
 .path-demo-stats {
   display: grid;
   gap: 7px;

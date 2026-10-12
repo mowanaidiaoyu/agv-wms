@@ -5,7 +5,7 @@ import type { TopologyPayload } from '../../types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import type { CameraActionRequest, CameraViewMode } from './cameraControls'
-import type { PlaybackStatus, TrajectoryPoint, TrajectorySample } from './types'
+import type { PathDemoVehicleView, PlaybackStatus, TrajectoryPoint, TrajectorySample } from './types'
 
 function RackModel({ rack }: { rack: SceneRack }) {
   const height = rack.levels * rack.levelHeight
@@ -79,6 +79,8 @@ export function PathDemo3DScene({
   playbackStatus,
   cameraViewMode,
   cameraActionRequest,
+  vehicles = [],
+  followedVehicleSample,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -87,6 +89,8 @@ export function PathDemo3DScene({
   playbackStatus: PlaybackStatus
   cameraViewMode: CameraViewMode
   cameraActionRequest: CameraActionRequest | null
+  vehicles?: PathDemoVehicleView[]
+  followedVehicleSample?: TrajectorySample | null
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const visibleItems = useMemo(
@@ -105,11 +109,11 @@ export function PathDemo3DScene({
       <hemisphereLight intensity={0.5} color="#d7dee9" groundColor="#0b101a" />
       <directionalLight position={[14, 24, 12]} intensity={1.5} castShadow />
       {visibleItems.map((item) => <StaticSceneItem key={item.key} item={item} />)}
-      <PathDemo3DOverlay trajectory={trajectory} sample={sample} />
+      <PathDemo3DOverlay trajectory={trajectory} sample={sample} vehicles={vehicles} />
       <CameraFollowController
         initialPosition={spec.camera.position}
         initialTarget={spec.camera.target}
-        sample={sample}
+        sample={followedVehicleSample === undefined ? sample : followedVehicleSample}
         playbackStatus={playbackStatus}
         viewMode={cameraViewMode}
         actionRequest={cameraActionRequest}

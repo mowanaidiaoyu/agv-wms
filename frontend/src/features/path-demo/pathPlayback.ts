@@ -60,7 +60,36 @@ export function sampleTrajectory(trajectory: TrajectoryPoint[], elapsedSeconds: 
   const z = previous.world[2] + (next.world[2] - previous.world[2]) * alpha
   const row = previous.row + (next.row - previous.row) * alpha
   const col = previous.col + (next.col - previous.col) * alpha
-  const headingRadians = Math.atan2(next.world[0] - previous.world[0], next.world[2] - previous.world[2])
+  let headingStart = previous
+  let headingEnd = next
+  if (headingStart.world[0] === headingEnd.world[0] && headingStart.world[2] === headingEnd.world[2]) {
+    for (let index = nextIndex - 1; index > 0; index -= 1) {
+      if (
+        trajectory[index].world[0] !== trajectory[index - 1].world[0]
+        || trajectory[index].world[2] !== trajectory[index - 1].world[2]
+      ) {
+        headingStart = trajectory[index - 1]
+        headingEnd = trajectory[index]
+        break
+      }
+    }
+    if (headingStart.world[0] === headingEnd.world[0] && headingStart.world[2] === headingEnd.world[2]) {
+      for (let index = nextIndex; index < trajectory.length - 1; index += 1) {
+        if (
+          trajectory[index].world[0] !== trajectory[index + 1].world[0]
+          || trajectory[index].world[2] !== trajectory[index + 1].world[2]
+        ) {
+          headingStart = trajectory[index]
+          headingEnd = trajectory[index + 1]
+          break
+        }
+      }
+    }
+  }
+  const headingRadians = Math.atan2(
+    headingEnd.world[0] - headingStart.world[0],
+    headingEnd.world[2] - headingStart.world[2],
+  )
 
   return {
     vehicleId: previous.vehicleId,
