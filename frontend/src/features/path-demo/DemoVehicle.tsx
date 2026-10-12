@@ -1,8 +1,13 @@
+import { Html } from '@react-three/drei'
 import type { TrajectorySample } from './types'
 
 export function DemoVehicle({ sample }: { sample: TrajectorySample }) {
   return (
     <group position={sample.world} rotation={[0, sample.headingRadians, 0]}>
+      <mesh position={[0, -0.29, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.38, 0.55, 32]} />
+        <meshBasicMaterial color="#facc15" transparent opacity={0.9} depthWrite={false} />
+      </mesh>
       <mesh castShadow>
         <boxGeometry args={[0.58, 0.42, 0.72]} />
         <meshStandardMaterial color="#22d3ee" emissive="#0e7490" emissiveIntensity={0.45} metalness={0.45} roughness={0.35} />
@@ -19,6 +24,11 @@ export function DemoVehicle({ sample }: { sample: TrajectorySample }) {
           </mesh>
         )),
       )}
+      <Html position={[0, 1.15, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
+        <div className="path-demo-vehicle-label" aria-hidden="true">
+          <span>CTU-01</span>
+        </div>
+      </Html>
     </group>
   )
 }

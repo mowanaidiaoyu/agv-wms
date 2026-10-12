@@ -4,11 +4,30 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
+import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
+import type { PlaybackStatus, TrajectorySample } from '../features/path-demo/types'
 import { PathDemoPage } from './PathDemoPage'
 
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
-  PathDemo3DScene: ({ cameraResetToken }: { cameraResetToken: number }) => (
-    <div data-testid="path-demo-scene" data-camera-reset-token={cameraResetToken} />
+  PathDemo3DScene: ({
+    cameraViewMode,
+    cameraActionRequest,
+    sample,
+    playbackStatus,
+  }: {
+    cameraViewMode: CameraViewMode
+    cameraActionRequest: CameraActionRequest | null
+    sample: TrajectorySample | null
+    playbackStatus: PlaybackStatus
+  }) => (
+    <div
+      data-testid="path-demo-scene"
+      data-camera-view-mode={cameraViewMode}
+      data-camera-action={cameraActionRequest?.type ?? ''}
+      data-camera-action-sequence={cameraActionRequest?.sequence ?? ''}
+      data-sample-world={sample?.world.join(',') ?? ''}
+      data-playback-status={playbackStatus}
+    />
   ),
 }))
 
@@ -96,11 +115,59 @@ describe('PathDemoPage', () => {
     expect(screen.getByRole('button', { name: '开始运行' })).toBeDisabled()
   })
 
-  it('resets only the camera view from the operation panel', async () => {
+  it('disables vehicle camera actions until the rendered vehicle has a position', async () => {
     renderPage()
+    await screen.findByTestId('path-demo-scene')
+    expect(screen.getByRole('button', { name: '定位小车' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '跟随小车：关' })).toBeDisabled()
+    expect(screen.getByText('请先规划路径，生成车辆位置后再定位或跟随。')).toBeInTheDocument()
+  })
+
+  it('uses the rendered trajectory sample for locate and preserves follow across vehicle reset', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('起点（可行驶道路）')).toHaveValue(cells[0].id))
+    fireEvent.click(screen.getByRole('button', { name: '规划路径' }))
     const scene = await screen.findByTestId('path-demo-scene')
-    expect(scene).toHaveAttribute('data-camera-reset-token', '0')
-    fireEvent.click(screen.getByRole('button', { name: '重置视角' }))
-    expect(scene).toHaveAttribute('data-camera-reset-token', '1')
+    await waitFor(() => expect(scene).toHaveAttribute('data-sample-world', '-0.5,0.5,0.5'))
+
+    fireEvent.click(screen.getByRole('button', { name: '定位小车' }))
+    expect(scene).toHaveAttribute('data-camera-action', 'locate')
+
+    fireEvent.click(screen.getByRole('button', { name: '跟随小车：关' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'follow')
+    fireEvent.click(screen.getByRole('button', { name: '重置' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'follow')
+    expect(scene).toHaveAttribute('data-playback-status', 'idle')
+  })
+
+  it('exits follow without resetting the camera and uses overview as an explicit action', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('终点（可行驶道路）')).toHaveValue(cells[2].id))
+    fireEvent.click(screen.getByRole('button', { name: '规划路径' }))
+    const scene = await screen.findByTestId('path-demo-scene')
+
+    fireEvent.click(screen.getByRole('button', { name: '跟随小车：关' }))
+    fireEvent.click(screen.getByRole('button', { name: '自由视角' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'free')
+    expect(scene).toHaveAttribute('data-camera-action', '')
+
+    fireEvent.click(screen.getByRole('button', { name: '跟随小车：关' }))
+    fireEvent.click(screen.getByRole('button', { name: '仓库全景' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'free')
+    expect(scene).toHaveAttribute('data-camera-action', 'overview')
+  })
+
+  it('stops following an invalidated path', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('终点（可行驶道路）')).toHaveValue(cells[2].id))
+    fireEvent.click(screen.getByRole('button', { name: '规划路径' }))
+    const scene = await screen.findByTestId('path-demo-scene')
+    await waitFor(() => expect(screen.getByRole('button', { name: '跟随小车：关' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '跟随小车：关' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'follow')
+
+    fireEvent.change(screen.getByLabelText('路径算法'), { target: { value: 'dijkstra' } })
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'free')
+    expect(scene).toHaveAttribute('data-sample-world', '')
   })
 })

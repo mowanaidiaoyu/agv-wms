@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import { buildTrajectory, sampleTrajectory, usePathPlayback } from '../features/path-demo/pathPlayback'
+import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import type { PathDemoAlgorithm, PathDemoPlan } from '../features/path-demo/types'
 import { api } from '../lib/api'
 import './PathDemoPage.css'
@@ -26,7 +27,8 @@ export function PathDemoPage() {
   const [plan, setPlan] = useState<PathDemoPlan | null>(null)
   const [planning, setPlanning] = useState(false)
   const [planningError, setPlanningError] = useState('')
-  const [cameraResetToken, setCameraResetToken] = useState(0)
+  const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
+  const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
 
   useEffect(() => {
     if (topologyId || !topologiesQuery.data?.length) return
@@ -65,19 +67,30 @@ export function PathDemoPage() {
     setGoalCellId(optionsQuery.data.default_goal.id)
     setPlan(null)
     setPlanningError('')
+    setCameraViewMode('free')
+    setCameraActionRequest(null)
     resetPlayback()
   }, [optionsQuery.data, resetPlayback])
 
   const invalidatePlan = () => {
     setPlan(null)
     setPlanningError('')
+    setCameraViewMode('free')
+    setCameraActionRequest(null)
     resetPlayback()
+  }
+
+  const requestCameraAction = (type: CameraActionRequest['type']) => {
+    setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
   }
 
   const requestPlan = async () => {
     if (!topologyId || !startCellId || !goalCellId) return
     setPlanning(true)
     setPlanningError('')
+    setPlan(null)
+    setCameraViewMode('free')
+    setCameraActionRequest(null)
     resetPlayback()
     try {
       setPlan(await pathDemoApi.plan(topologyId, startCellId, goalCellId, algorithm))
@@ -189,13 +202,56 @@ export function PathDemoPage() {
             onReset={resetPlayback}
             onRateChange={setPlaybackRate}
           />
-          <button
-            className="ghost-button path-demo-camera-reset"
-            type="button"
-            onClick={() => setCameraResetToken((value) => value + 1)}
-          >
-            重置视角
-          </button>
+          <section className="path-demo-camera-controls" aria-label="视角控制">
+            <div className="path-demo-camera-heading">
+              <strong>视角控制</strong>
+              <span className={`path-demo-view-badge is-${cameraViewMode}`}>
+                当前视角：{cameraViewMode === 'follow' ? '跟随' : '自由'}
+              </span>
+            </div>
+            <div className="path-demo-camera-buttons">
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={!sample}
+                onClick={() => {
+                  setCameraViewMode('free')
+                  requestCameraAction('locate')
+                }}
+              >
+                定位小车
+              </button>
+              <button
+                className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'}
+                type="button"
+                disabled={!sample}
+                aria-pressed={cameraViewMode === 'follow'}
+                onClick={() => setCameraViewMode((current) => (current === 'follow' ? 'free' : 'follow'))}
+              >
+                跟随小车：{cameraViewMode === 'follow' ? '开' : '关'}
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={cameraViewMode === 'free'}
+                onClick={() => setCameraViewMode('free')}
+              >
+                自由视角
+              </button>
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => {
+                  setCameraViewMode('free')
+                  requestCameraAction('overview')
+                }}
+              >
+                仓库全景
+              </button>
+            </div>
+            <p className="path-demo-note">当前车辆：CTU-01</p>
+            {!sample ? <p className="path-demo-note">请先规划路径，生成车辆位置后再定位或跟随。</p> : null}
+          </section>
 
           <dl className="path-demo-stats">
             <div><dt>连通分量</dt><dd>{optionsQuery.data?.components.length ?? '—'}</dd></div>
@@ -218,7 +274,9 @@ export function PathDemoPage() {
                 activeFloor={activeFloor}
                 trajectory={trajectory}
                 sample={sample}
-                cameraResetToken={cameraResetToken}
+                playbackStatus={playbackState.status}
+                cameraViewMode={cameraViewMode}
+                cameraActionRequest={cameraActionRequest}
               />
             </Suspense>
           ) : (
