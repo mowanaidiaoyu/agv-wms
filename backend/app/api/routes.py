@@ -15,9 +15,11 @@ from ..services.runtime import repo, simulation_service
 from ..services.scenario_sync import sync_scenario_with_topology_payload
 from ..services.simulation import validate_runtime_inputs
 from ..services.topology_validation import validate_topology_business_rules
+from .path_demo import router as path_demo_router
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
+router.include_router(path_demo_router)
 
 
 @router.get("/health")

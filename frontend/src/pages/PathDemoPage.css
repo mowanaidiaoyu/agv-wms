@@ -1,0 +1,105 @@
+.path-demo-page {
+  display: grid;
+  gap: 18px;
+  min-height: calc(100vh - 48px);
+}
+.path-demo-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.path-demo-header h2 {
+  margin: 4px 0 8px;
+  font-size: clamp(24px, 3vw, 36px);
+}
+
+.path-demo-header p { margin: 0; color: #94a3b8; }
+
+.path-demo-mode {
+  padding: 8px 12px;
+  border: 1px solid #155e75;
+  border-radius: 999px;
+  color: #67e8f9;
+  background: rgba(8, 47, 73, 0.55);
+  white-space: nowrap;
+}
+
+.path-demo-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 720px;
+}
+
+.path-demo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #273449;
+  border-radius: 14px;
+  background: rgba(12, 18, 30, 0.92);
+  overflow: auto;
+}
+
+.path-demo-panel label {
+  display: grid;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.path-demo-panel select { width: 100%; min-width: 0; }
+.path-demo-plan-button { width: 100%; justify-content: center; }
+
+.path-demo-playback-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #273449;
+}
+
+.path-demo-playback-controls label { grid-column: 1 / -1; }
+.path-demo-note { margin: 0; color: #94a3b8; font-size: 13px; }
+.path-demo-error { margin: 0; color: #fda4af; font-size: 13px; }
+
+.path-demo-stats {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid #273449;
+}
+
+.path-demo-stats div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.path-demo-stats dt { color: #94a3b8; }
+.path-demo-stats dd { margin: 0; color: #e2e8f0; text-align: right; }
+
+.path-demo-viewport {
+  min-height: 720px;
+  overflow: hidden;
+  border: 1px solid #273449;
+  border-radius: 14px;
+  background: #0a0f19;
+  box-shadow: inset 0 0 60px rgba(14, 116, 144, 0.08);
+}
+
+.path-demo-empty {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: #94a3b8;
+}
+
+@media (max-width: 1050px) {
+  .path-demo-layout { grid-template-columns: 1fr; }
+  .path-demo-viewport { min-height: 560px; }
+}

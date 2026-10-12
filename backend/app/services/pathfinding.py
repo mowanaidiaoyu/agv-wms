@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import heapq
+from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_FLOOR = "1F"
+
+
+@dataclass(frozen=True)
+class PathSearchResult:
+    path: list[dict[str, Any]]
+    total_cost: float
+    visited_nodes: int
 
 
 def normalize_floor(value: Any) -> str:
@@ -122,10 +130,18 @@ def lift_neighbors(topology: dict[str, Any], walkable: dict[tuple[str, int, int]
     return result
 
 
-def shortest_path(topology: dict[str, Any], start_cell: str, goal_cell: str, policy: str = "astar") -> list[dict[str, Any]]:
+def shortest_path_result(
+    topology: dict[str, Any],
+    start_cell: str,
+    goal_cell: str,
+    policy: str = "astar",
+) -> PathSearchResult:
+    if policy not in {"astar", "dijkstra"}:
+        raise ValueError(f"Unsupported path policy: {policy}")
+
     if start_cell == goal_cell:
         start = cell_from_id(topology, start_cell)
-        return [start] if start else []
+        return PathSearchResult(path=[start] if start else [], total_cost=0.0, visited_nodes=1 if start else 0)
 
     walkable = build_walkable_lookup(topology)
     vertical_edges = lift_neighbors(topology, walkable)
@@ -133,20 +149,31 @@ def shortest_path(topology: dict[str, Any], start_cell: str, goal_cell: str, pol
         start = parse_cell_id(start_cell)
         goal = parse_cell_id(goal_cell)
     except ValueError:
-        return []
+        return PathSearchResult(path=[], total_cost=0.0, visited_nodes=0)
 
     if start not in walkable or goal not in walkable:
-        return []
+        return PathSearchResult(path=[], total_cost=0.0, visited_nodes=0)
 
     frontier: list[tuple[float, tuple[str, int, int]]] = [(0.0, start)]
     came_from: dict[tuple[str, int, int], tuple[str, int, int]] = {}
     cost_so_far: dict[tuple[str, int, int], float] = {start: 0.0}
+    visited: set[tuple[str, int, int]] = set()
+    step_costs = [max(0.0, float(cell.get("cost", 1.0))) for cell in walkable.values()]
+    step_costs.extend(max(0.0, cost) for edges in vertical_edges.values() for _, cost in edges)
+    minimum_step_cost = min(step_costs, default=0.0)
 
     while frontier:
         _, current = heapq.heappop(frontier)
+        if current in visited:
+            continue
+        visited.add(current)
         if current == goal:
             positions = reconstruct_path(came_from, current)
-            return [walkable[position] for position in positions]
+            return PathSearchResult(
+                path=[walkable[position] for position in positions],
+                total_cost=cost_so_far[current],
+                visited_nodes=len(visited),
+            )
 
         neighbor_candidates: list[tuple[tuple[str, int, int], float | None]] = []
         for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -162,8 +189,12 @@ def shortest_path(topology: dict[str, Any], start_cell: str, goal_cell: str, pol
             new_cost = cost_so_far[current] + move_cost
             if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
                 cost_so_far[nxt] = new_cost
-                priority = new_cost + heuristic(nxt, goal) if policy == "astar" else new_cost
+                priority = new_cost + heuristic(nxt, goal) * minimum_step_cost if policy == "astar" else new_cost
                 heapq.heappush(frontier, (priority, nxt))
                 came_from[nxt] = current
 
-    return []
+    return PathSearchResult(path=[], total_cost=0.0, visited_nodes=len(visited))
+
+
+def shortest_path(topology: dict[str, Any], start_cell: str, goal_cell: str, policy: str = "astar") -> list[dict[str, Any]]:
+    return shortest_path_result(topology, start_cell, goal_cell, policy).path
