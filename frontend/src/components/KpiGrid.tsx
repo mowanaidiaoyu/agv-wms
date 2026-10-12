@@ -32,7 +32,7 @@ export function KpiGrid({ metrics }: { metrics?: Partial<SimulationMetrics> | nu
     ['平均 ETA', merged.avgEtaTicks],
     ['平均完成时长', merged.avgCompletionTicks],
     ['缓存位占用', merged.bufferOccupancy],
-  ]
+  ] as const
 
   return (
     <div className="kpi-grid">

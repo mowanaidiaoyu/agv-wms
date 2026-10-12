@@ -5,7 +5,7 @@ from typing import Any
 
 from munkres import Munkres
 
-from .pathfinding import shortest_path
+from .pathfinding import node_to_cell_id, shortest_path
 
 
 @dataclass
@@ -16,7 +16,13 @@ class AssignmentInput:
 
 
 def task_cost(robot: dict[str, Any], task: dict[str, Any], topology: dict[str, Any], path_policy: str) -> float:
-    path = shortest_path(topology, robot["currentNode"], task["sourceNode"], path_policy)
+    try:
+        source_cell = node_to_cell_id(topology, task["sourceNode"])
+    except KeyError:
+        return 9999.0
+    path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy)
+    if not path:
+        return 9999.0
     battery_penalty = max(0.0, 50.0 - robot["battery"]) * 0.05
     zone_penalty = 0.2 if robot["type"] != task["robotType"] else 0.0
     return len(path) + battery_penalty + zone_penalty
@@ -41,7 +47,7 @@ def greedy_assign(
                 candidate = AssignmentInput(robot, task, score)
                 if best is None or candidate.score < best.score:
                     best = candidate
-        if best is None:
+        if best is None or best.score >= 9999.0:
             break
         matches.append((best.robot["id"], best.task["id"]))
         available = [robot for robot in available if robot["id"] != best.robot["id"]]
@@ -63,18 +69,16 @@ def hungarian_assign(
 
     max_dim = max(len(idle_robots), len(compatible_tasks))
     matrix = [[9999.0 for _ in range(max_dim)] for _ in range(max_dim)]
-    for i, robot in enumerate(idle_robots):
-        for j, task in enumerate(compatible_tasks):
+    for row_index, robot in enumerate(idle_robots):
+        for col_index, task in enumerate(compatible_tasks):
             if robot["type"] == task["robotType"]:
-                matrix[i][j] = task_cost(robot, task, topology, path_policy)
+                matrix[row_index][col_index] = task_cost(robot, task, topology, path_policy)
 
-    munkres = Munkres()
-    indexes = munkres.compute(matrix)
+    indexes = Munkres().compute(matrix)
     matches: list[tuple[str, str]] = []
-    for row, col in indexes:
-        if row < len(idle_robots) and col < len(compatible_tasks):
-            if matrix[row][col] < 9999.0:
-                matches.append((idle_robots[row]["id"], compatible_tasks[col]["id"]))
+    for row_index, col_index in indexes:
+        if row_index < len(idle_robots) and col_index < len(compatible_tasks) and matrix[row_index][col_index] < 9999.0:
+            matches.append((idle_robots[row_index]["id"], compatible_tasks[col_index]["id"]))
     return matches
 
 

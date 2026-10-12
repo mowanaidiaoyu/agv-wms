@@ -1,8 +1,8 @@
 import { useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Surface } from '../components/Surface'
 import { KpiGrid } from '../components/KpiGrid'
+import { Surface } from '../components/Surface'
 import { TrendChart } from '../components/charts/TrendChart'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
@@ -20,7 +20,9 @@ export function DashboardPage() {
 
   useEffect(() => {
     const firstTopology = topologiesQuery.data?.[0]
-    const firstScenario = scenariosQuery.data?.find((item) => item.payload.topologyId === firstTopology?.id) ?? scenariosQuery.data?.[0]
+    const firstScenario =
+      scenariosQuery.data?.find((item) => item.payload.topologyId === firstTopology?.id) ?? scenariosQuery.data?.[0]
+
     if (!selectedTopologyId && firstTopology) {
       setSelectedTopologyId(firstTopology.id)
     }
@@ -43,7 +45,7 @@ export function DashboardPage() {
     <div className="page-grid">
       <Surface
         title="系统总览"
-        subtitle="围绕四向车、CTU 与输送线协同调度构建的本地演示驾驶舱。"
+        subtitle="围绕四向车、CTU 与输送线协同调度构建的本地仿真驾驶舱。"
         className="hero-surface"
       >
         <div className="hero-strip">
@@ -72,17 +74,17 @@ export function DashboardPage() {
 
       <Surface
         title="演示模式"
-        subtitle="默认样例已自动注入数据库，建议从这里直接进入闭环演示。"
+        subtitle="默认样例已经入库，建议从这里直接进入网格拓扑与仿真闭环。"
         action={
           <div className="surface-actions">
-            <button className="ghost-button" onClick={() => navigate('/topology')}>
+            <button className="ghost-button" onClick={() => navigate('/topology')} type="button">
               查看拓扑
             </button>
-            <button className="ghost-button" onClick={() => navigate('/scenario')}>
+            <button className="ghost-button" onClick={() => navigate('/scenario')} type="button">
               检查场景
             </button>
-            <button className="accent-button" onClick={() => navigate('/simulation')}>
-              直接进入仿真
+            <button className="accent-button" onClick={() => navigate('/simulation')} type="button">
+              进入仿真
             </button>
           </div>
         }
@@ -99,7 +101,7 @@ export function DashboardPage() {
         </div>
       </Surface>
 
-      <Surface title="关键指标" subtitle="展示当前运行或最近一次运行的核心观测值。">
+      <Surface title="关键指标" subtitle="显示当前运行或最近一次运行的核心观测值。">
         <KpiGrid metrics={liveMetrics ?? runs[0]?.metrics} />
       </Surface>
 

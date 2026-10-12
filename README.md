@@ -26,6 +26,12 @@ simulation and optimization platform.
 - Backend: `http://127.0.0.1:8000`
 - Health: `http://127.0.0.1:8000/api/v1/health`
 
+## Data files (large, not in git)
+
+- 源数据（`.dxf` / `.dwg` / `.xlsx`）体积大（约 187MB），**不放在仓库里**。
+- 请把数据文件放到仓库**上一级**的 `data/` 目录（与 `web/` 同级），后端从 `../data` 读取。
+- 数据文件列表与下载方式：见团队共享网盘（`启动方法.md` / `docs/启动方法.md`）。
+
 ## Verification
 
 Backend:

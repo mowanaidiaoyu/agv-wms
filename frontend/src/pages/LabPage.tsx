@@ -50,16 +50,21 @@ export function LabPage() {
     <div className="page-grid lab-grid">
       <Surface
         title="算法实验室"
-        subtitle="围绕调度、路径和输送线放行策略做可比较、可回放的试验。"
+        subtitle="围绕调度、路径和输送线放行策略做可比较、可回放的实验。"
         action={
-          <button className="accent-button" onClick={() => evaluateMutation.mutate()} disabled={!selectedTopologyId || !selectedScenarioId}>
+          <button
+            className="accent-button"
+            onClick={() => evaluateMutation.mutate()}
+            disabled={!selectedTopologyId || !selectedScenarioId}
+            type="button"
+          >
             运行评估
           </button>
         }
       >
         <div className="experiment-summary">
-          <p>当前场景：{scenariosQuery.data?.find((item) => item.id === selectedScenarioId)?.payload.name ?? '未选择'}</p>
-          <p>当前拓扑：{selectedTopologyId || '未选择'}</p>
+          <p>当前场景: {scenariosQuery.data?.find((item) => item.id === selectedScenarioId)?.payload.name ?? '未选择'}</p>
+          <p>当前拓扑: {selectedTopologyId || '未选择'}</p>
         </div>
         <div className="table-wrap">
           <table>
@@ -93,7 +98,7 @@ export function LabPage() {
         </div>
       </Surface>
 
-      <Surface title="调度策略雷达" subtitle="先比较两套任务分配策略的整体表现。">
+      <Surface title="调度策略雷达" subtitle="优先比较两组任务分配策略的整体表现。">
         {radarData.length ? (
           <PolicyRadar
             data={radarData}

@@ -13,7 +13,7 @@ const items = [
 
 export function NavShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="app-shell">
+    <div className="app-shell notranslate" translate="no">
       <aside className="sidebar">
         <div className="brand-card">
           <div className="brand-mark">

@@ -11,7 +11,7 @@ from fastapi import WebSocket
 
 from ..core.repository import Repository
 from .assignment import assign_tasks
-from .pathfinding import shortest_path
+from .pathfinding import build_node_lookup, cell_id, node_to_cell_id, parse_cell_id, shortest_path
 
 
 def now_dt() -> datetime:
@@ -22,6 +22,83 @@ def find_task(tasks: list[dict[str, Any]], task_id: str | None) -> dict[str, Any
     if not task_id:
         return None
     return next((task for task in tasks if task["id"] == task_id), None)
+
+
+DEVICE_NODE_TO_ROBOT_TYPE = {
+    "ctu_robot": "ctu",
+    "shuttle_robot": "shuttle",
+}
+ROBOT_TYPE_TO_DEVICE_NODE = {value: key for key, value in DEVICE_NODE_TO_ROBOT_TYPE.items()}
+
+
+def build_device_node_lookup(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        node["id"]: node
+        for node in topology.get("nodes", [])
+        if node.get("type") in DEVICE_NODE_TO_ROBOT_TYPE
+    }
+
+
+def validate_runtime_inputs(topology: dict[str, Any], scenario: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    topology_id = topology.get("id")
+    scenario_topology_id = scenario.get("topologyId")
+    if topology_id and scenario_topology_id and topology_id != scenario_topology_id:
+        errors.append(
+            f"Scenario {scenario.get('id', '')} references topology {scenario_topology_id}, but runtime requested {topology_id}."
+        )
+
+    node_lookup = build_node_lookup(topology)
+    device_node_lookup = build_device_node_lookup(topology)
+    scenario_robot_lookup = {
+        robot.get("id"): robot
+        for robot in scenario.get("robots", [])
+        if robot.get("id")
+    }
+
+    if not device_node_lookup:
+        errors.append(
+            f"Topology {topology_id} has no CTU or shuttle device nodes. Add ctu_robot or shuttle_robot nodes before starting simulation."
+        )
+
+    for device_id, device_node in device_node_lookup.items():
+        robot = scenario_robot_lookup.get(device_id)
+        if robot is None:
+            errors.append(
+                f"Topology device node {device_id} is missing from scenario {scenario.get('id', '')}. Open the scenario page and sync device parameters."
+            )
+            continue
+
+        expected_type = DEVICE_NODE_TO_ROBOT_TYPE[device_node["type"]]
+        if robot.get("type") != expected_type:
+            errors.append(
+                f"Scenario robot {device_id} has type {robot.get('type')}, but topology node {device_id} is {device_node.get('type')}."
+            )
+        if robot.get("startNode") != device_id:
+            errors.append(
+                f"Scenario robot {device_id} must use startNode {device_id}, but received {robot.get('startNode')}."
+            )
+
+    for robot in scenario.get("robots", []):
+        robot_id = robot.get("id", "")
+        start_node_id = robot.get("startNode")
+        device_node = device_node_lookup.get(robot_id)
+        if device_node is None:
+            errors.append(
+                f"Scenario robot {robot_id} has no matching topology device node. Add a CTU/四向车 node with the same id in topology first."
+            )
+            continue
+
+        expected_node_type = ROBOT_TYPE_TO_DEVICE_NODE.get(robot.get("type"))
+        if device_node.get("type") != expected_node_type:
+            errors.append(
+                f"Scenario robot {robot_id} expects topology node type {expected_node_type}, but found {device_node.get('type')}."
+            )
+        if start_node_id not in node_lookup:
+            errors.append(
+                f"Robot {robot_id} references missing start node {start_node_id} in topology {topology_id}."
+            )
+    return errors
 
 
 @dataclass
@@ -169,23 +246,42 @@ class SimulationService:
         *,
         record_events: bool = True,
     ) -> RunRuntime:
-        robots = [
-            {
-                "id": robot["id"],
-                "type": robot["type"],
-                "currentNode": robot["startNode"],
-                "status": "idle",
-                "battery": robot["battery"],
-                "path": [robot["startNode"]],
-                "targetNode": robot["startNode"],
-                "currentTaskId": None,
-                "waitTicks": 0,
-                "failed": False,
-                "phaseLabel": "待命",
-            }
-            for robot in scenario["robots"]
-            if robot.get("enabled", True)
-        ]
+        runtime_errors = validate_runtime_inputs(topology, scenario)
+        if runtime_errors:
+            raise ValueError(" ".join(runtime_errors))
+
+        node_lookup = build_node_lookup(topology)
+        robots: list[dict[str, Any]] = []
+        for robot in scenario["robots"]:
+            if not robot.get("enabled", True):
+                continue
+            start_node = node_lookup.get(robot["startNode"])
+            if start_node is None:
+                raise ValueError(
+                    f"Robot {robot.get('id', '')} references missing start node {robot.get('startNode')} in topology {topology.get('id')}."
+                )
+            start_floor = start_node.get("floor", "1F")
+            start_cell = node_to_cell_id(topology, robot["startNode"])
+            robots.append(
+                {
+                    "id": robot["id"],
+                    "type": robot["type"],
+                    "currentNode": start_cell,
+                    "currentCellId": start_cell,
+                    "currentFloor": start_floor,
+                    "currentRow": start_node["row"],
+                    "currentCol": start_node["col"],
+                    "status": "idle",
+                    "battery": robot["battery"],
+                    "path": [start_cell],
+                    "targetCellId": start_cell,
+                    "currentTaskId": None,
+                    "waitTicks": 0,
+                    "failed": False,
+                    "phaseLabel": "待命",
+                }
+            )
+
         tasks = self._seed_tasks(topology)
         state = {
             "id": run_id,
@@ -227,51 +323,36 @@ class SimulationService:
         )
 
     def _build_resource_state(self, topology: dict[str, Any]) -> list[dict[str, Any]]:
-        resources = []
-        for resource in topology.get("resources", []):
-            resources.append(
-                {
-                    "id": resource["id"],
-                    "label": resource["label"],
-                    "type": resource["type"],
-                    "capacity": resource.get("capacity", 1),
-                    "nodeIds": resource.get("nodeIds", []),
-                    "edgeIds": resource.get("edgeIds", []),
-                    "occupiedBy": [],
-                    "queue": [],
-                    "meta": resource.get("meta", {}),
-                }
-            )
-        return resources
+        return [
+            {
+                "id": resource["id"],
+                "label": resource["label"],
+                "type": resource["type"],
+                "capacity": resource.get("capacity", 1),
+                "cellIds": resource.get("cellIds", []),
+                "nodeIds": resource.get("nodeIds", []),
+                "occupiedBy": [],
+                "queue": [],
+                "meta": resource.get("meta", {}),
+            }
+            for resource in topology.get("resources", [])
+        ]
 
     def _seed_tasks(self, topology: dict[str, Any]) -> list[dict[str, Any]]:
-        ctu_sources = [
-            node["id"]
-            for node in topology["nodes"]
-            if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-ctu"
-        ]
-        shuttle_sources = [
-            node["id"]
-            for node in topology["nodes"]
-            if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-shuttle"
-        ]
-        stations = [node["id"] for node in topology["nodes"] if node["type"] == "station"]
-        entry_nodes = [node["id"] for node in topology["nodes"] if node["type"] == "entry"]
-        transfer_in = next(
-            (node["id"] for node in topology["nodes"] if node["id"] == "node-transfer-in"),
-            stations[0] if stations else "",
-        )
-        transfer_out = next(
-            (node["id"] for node in topology["nodes"] if node["id"] == "node-transfer-out"),
-            transfer_in,
-        )
+        nodes = topology["nodes"]
+        ctu_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-ctu"]
+        shuttle_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-shuttle"]
+        stations = [node["id"] for node in nodes if node["type"] == "station"]
+        entry_nodes = [node["id"] for node in nodes if node["type"] == "entry"]
+        transfer_in = next((node["id"] for node in nodes if node["type"] == "conveyor_gate" and node.get("zoneId") == "zone-conveyor"), stations[0] if stations else "")
+        transfer_out = next((node["id"] for node in reversed(nodes) if node["type"] == "conveyor_gate"), transfer_in)
 
         if not ctu_sources:
-            ctu_sources = [node["id"] for node in topology["nodes"] if node["type"] in {"storage", "buffer"}]
+            ctu_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"}]
         if not shuttle_sources:
-            shuttle_sources = [node["id"] for node in topology["nodes"] if node["type"] in {"storage", "buffer"}]
+            shuttle_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"}]
         if not stations:
-            stations = [node["id"] for node in topology["nodes"]]
+            stations = [node["id"] for node in nodes]
         if not entry_nodes:
             entry_nodes = stations
 
@@ -279,63 +360,62 @@ class SimulationService:
         for index in range(8):
             source = ctu_sources[index % len(ctu_sources)]
             station = stations[index % len(stations)]
-            tasks.append(
-                {
-                    "id": f"task-ctu-{index + 1}",
-                    "robotType": "ctu",
-                    "mode": "direct",
-                    "status": "pending",
-                    "phase": "pending_assignment",
-                    "phaseLabel": "待分配",
-                    "sourceNode": source,
-                    "targetNode": station,
-                    "stationNode": station,
-                    "entryNode": entry_nodes[index % len(entry_nodes)],
-                    "handoffNode": None,
-                    "conveyorExitNode": None,
-                    "stationResourceId": None,
-                    "priority": 2,
-                    "etaTicks": 0,
-                    "urgent": False,
-                    "assignedRobotId": None,
-                    "remainingTicks": 0,
-                    "history": [],
-                    "createdTick": 0,
-                    "startedTick": None,
-                    "completedTick": None,
-                }
-            )
+            entry = entry_nodes[index % len(entry_nodes)]
+            tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", source, station, entry, None, None, False, 2))
 
         for index in range(6):
             source = shuttle_sources[index % len(shuttle_sources)]
             station = stations[index % len(stations)]
-            tasks.append(
-                {
-                    "id": f"task-shuttle-{index + 1}",
-                    "robotType": "shuttle",
-                    "mode": "cross_zone",
-                    "status": "pending",
-                    "phase": "pending_assignment",
-                    "phaseLabel": "待分配",
-                    "sourceNode": source,
-                    "targetNode": station,
-                    "stationNode": station,
-                    "entryNode": entry_nodes[index % len(entry_nodes)],
-                    "handoffNode": transfer_out,
-                    "conveyorExitNode": transfer_in,
-                    "stationResourceId": None,
-                    "priority": 2,
-                    "etaTicks": 0,
-                    "urgent": False,
-                    "assignedRobotId": None,
-                    "remainingTicks": 0,
-                    "history": [],
-                    "createdTick": 0,
-                    "startedTick": None,
-                    "completedTick": None,
-                }
-            )
+            entry = entry_nodes[index % len(entry_nodes)]
+            tasks.append(self._build_task(topology, f"task-shuttle-{index + 1}", "shuttle", "cross_zone", source, station, entry, transfer_out, transfer_in, False, 2))
         return tasks
+
+    def _build_task(
+        self,
+        topology: dict[str, Any],
+        task_id: str,
+        robot_type: str,
+        mode: str,
+        source_node: str,
+        station_node: str,
+        entry_node: str,
+        handoff_node: str | None,
+        conveyor_exit_node: str | None,
+        urgent: bool,
+        priority: int,
+        *,
+        created_tick: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "id": task_id,
+            "robotType": robot_type,
+            "mode": mode,
+            "status": "pending",
+            "phase": "pending_assignment",
+            "phaseLabel": "待分配",
+            "sourceNode": source_node,
+            "targetNode": station_node,
+            "stationNode": station_node,
+            "entryNode": entry_node,
+            "handoffNode": handoff_node,
+            "conveyorExitNode": conveyor_exit_node,
+            "sourceCellId": node_to_cell_id(topology, source_node),
+            "targetCellId": node_to_cell_id(topology, station_node),
+            "stationCellId": node_to_cell_id(topology, station_node),
+            "entryCellId": node_to_cell_id(topology, entry_node),
+            "handoffCellId": node_to_cell_id(topology, handoff_node) if handoff_node else None,
+            "conveyorExitCellId": node_to_cell_id(topology, conveyor_exit_node) if conveyor_exit_node else None,
+            "stationResourceId": None,
+            "priority": priority,
+            "etaTicks": 0,
+            "urgent": urgent,
+            "assignedRobotId": None,
+            "remainingTicks": 0,
+            "history": [],
+            "createdTick": created_tick,
+            "startedTick": None,
+            "completedTick": None,
+        }
 
     async def _loop(self, runtime: RunRuntime) -> None:
         duration = runtime.scenario["durationTicks"]
@@ -350,10 +430,7 @@ class SimulationService:
 
         runtime.state["status"] = "stopped" if runtime.stopped else "completed"
         self._persist(runtime)
-        await self.hub.broadcast(
-            runtime.run_id,
-            {"type": "simulation_completed", "tick": runtime.state["tick"], "payload": runtime.metrics},
-        )
+        await self.hub.broadcast(runtime.run_id, {"type": "simulation_completed", "tick": runtime.state["tick"], "payload": runtime.metrics})
 
     def _run_offline(self, runtime: RunRuntime) -> None:
         duration = runtime.scenario["durationTicks"]
@@ -380,33 +457,34 @@ class SimulationService:
 
     def _inject_faults(self, runtime: RunRuntime, tick: int) -> None:
         config = runtime.scenario["faultInjection"]
-        if config.get("robotFailureTick") == tick:
-            target = config.get("robotFailureId") or runtime.state["robots"][0]["id"]
+        if config.get("robotFailureTick") == tick and runtime.state["robots"]:
+            target_id = config.get("robotFailureId") or runtime.state["robots"][0]["id"]
             for robot in runtime.state["robots"]:
-                if robot["id"] == target and not robot["failed"]:
-                    task = find_task(runtime.state["tasks"], robot["currentTaskId"])
-                    if task is not None and task["status"] != "completed":
-                        task["status"] = "pending"
-                        task["phase"] = "pending_assignment"
-                        task["phaseLabel"] = "待分配"
-                        task["assignedRobotId"] = None
-                        task["etaTicks"] = 0
-                        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-                    robot["failed"] = True
-                    robot["status"] = "failed"
-                    robot["phaseLabel"] = "设备故障"
-                    robot["currentTaskId"] = None
-                    robot["path"] = [robot["currentNode"]]
-                    self._emit_alert(
-                        runtime,
-                        tick,
-                        category="robot_fault",
-                        level="error",
-                        message=f"设备 {target} 在 tick {tick} 发生故障。",
-                        details={"robotId": target, "releasedTaskId": task["id"] if task else None},
-                        suggestion="将待处理任务重新分配给同类型空闲设备。",
-                    )
-                    break
+                if robot["id"] != target_id or robot["failed"]:
+                    continue
+                task = find_task(runtime.state["tasks"], robot["currentTaskId"])
+                if task and task["status"] != "completed":
+                    task["status"] = "pending"
+                    task["phase"] = "pending_assignment"
+                    task["phaseLabel"] = "待分配"
+                    task["assignedRobotId"] = None
+                    task["etaTicks"] = 0
+                    task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+                robot["failed"] = True
+                robot["status"] = "failed"
+                robot["phaseLabel"] = "设备故障"
+                robot["currentTaskId"] = None
+                robot["path"] = [robot["currentCellId"]]
+                self._emit_alert(
+                    runtime,
+                    tick,
+                    category="robot_fault",
+                    level="error",
+                    message=f"设备 {target_id} 在 tick {tick} 发生故障。",
+                    details={"robotId": target_id, "releasedTaskId": task["id"] if task else None},
+                    suggestion="将待处理任务重新分配给同类型空闲设备。",
+                )
+                break
 
         if config.get("conveyorJammedTick") == tick:
             conveyor = self._resource(runtime, "conveyor_segment")
@@ -424,81 +502,53 @@ class SimulationService:
 
     def _inject_urgent_order(self, runtime: RunRuntime, tick: int) -> None:
         urgent_tick = runtime.scenario["orderGenerator"].get("urgentInsertionTick")
-        existing_urgent = any(task["urgent"] and task["createdTick"] == urgent_tick for task in runtime.state["tasks"])
-        if urgent_tick == tick and not existing_urgent:
-            source = self._first_node(runtime.topology, {"storage", "buffer"}, fallback="")
-            station = self._first_node(runtime.topology, {"station"}, fallback=source)
-            entry = self._first_node(runtime.topology, {"entry"}, fallback=station)
-            task = {
-                "id": f"task-urgent-{tick}",
-                "robotType": "ctu",
-                "mode": "direct",
-                "status": "pending",
-                "phase": "pending_assignment",
-                "phaseLabel": "待分配",
-                "sourceNode": source,
-                "targetNode": station,
-                "stationNode": station,
-                "entryNode": entry,
-                "handoffNode": None,
-                "conveyorExitNode": None,
-                "stationResourceId": None,
-                "priority": 1,
-                "etaTicks": 0,
-                "urgent": True,
-                "assignedRobotId": None,
-                "remainingTicks": 0,
-                "history": [],
-                "createdTick": tick,
-                "startedTick": None,
-                "completedTick": None,
-            }
-            runtime.state["tasks"].insert(0, task)
-            self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "status": "pending", "urgent": True})
+        if urgent_tick != tick:
+            return
+        if any(task["urgent"] and task["createdTick"] == urgent_tick for task in runtime.state["tasks"]):
+            return
+        source_node = self._first_node(runtime.topology, {"storage", "buffer"})
+        station_node = self._first_node(runtime.topology, {"station"}, fallback=source_node)
+        entry_node = self._first_node(runtime.topology, {"entry"}, fallback=station_node)
+        if not source_node or not station_node or not entry_node:
+            return
+        task = self._build_task(runtime.topology, f"task-urgent-{tick}", "ctu", "direct", source_node, station_node, entry_node, None, None, True, 1, created_tick=tick)
+        runtime.state["tasks"].insert(0, task)
+        self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "status": "pending", "urgent": True})
 
     def _assign_tasks(self, runtime: RunRuntime) -> None:
         pending = [task for task in runtime.state["tasks"] if task["status"] == "pending"]
         if not pending:
             return
         pending.sort(key=lambda task: (task["priority"], task["id"]))
-        matches = assign_tasks(
-            runtime.scenario["dispatchPolicy"],
-            runtime.state["robots"],
-            pending,
-            runtime.topology,
-            runtime.scenario["pathPolicy"],
-        )
+        matches = assign_tasks(runtime.scenario["dispatchPolicy"], runtime.state["robots"], pending, runtime.topology, runtime.scenario["pathPolicy"])
         for robot_id, task_id in matches:
             robot = next(item for item in runtime.state["robots"] if item["id"] == robot_id)
             task = find_task(runtime.state["tasks"], task_id)
             if task is None:
                 continue
             phase = "pickup_from_ctu" if task["mode"] == "direct" else "pickup_from_shuttle"
-            path = shortest_path(runtime.topology, robot["currentNode"], task["sourceNode"], runtime.scenario["pathPolicy"])
-            task["assignedRobotId"] = robot_id
-            task["startedTick"] = runtime.state["tick"]
-            task["status"] = "assigned"
-            task["phase"] = phase
-            task["phaseLabel"] = self._phase_label(phase)
-            task["etaTicks"] = max(len(path) - 1, 1)
-            task["history"].append({"tick": runtime.state["tick"], "phase": task["phase"], "status": task["status"]})
-            robot["path"] = path if path else [robot["currentNode"]]
-            robot["targetNode"] = task["sourceNode"]
+            path_cells = shortest_path(runtime.topology, robot["currentCellId"], task["sourceCellId"], runtime.scenario["pathPolicy"])
+            if not path_cells:
+                continue
+            robot["path"] = [cell["id"] for cell in path_cells]
+            robot["targetCellId"] = task["sourceCellId"]
             robot["currentTaskId"] = task_id
             robot["status"] = "moving"
             robot["waitTicks"] = 0
-            robot["phaseLabel"] = task["phaseLabel"]
-            self._record_event(
-                runtime,
-                runtime.state["tick"],
-                "task_state_changed",
-                {"taskId": task_id, "status": "assigned", "robotId": robot_id, "phase": task["phase"]},
-            )
+            robot["phaseLabel"] = self._phase_label(phase)
+            task["assignedRobotId"] = robot_id
+            task["status"] = "assigned"
+            task["phase"] = phase
+            task["phaseLabel"] = self._phase_label(phase)
+            task["startedTick"] = runtime.state["tick"]
+            task["etaTicks"] = max(len(robot["path"]) - 1, 1)
+            task["history"].append({"tick": runtime.state["tick"], "phase": task["phase"], "status": task["status"]})
+            self._record_event(runtime, runtime.state["tick"], "task_state_changed", {"taskId": task_id, "status": "assigned", "robotId": robot_id, "phase": task["phase"]})
 
     def _move_robots(self, runtime: RunRuntime) -> None:
         movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle"}]
-        movable.sort(key=lambda robot: robot["id"])
-        occupied_nodes = {robot["currentNode"] for robot in runtime.state["robots"]}
+        movable.sort(key=lambda item: item["id"])
+        occupied_cells = {robot["currentCellId"] for robot in runtime.state["robots"]}
         reserved_targets: set[str] = set()
 
         for robot in movable:
@@ -506,14 +556,14 @@ class SimulationService:
             if task is None:
                 robot["status"] = "idle"
                 robot["phaseLabel"] = "待命"
-                robot["path"] = [robot["currentNode"]]
+                robot["path"] = [robot["currentCellId"]]
                 continue
 
             if task["phase"] in {"waiting_for_conveyor", "conveyor_transfer", "station_queue"}:
                 robot["status"] = "idle"
                 robot["phaseLabel"] = "待命"
                 robot["currentTaskId"] = None
-                robot["path"] = [robot["currentNode"]]
+                robot["path"] = [robot["currentCellId"]]
                 continue
 
             path = robot["path"]
@@ -521,32 +571,31 @@ class SimulationService:
                 self._advance_robot_phase(runtime, robot, task)
                 continue
 
-            current_node = robot["currentNode"]
-            next_node = path[1]
-            occupied_nodes.discard(current_node)
+            current_cell_id = robot["currentCellId"]
+            next_cell_id = path[1]
+            occupied_cells.discard(current_cell_id)
 
-            if next_node in occupied_nodes or next_node in reserved_targets:
+            if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
                 robot["status"] = "blocked"
                 robot["waitTicks"] += 1
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
-                occupied_nodes.add(current_node)
+                occupied_cells.add(current_cell_id)
                 continue
 
-            edge = self._find_edge(runtime.topology, current_node, next_node)
-            robot["status"] = "handoff" if edge and edge["type"] == "cross_zone" and task["mode"] == "cross_zone" else "moving"
-            robot["currentNode"] = next_node
+            robot["status"] = "handoff" if task["phase"] == "handoff_to_conveyor" else "moving"
+            robot["currentCellId"] = next_cell_id
+            robot["currentNode"] = next_cell_id
+            floor, row, col = parse_cell_id(next_cell_id)
+            robot["currentFloor"] = floor
+            robot["currentRow"] = row
+            robot["currentCol"] = col
             robot["path"] = path[1:]
             robot["battery"] = max(10.0, robot["battery"] - 0.35)
             robot["waitTicks"] = 0
             robot["phaseLabel"] = task["phaseLabel"]
-            occupied_nodes.add(next_node)
-            reserved_targets.add(next_node)
-            self._record_event(
-                runtime,
-                runtime.state["tick"],
-                "robot_position",
-                {"robotId": robot["id"], "nodeId": robot["currentNode"], "status": robot["status"]},
-            )
+            occupied_cells.add(next_cell_id)
+            reserved_targets.add(next_cell_id)
+            self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "status": robot["status"]})
 
             if len(robot["path"]) <= 1:
                 self._advance_robot_phase(runtime, robot, task)
@@ -554,26 +603,14 @@ class SimulationService:
     def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
         tick = runtime.state["tick"]
         if task["phase"] == "pickup_from_ctu":
-            task["phase"] = "delivery_to_station"
-            task["phaseLabel"] = self._phase_label(task["phase"])
-            task["etaTicks"] = 0
-            robot["path"] = shortest_path(runtime.topology, robot["currentNode"], task["stationNode"], runtime.scenario["pathPolicy"])
-            robot["targetNode"] = task["stationNode"]
-            robot["status"] = "moving"
-            robot["phaseLabel"] = task["phaseLabel"]
-            task["etaTicks"] = max(len(robot["path"]) - 1, 1)
+            self._set_robot_leg(runtime, robot, task, "delivery_to_station", task["stationCellId"])
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
 
         if task["phase"] == "pickup_from_shuttle":
-            task["phase"] = "handoff_to_conveyor"
-            task["phaseLabel"] = self._phase_label(task["phase"])
-            robot["path"] = shortest_path(runtime.topology, robot["currentNode"], task["handoffNode"], runtime.scenario["pathPolicy"])
-            robot["targetNode"] = task["handoffNode"]
+            self._set_robot_leg(runtime, robot, task, "handoff_to_conveyor", task["handoffCellId"])
             robot["status"] = "handoff"
-            robot["phaseLabel"] = task["phaseLabel"]
-            task["etaTicks"] = max(len(robot["path"]) - 1, 1)
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
@@ -585,10 +622,9 @@ class SimulationService:
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
             robot["currentTaskId"] = None
-            robot["path"] = [robot["currentNode"]]
-            queue = runtime.state["queues"]["conveyor"]
-            if task["id"] not in queue:
-                queue.append(task["id"])
+            robot["path"] = [robot["currentCellId"]]
+            if task["id"] not in runtime.state["queues"]["conveyor"]:
+                runtime.state["queues"]["conveyor"].append(task["id"])
             self._sync_resource_queues(runtime)
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
@@ -600,16 +636,27 @@ class SimulationService:
             task["phaseLabel"] = self._phase_label(task["phase"])
             task["remainingTicks"] = 1
             task["stationResourceId"] = self._resolve_station_resource_id(runtime, task)
-            queue = runtime.state["queues"]["station"]
-            if task["id"] not in queue:
-                queue.append(task["id"])
+            if task["id"] not in runtime.state["queues"]["station"]:
+                runtime.state["queues"]["station"].append(task["id"])
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
             robot["currentTaskId"] = None
-            robot["path"] = [robot["currentNode"]]
+            robot["path"] = [robot["currentCellId"]]
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._sync_resource_queues(runtime)
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+
+    def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None) -> None:
+        if not target_cell_id:
+            return
+        path_cells = shortest_path(runtime.topology, robot["currentCellId"], target_cell_id, runtime.scenario["pathPolicy"])
+        robot["path"] = [cell["id"] for cell in path_cells] if path_cells else [robot["currentCellId"]]
+        robot["targetCellId"] = target_cell_id
+        robot["status"] = "moving"
+        robot["phaseLabel"] = self._phase_label(phase)
+        task["phase"] = phase
+        task["phaseLabel"] = self._phase_label(phase)
+        task["etaTicks"] = max(len(robot["path"]) - 1, 1)
 
     def _process_conveyor(self, runtime: RunRuntime) -> None:
         conveyor = self._resource(runtime, "conveyor_segment")
@@ -648,9 +695,8 @@ class SimulationService:
                 task["phase"] = "station_queue"
                 task["phaseLabel"] = self._phase_label(task["phase"])
                 task["remainingTicks"] = 1
-                station_queue = runtime.state["queues"]["station"]
-                if task_id not in station_queue:
-                    station_queue.append(task_id)
+                if task_id not in runtime.state["queues"]["station"]:
+                    runtime.state["queues"]["station"].append(task_id)
                 task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
                 self._record_event(runtime, tick, "task_state_changed", {"taskId": task_id, "phase": task["phase"], "status": task["status"]})
                 self._record_event(runtime, tick, "resource_occupied", {"resourceId": conveyor["id"], "taskId": task_id, "action": "leave"})
@@ -667,14 +713,7 @@ class SimulationService:
 
         for station_resource in station_resources:
             while len(station_resource["occupiedBy"]) < station_resource["capacity"]:
-                task_id = next(
-                    (
-                        queued_task_id
-                        for queued_task_id in queue
-                        if self._task_station_resource_id(runtime, queued_task_id) == station_resource["id"]
-                    ),
-                    None,
-                )
+                task_id = next((queued_task_id for queued_task_id in queue if self._task_station_resource_id(runtime, queued_task_id) == station_resource["id"]), None)
                 if task_id is None:
                     break
                 queue.remove(task_id)
@@ -683,12 +722,7 @@ class SimulationService:
                     continue
                 station_resource["occupiedBy"].append(task_id)
                 task["remainingTicks"] = max(task.get("remainingTicks", 1), 1)
-                self._record_event(
-                    runtime,
-                    tick,
-                    "resource_occupied",
-                    {"resourceId": station_resource["id"], "taskId": task_id, "action": "enter"},
-                )
+                self._record_event(runtime, tick, "resource_occupied", {"resourceId": station_resource["id"], "taskId": task_id, "action": "enter"})
 
             for task_id in list(station_resource["occupiedBy"]):
                 task = find_task(runtime.state["tasks"], task_id)
@@ -708,12 +742,7 @@ class SimulationService:
                     if task.get("urgent"):
                         runtime.metrics["urgentOrdersHandled"] += 1
                     self._record_event(runtime, tick, "task_state_changed", {"taskId": task_id, "phase": task["phase"], "status": task["status"]})
-                    self._record_event(
-                        runtime,
-                        tick,
-                        "resource_occupied",
-                        {"resourceId": station_resource["id"], "taskId": task_id, "action": "leave"},
-                    )
+                    self._record_event(runtime, tick, "resource_occupied", {"resourceId": station_resource["id"], "taskId": task_id, "action": "leave"})
 
         self._sync_resource_queues(runtime)
 
@@ -728,8 +757,8 @@ class SimulationService:
                 waiting_chain.append(
                     {
                         "robotId": robot["id"],
-                        "currentNode": robot["currentNode"],
-                        "nextNode": robot["path"][1] if len(robot["path"]) > 1 else robot["currentNode"],
+                        "currentCellId": robot["currentCellId"],
+                        "nextCellId": robot["path"][1] if len(robot["path"]) > 1 else robot["currentCellId"],
                         "taskId": task["id"] if task else None,
                         "phase": task["phase"] if task else None,
                     }
@@ -746,26 +775,24 @@ class SimulationService:
                 runtime.metrics["deadlocksDetected"] += 1
                 self._record_event(runtime, tick, "deadlock_detected", {"waitingChain": waiting_chain, "message": "检测到潜在死锁"})
 
-        conveyor_queue = runtime.state["queues"]["conveyor"]
-        station_queue = runtime.state["queues"]["station"]
-        if len(conveyor_queue) >= 2 and self._emit_alert(
+        if len(runtime.state["queues"]["conveyor"]) >= 2 and self._emit_alert(
             runtime,
             tick,
             category="conveyor_congestion",
             level="warning",
             message="输送线等待队列持续增长。",
-            details={"queueDepth": len(conveyor_queue), "tasks": conveyor_queue[:]},
+            details={"queueDepth": len(runtime.state["queues"]["conveyor"]), "tasks": runtime.state["queues"]["conveyor"][:]},
             suggestion="增加缓存位容量，或降低跨区任务的放行速度。",
         ):
             runtime.metrics["congestionEvents"] += 1
 
-        if len(station_queue) >= 2 and self._emit_alert(
+        if len(runtime.state["queues"]["station"]) >= 2 and self._emit_alert(
             runtime,
             tick,
             category="station_blockage",
             level="info",
             message="站台排队加剧，交付节拍出现拥堵。",
-            details={"queueDepth": len(station_queue), "tasks": station_queue[:]},
+            details={"queueDepth": len(runtime.state["queues"]["station"]), "tasks": runtime.state["queues"]["station"][:]},
             suggestion="优先释放站台资源，或降低直送任务的放行速度。",
         ):
             runtime.metrics["congestionEvents"] += 1
@@ -777,7 +804,6 @@ class SimulationService:
         completed = [task for task in runtime.state["tasks"] if task["completedTick"] is not None and task["startedTick"] is not None]
         conveyor = self._resource(runtime, "conveyor_segment")
         buffer_resource = self._resource(runtime, "buffer_slot")
-
         conveyor_capacity = max(conveyor["capacity"], 1) if conveyor else 1
         completed_durations = [task["completedTick"] - task["startedTick"] for task in completed]
 
@@ -802,41 +828,36 @@ class SimulationService:
     def _resources_by_type(self, runtime: RunRuntime, resource_type: str) -> list[dict[str, Any]]:
         return [resource for resource in runtime.state["resources"] if resource["type"] == resource_type]
 
-    def _resource_by_id(self, runtime: RunRuntime, resource_id: str | None) -> dict[str, Any] | None:
-        if not resource_id:
-            return None
-        return next((resource for resource in runtime.state["resources"] if resource["id"] == resource_id), None)
-
     def _sync_resource_queues(self, runtime: RunRuntime) -> None:
         conveyor = self._resource(runtime, "conveyor_segment")
         if conveyor:
             conveyor["queue"] = runtime.state["queues"]["conveyor"][:]
 
-        waiting_for_conveyor = [
-            task["id"]
-            for task in runtime.state["tasks"]
-            if task["phase"] == "waiting_for_conveyor" and task["status"] == "waiting_for_conveyor"
-        ]
+        waiting_for_conveyor = [task["id"] for task in runtime.state["tasks"] if task["phase"] == "waiting_for_conveyor" and task["status"] == "waiting_for_conveyor"]
         buffer_resource = self._resource(runtime, "buffer_slot")
         if buffer_resource:
             buffer_resource["occupiedBy"] = waiting_for_conveyor[: buffer_resource["capacity"]]
-            runtime.state["queues"]["buffer"] = waiting_for_conveyor[:]
             buffer_resource["queue"] = waiting_for_conveyor[:]
+            runtime.state["queues"]["buffer"] = waiting_for_conveyor[:]
 
         for station_resource in self._resources_by_type(runtime, "station"):
-            station_resource["queue"] = [
-                task_id
-                for task_id in runtime.state["queues"]["station"]
-                if self._task_station_resource_id(runtime, task_id) == station_resource["id"]
-            ]
+            station_resource["queue"] = [task_id for task_id in runtime.state["queues"]["station"] if self._task_station_resource_id(runtime, task_id) == station_resource["id"]]
 
-    def _find_edge(self, topology: dict[str, Any], current: str, next_node: str) -> dict[str, Any] | None:
-        for edge in topology["edges"]:
-            if edge["from"] == current and edge["to"] == next_node:
-                return edge
-            if edge.get("bidirectional", True) and edge["from"] == next_node and edge["to"] == current:
-                return edge
-        return None
+    def _resolve_station_resource_id(self, runtime: RunRuntime, task: dict[str, Any]) -> str | None:
+        target_station = task.get("stationNode") or task.get("targetNode")
+        for resource in self._resources_by_type(runtime, "station"):
+            if target_station in resource.get("nodeIds", []):
+                return resource["id"]
+        stations = self._resources_by_type(runtime, "station")
+        return stations[0]["id"] if stations else None
+
+    def _task_station_resource_id(self, runtime: RunRuntime, task_id: str) -> str | None:
+        task = find_task(runtime.state["tasks"], task_id)
+        if task is None:
+            return None
+        if task.get("stationResourceId"):
+            return task["stationResourceId"]
+        return self._resolve_station_resource_id(runtime, task)
 
     def _record_event(self, runtime: RunRuntime, tick: int, event_type: str, payload: dict[str, Any]) -> None:
         if runtime.record_events:
@@ -857,14 +878,7 @@ class SimulationService:
         if tick - last_tick < 4:
             return False
         runtime.alert_memory[category] = tick
-        alert = {
-            "category": category,
-            "level": level,
-            "message": message,
-            "tick": tick,
-            "details": details,
-            "suggestion": suggestion,
-        }
+        alert = {"category": category, "level": level, "message": message, "tick": tick, "details": details, "suggestion": suggestion}
         runtime.alerts.append(alert)
         runtime.state["alerts"] = runtime.alerts[-10:]
         self._record_event(runtime, tick, "alert", alert)
@@ -884,23 +898,7 @@ class SimulationService:
         }
         return mapping.get(phase, phase)
 
-    def _resolve_station_resource_id(self, runtime: RunRuntime, task: dict[str, Any]) -> str | None:
-        target_station = task.get("stationNode") or task.get("targetNode")
-        for resource in self._resources_by_type(runtime, "station"):
-            if target_station in resource.get("nodeIds", []):
-                return resource["id"]
-        station_resources = self._resources_by_type(runtime, "station")
-        return station_resources[0]["id"] if station_resources else None
-
-    def _task_station_resource_id(self, runtime: RunRuntime, task_id: str) -> str | None:
-        task = find_task(runtime.state["tasks"], task_id)
-        if task is None:
-            return None
-        if task.get("stationResourceId"):
-            return task["stationResourceId"]
-        return self._resolve_station_resource_id(runtime, task)
-
-    def _first_node(self, topology: dict[str, Any], node_types: set[str], *, fallback: str) -> str:
+    def _first_node(self, topology: dict[str, Any], node_types: set[str], *, fallback: str = "") -> str:
         return next((node["id"] for node in topology["nodes"] if node["type"] in node_types), fallback)
 
     async def _broadcast_tick(self, runtime: RunRuntime) -> None:
@@ -919,10 +917,7 @@ class SimulationService:
         )
         await self.hub.broadcast(runtime.run_id, {"type": "tick", "tick": tick, "payload": runtime.state})
         await self.hub.broadcast(runtime.run_id, {"type": "metrics_snapshot", "tick": tick, "payload": runtime.metrics})
-        await self.hub.broadcast(
-            runtime.run_id,
-            {"type": "resource_occupied", "tick": tick, "payload": {"resources": runtime.state["resources"]}},
-        )
+        await self.hub.broadcast(runtime.run_id, {"type": "resource_occupied", "tick": tick, "payload": {"resources": runtime.state["resources"]}})
         for robot in runtime.state["robots"]:
             await self.hub.broadcast(
                 runtime.run_id,
@@ -931,7 +926,10 @@ class SimulationService:
                     "tick": tick,
                     "payload": {
                         "robotId": robot["id"],
-                        "nodeId": robot["currentNode"],
+                        "cellId": robot["currentCellId"],
+                        "floor": robot.get("currentFloor", "1F"),
+                        "row": robot["currentRow"],
+                        "col": robot["currentCol"],
                         "status": robot["status"],
                         "phaseLabel": robot["phaseLabel"],
                     },

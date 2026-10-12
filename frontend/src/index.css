@@ -321,7 +321,7 @@ thead th {
 }
 
 .topology-canvas-card {
-  min-height: 720px;
+  min-height: 0;
 }
 
 .topology-editor {
@@ -444,6 +444,30 @@ select {
   gap: 10px;
 }
 
+.robot-card-invalid {
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.12) inset;
+}
+
+.scenario-warning-banner {
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 16px;
+}
+
+.scenario-warning-banner p {
+  margin: 4px 0 0;
+}
+
+.field-error,
+.form-error {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.84rem;
+  color: var(--danger);
+}
+
 .dual-column {
   display: grid;
   grid-template-columns: 1.5fr 1fr;
@@ -513,6 +537,1232 @@ select {
   background: linear-gradient(90deg, rgba(249, 115, 22, 0.14), rgba(249, 115, 22, 0.03));
 }
 
+.grid-tool-row {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.topology-control-grid,
+.topology-inline-fields {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 12px;
+}
+
+.topology-control-grid {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 16px;
+}
+
+.topology-palette,
+.topology-legend {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.topology-palette-group,
+.legend-group {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.topology-inline-fields {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+}
+
+.grid-section-title {
+  margin: 0;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.legend-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.legend-color {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.18);
+}
+
+.legend-color-road { background: rgba(11, 18, 28, 0.82); }
+.legend-color-blocked { background: rgba(109, 40, 40, 0.72); }
+.legend-color-conveyor { background: rgba(59, 130, 246, 0.78); }
+.tool-chip {
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--text);
+  padding: 9px 14px;
+  transition: transform 180ms ease, border-color 180ms ease, background-color 180ms ease;
+}
+
+.tool-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(249, 115, 22, 0.3);
+}
+
+.tool-chip-active {
+  color: white;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), #fb923c);
+  box-shadow: 0 12px 26px rgba(249, 115, 22, 0.22);
+}
+
+.inline-field {
+  display: grid;
+  gap: 8px;
+}
+
+.inline-field input,
+.inline-field select {
+  min-width: 0;
+}
+
+.topology-guide {
+  margin-top: 0;
+}
+
+.topology-page-shell {
+  grid-template-columns: 1fr;
+}
+
+.topology-settings-shell {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border-radius: 22px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.topology-settings-shell-collapsed {
+  padding-bottom: 12px;
+}
+
+.topology-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.topology-settings-header p {
+  margin: 0;
+}
+
+.topology-settings-toggle {
+  flex-shrink: 0;
+}
+
+.topology-studio-layout {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.topology-studio-layout-focus .topology-settings-shell {
+  display: none;
+}
+
+.topology-object-sidebar,
+.topology-properties-card,
+.topology-empty-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 24px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.topology-object-sidebar {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 48px);
+  overflow: hidden;
+  align-self: start;
+}
+
+.topology-sidebar-group,
+.topology-properties-column {
+  display: grid;
+  gap: 14px;
+}
+
+.topology-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.topology-object-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.topology-object-grid-compact {
+  grid-template-columns: 1fr;
+}
+
+.topology-object-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 132px;
+  padding: 12px;
+  text-align: left;
+  border-radius: 20px;
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  background: rgba(255, 255, 255, 0.86);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.topology-object-card-compact {
+  justify-items: center;
+  min-height: 88px;
+  padding: 10px 8px;
+  text-align: center;
+}
+
+.topology-object-card strong {
+  font-family: 'Fira Code', monospace;
+  font-size: 0.9rem;
+}
+
+.topology-object-card span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.topology-object-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(249, 115, 22, 0.3);
+}
+
+.topology-object-card-active {
+  border-color: rgba(249, 115, 22, 0.38);
+  background: linear-gradient(180deg, rgba(249, 115, 22, 0.12), rgba(255, 255, 255, 0.9));
+  box-shadow: 0 16px 32px rgba(249, 115, 22, 0.12);
+}
+
+.topology-sidebar-footer {
+  display: grid;
+  gap: 10px;
+  flex-shrink: 0;
+  padding-top: 4px;
+  border-top: 1px solid rgba(100, 116, 139, 0.1);
+}
+
+.topology-board-column {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.topology-board-meta-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.topology-board-meta-item,
+.topology-board-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.topology-board-status-label,
+.topology-property-eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.topology-board-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.topology-grid-board-shell {
+  min-height: 0;
+}
+
+.topology-property-hero {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.topology-property-hero h3 {
+  margin: 4px 0;
+  font-family: 'Fira Code', monospace;
+  font-size: 1rem;
+}
+
+.topology-property-note {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(248, 250, 252, 0.86);
+}
+
+.topology-property-note p,
+.topology-property-note strong {
+  margin: 0;
+}
+
+.topology-resource-mini-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.topology-resource-mini-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.08);
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.topology-empty-panel {
+  min-height: 240px;
+  align-content: center;
+}
+
+.topology-properties-column {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: min(360px, calc(100vw - 48px));
+  max-height: calc(100vh - 180px);
+  overflow: auto;
+  padding: 16px;
+  border-radius: 24px;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(100% + 20px));
+  transition: transform 180ms ease, opacity 180ms ease;
+  z-index: 8;
+}
+
+.topology-properties-column-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.topology-property-drawer-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.topology-property-drawer-header p {
+  margin: 0;
+}
+
+.topology-property-drawer-close {
+  flex-shrink: 0;
+}
+
+.topology-glyph {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0f172a;
+  flex-shrink: 0;
+}
+
+.topology-glyph-card {
+  width: 42px;
+  height: 42px;
+}
+
+.topology-glyph-panel {
+  width: 58px;
+  height: 58px;
+}
+
+.topology-glyph-board {
+  width: 32px;
+  height: 32px;
+}
+
+.topology-glyph > span {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.topology-glyph-line,
+.topology-glyph-cross,
+.topology-glyph-road-lane,
+.topology-glyph-conveyor-track,
+.topology-glyph-station-deck,
+.topology-glyph-intersection-bar,
+.topology-glyph-block-bar,
+.topology-glyph-gate-bar {
+  background: currentColor;
+}
+
+.topology-glyph-line {
+  border-radius: 999px;
+  opacity: 0.9;
+}
+
+.topology-glyph-line-top,
+.topology-glyph-line-bottom {
+  width: 40%;
+  height: 2px;
+  left: 30%;
+}
+
+.topology-glyph-line-left,
+.topology-glyph-line-right {
+  width: 2px;
+  height: 40%;
+  top: 30%;
+}
+
+.topology-glyph-line-top { top: 16%; }
+.topology-glyph-line-bottom { bottom: 16%; }
+.topology-glyph-line-left { left: 16%; }
+.topology-glyph-line-right { right: 16%; }
+
+.topology-glyph-center-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.topology-glyph-road-lane {
+  width: 64%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.92);
+  box-shadow: 0 0 0 2px rgba(51, 65, 85, 0.18);
+}
+
+.topology-glyph-cross {
+  width: 70%;
+  height: 3px;
+  border-radius: 999px;
+}
+
+.topology-glyph-cross-a { transform: rotate(45deg); }
+.topology-glyph-cross-b { transform: rotate(-45deg); }
+
+.topology-glyph-block-bar {
+  width: 78%;
+  height: 78%;
+  border: 2px solid rgba(248, 250, 252, 0.25);
+  border-radius: 8px;
+}
+
+.topology-glyph-conveyor-track {
+  width: 72%;
+  height: 26%;
+  border-radius: 999px;
+  background: rgba(191, 219, 254, 0.98);
+  box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.4);
+}
+
+.topology-glyph-conveyor-arrow,
+.topology-glyph-entry-arrow,
+.topology-glyph-gate-arrow,
+.topology-glyph-lift-arrow {
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+
+.topology-glyph-conveyor-arrow {
+  border-width: 6px 0 6px 8px;
+  border-color: transparent transparent transparent rgba(15, 23, 42, 0.9);
+}
+
+.topology-glyph-conveyor[data-direction='right'] .topology-glyph-conveyor-arrow,
+.topology-glyph[data-direction='right'] .topology-glyph-conveyor-arrow {
+  right: 10%;
+}
+
+.topology-glyph[data-direction='left'] .topology-glyph-conveyor-arrow {
+  left: 10%;
+  transform: rotate(180deg);
+}
+
+.topology-glyph[data-direction='up'] .topology-glyph-conveyor-arrow {
+  top: 10%;
+  transform: rotate(-90deg);
+}
+
+.topology-glyph[data-direction='down'] .topology-glyph-conveyor-arrow {
+  bottom: 10%;
+  transform: rotate(90deg);
+}
+
+.topology-glyph-storage-frame {
+  width: 72%;
+  height: 72%;
+  border: 2px solid rgba(15, 23, 42, 0.9);
+  border-radius: 8px;
+}
+
+.topology-glyph-storage-slot {
+  width: 18%;
+  height: 18%;
+  border-radius: 3px;
+  background: rgba(249, 115, 22, 0.9);
+}
+
+.topology-glyph-storage-slot-a { left: 24%; top: 24%; }
+.topology-glyph-storage-slot-b { right: 24%; top: 24%; }
+.topology-glyph-storage-slot-c { left: 24%; bottom: 24%; }
+.topology-glyph-storage-slot-d { right: 24%; bottom: 24%; }
+
+.topology-glyph-station-bay {
+  width: 72%;
+  height: 68%;
+  border-left: 4px solid rgba(15, 23, 42, 0.92);
+  border-right: 4px solid rgba(15, 23, 42, 0.92);
+  border-bottom: 4px solid rgba(15, 23, 42, 0.92);
+  border-radius: 0 0 12px 12px;
+}
+
+.topology-glyph-station-deck {
+  width: 56%;
+  height: 4px;
+  top: 20%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.topology-glyph-buffer-layer {
+  width: 66%;
+  height: 18%;
+  border: 2px solid rgba(15, 23, 42, 0.88);
+  border-radius: 5px;
+  background: rgba(196, 181, 253, 0.45);
+}
+
+.topology-glyph-buffer-layer-top { top: 26%; }
+.topology-glyph-buffer-layer-bottom { bottom: 26%; }
+
+.topology-glyph-entry-frame {
+  width: 66%;
+  height: 72%;
+  border: 2px solid rgba(15, 23, 42, 0.88);
+  border-radius: 8px;
+  border-right-color: rgba(15, 23, 42, 0.28);
+}
+
+.topology-glyph-entry-arrow {
+  right: 14%;
+  border-width: 6px 0 6px 8px;
+  border-color: transparent transparent transparent rgba(15, 23, 42, 0.92);
+}
+
+.topology-glyph-gate-post {
+  width: 4px;
+  height: 62%;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.92);
+  top: 20%;
+}
+
+.topology-glyph-gate-post-left { left: 22%; }
+.topology-glyph-gate-post-right { right: 22%; }
+
+.topology-glyph-gate-bar {
+  width: 50%;
+  height: 4px;
+  top: 28%;
+  border-radius: 999px;
+}
+
+.topology-glyph-gate-arrow {
+  right: 18%;
+  bottom: 20%;
+  border-width: 5px 0 5px 7px;
+  border-color: transparent transparent transparent rgba(29, 78, 216, 0.94);
+}
+
+.topology-glyph-intersection-bar-x {
+  width: 68%;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.topology-glyph-intersection-bar-y {
+  width: 4px;
+  height: 68%;
+  border-radius: 999px;
+}
+
+.topology-glyph-ctu-body {
+  left: 18%;
+  top: 28%;
+  width: 64%;
+  height: 44%;
+  border-radius: 10px;
+  border: 2px solid rgba(14, 116, 144, 0.94);
+  background: linear-gradient(180deg, rgba(224, 242, 254, 0.95), rgba(125, 211, 252, 0.72));
+}
+
+.topology-glyph-ctu-cabin {
+  top: 38%;
+  left: 30%;
+  width: 28%;
+  height: 18%;
+  border-radius: 999px;
+  background: rgba(8, 47, 73, 0.88);
+}
+
+.topology-glyph-ctu-wheel {
+  width: 16%;
+  height: 7px;
+  right: 12%;
+  border-radius: 999px;
+  background: rgba(8, 47, 73, 0.88);
+}
+
+.topology-glyph-ctu-wheel-top { top: 28%; }
+.topology-glyph-ctu-wheel-bottom { bottom: 28%; }
+
+.topology-glyph-ctu-sensor {
+  width: 8px;
+  height: 8px;
+  left: 12%;
+  top: calc(50% - 4px);
+  border-radius: 999px;
+  background: rgba(249, 115, 22, 0.96);
+  box-shadow: 0 0 0 4px rgba(249, 115, 22, 0.12);
+}
+
+.topology-glyph-shuttle-rail {
+  left: 19%;
+  width: 62%;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.92);
+}
+
+.topology-glyph-shuttle-rail-top { top: 26%; }
+.topology-glyph-shuttle-rail-bottom { bottom: 26%; }
+
+.topology-glyph-shuttle-body {
+  left: 18%;
+  top: 30%;
+  width: 64%;
+  height: 40%;
+  border-radius: 10px;
+  border: 2px solid rgba(109, 40, 217, 0.94);
+  background: linear-gradient(180deg, rgba(243, 232, 255, 0.95), rgba(196, 181, 253, 0.82));
+}
+
+.topology-glyph-shuttle-carriage {
+  top: 38%;
+  left: 38%;
+  width: 24%;
+  height: 24%;
+  border-radius: 8px;
+  background: rgba(91, 33, 182, 0.18);
+  border: 2px solid rgba(91, 33, 182, 0.92);
+}
+
+.topology-glyph-shuttle-indicator {
+  width: 8px;
+  height: 8px;
+  top: 16%;
+  right: 14%;
+  border-radius: 999px;
+  background: rgba(124, 58, 237, 0.92);
+  box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+}
+
+.topology-glyph-lift-shaft {
+  width: 34%;
+  height: 74%;
+  border: 2px solid rgba(15, 23, 42, 0.9);
+  border-radius: 999px;
+  background: rgba(224, 231, 255, 0.62);
+}
+
+.topology-glyph-lift-arrow-up {
+  top: 14%;
+  border-width: 0 5px 7px 5px;
+  border-color: transparent transparent rgba(15, 23, 42, 0.9) transparent;
+}
+
+.topology-glyph-lift-arrow-down {
+  bottom: 14%;
+  border-width: 7px 5px 0 5px;
+  border-color: rgba(15, 23, 42, 0.9) transparent transparent transparent;
+}
+
+.topology-glyph-lift-transfer-deck {
+  left: 30%;
+  right: 30%;
+  top: 40%;
+  height: 28%;
+  border-radius: 6px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.24);
+}
+
+.topology-glyph-lift-transfer-arrow {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.topology-glyph-lift-transfer-arrow-up {
+  top: 8%;
+  border-width: 0 6px 8px 6px;
+  border-color: transparent transparent rgba(15, 23, 42, 0.9) transparent;
+}
+
+.topology-glyph-lift-transfer-arrow-down {
+  bottom: 8%;
+  border-width: 8px 6px 0 6px;
+  border-color: rgba(15, 23, 42, 0.9) transparent transparent transparent;
+}
+
+.topology-glyph-turn-transfer-ring {
+  width: 54%;
+  height: 54%;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.3);
+}
+
+.topology-glyph-turn-transfer-arm {
+  width: 46%;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  left: 50%;
+  top: 50%;
+}
+
+.topology-glyph-turn-transfer-arm-a {
+  transform: translate(-50%, -50%);
+}
+
+.topology-glyph-turn-transfer-arm-b {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.topology-glyph-road,
+.topology-glyph-select,
+.topology-glyph-erase,
+.topology-glyph-blocked,
+.topology-glyph-intersection {
+  color: #1f2937;
+}
+
+.topology-glyph-conveyor,
+.topology-glyph-conveyor_gate {
+  color: #1d4ed8;
+}
+
+.topology-glyph-storage { color: #334155; }
+.topology-glyph-station { color: #b45309; }
+.topology-glyph-buffer { color: #4d7c0f; }
+.topology-glyph-entry { color: #0f766e; }
+.topology-glyph-ctu_robot { color: #0f766e; }
+.topology-glyph-shuttle_robot { color: #6d28d9; }
+.topology-glyph-lift { color: #7c3aed; }
+.topology-glyph-lift_transfer { color: #c2410c; }
+.topology-glyph-turn_transfer { color: #0f766e; }
+
+.topology-glyph-emphasis {
+  filter: drop-shadow(0 0 8px rgba(250, 204, 21, 0.5));
+}
+
+.grid-scene-object-layer-node .topology-glyph {
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.97);
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  box-shadow:
+    0 6px 14px rgba(2, 6, 23, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.65);
+}
+
+.grid-scene-object-layer-node .topology-glyph-storage {
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(255, 247, 237, 0.94));
+}
+
+.grid-scene-object-layer-node .topology-glyph-station {
+  background: linear-gradient(180deg, rgba(255, 247, 237, 0.98), rgba(254, 215, 170, 0.4));
+}
+
+.grid-scene-object-layer-node .topology-glyph-buffer {
+  background: linear-gradient(180deg, rgba(247, 254, 231, 0.98), rgba(190, 242, 100, 0.28));
+}
+
+.grid-scene-object-layer-node .topology-glyph-entry {
+  background: linear-gradient(180deg, rgba(240, 253, 250, 0.98), rgba(94, 234, 212, 0.24));
+}
+
+.grid-scene-object-layer-node .topology-glyph-conveyor_gate {
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.98), rgba(96, 165, 250, 0.26));
+}
+
+.grid-scene-object-layer-node .topology-glyph-intersection {
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(226, 232, 240, 0.8));
+}
+
+.grid-scene-object-layer-node .topology-glyph-ctu_robot {
+  background: linear-gradient(180deg, rgba(240, 249, 255, 0.98), rgba(125, 211, 252, 0.3));
+}
+
+.grid-scene-object-layer-node .topology-glyph-shuttle_robot {
+  background: linear-gradient(180deg, rgba(245, 243, 255, 0.98), rgba(221, 214, 254, 0.42));
+}
+
+.grid-scene-object-layer-node .topology-glyph-lift {
+  background: linear-gradient(180deg, rgba(245, 243, 255, 0.98), rgba(196, 181, 253, 0.28));
+}
+
+.grid-scene-object-layer-node .topology-glyph-lift_transfer {
+  background: linear-gradient(180deg, rgba(255, 247, 237, 0.98), rgba(251, 146, 60, 0.28));
+}
+
+.grid-scene-object-layer-node .topology-glyph-turn_transfer {
+  background: linear-gradient(180deg, rgba(240, 253, 250, 0.98), rgba(45, 212, 191, 0.26));
+}
+
+.grid-editor-canvas {
+  position: relative;
+  z-index: 1;
+  overflow: hidden;
+  padding: 10px;
+  border-radius: 24px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.72)),
+    linear-gradient(135deg, rgba(249, 115, 22, 0.05), rgba(100, 116, 139, 0.04));
+}
+
+.grid-scene-shell {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+}
+
+.grid-scene-shell-content-aware {
+  align-content: start;
+}
+
+.grid-scene-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.grid-scene-control-button {
+  min-width: 44px;
+  padding: 8px 10px;
+}
+
+.grid-scene-zoom-indicator,
+.grid-hint-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.grid-hint-chip-active {
+  color: white;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), #fb923c);
+}
+
+.grid-scene-viewport {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  touch-action: none;
+  user-select: none;
+  padding: 4px;
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.04), rgba(15, 23, 42, 0.02));
+}
+
+.grid-scene-viewport-screen-fill {
+  min-height: 70vh;
+  max-height: calc(100vh - 190px);
+}
+
+.grid-scene-viewport-content-aware {
+  height: auto;
+}
+
+.grid-scene-viewport-pannable {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.grid-scene-viewport-dragging {
+  cursor: grabbing;
+}
+
+.grid-scene-transform {
+  position: absolute;
+  inset: 0 0 auto 0;
+}
+
+.grid-scene-empty-state {
+  position: absolute;
+  inset: 18px;
+  z-index: 5;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  border: 1px dashed rgba(100, 116, 139, 0.28);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.66), rgba(248, 250, 252, 0.5));
+  color: var(--text);
+  pointer-events: none;
+}
+
+.grid-scene-empty-state strong,
+.grid-scene-empty-state p {
+  margin: 0;
+}
+
+.grid-scene-empty-state p {
+  max-width: 360px;
+  color: var(--muted);
+}
+
+.grid-scene-board {
+  position: relative;
+  background: #0f1620;
+  border: 1px solid rgba(59, 130, 246, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.9);
+}
+
+.grid-scene-grid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  z-index: 2;
+}
+
+.grid-scene-zones {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.grid-zone {
+  position: relative;
+  position: absolute;
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.05);
+}
+
+.grid-zone-label {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  color: rgba(226, 232, 240, 0.24);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.grid-zone-ctu {
+  background: rgba(22, 78, 99, 0.18);
+}
+
+.grid-zone-shuttle {
+  background: rgba(88, 28, 135, 0.12);
+}
+
+.grid-zone-conveyor {
+  background: rgba(30, 64, 175, 0.06);
+}
+
+.grid-zone-station {
+  background: rgba(127, 29, 29, 0.12);
+}
+
+.grid-zone-buffer {
+  background: rgba(120, 53, 15, 0.1);
+}
+
+.grid-zone-mixed {
+  background: rgba(71, 85, 105, 0.1);
+}
+
+.grid-scene-cell {
+  position: relative;
+  z-index: 2;
+  padding: 0;
+  margin: 0;
+  border: 1px solid rgba(51, 93, 141, 0.28);
+  background: rgba(9, 14, 22, 0.72);
+  transition: background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.grid-scene-cell:hover {
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.25);
+}
+
+.grid-scene-cell-default,
+.grid-scene-cell-road {
+  background: rgba(11, 18, 28, 0.7);
+}
+
+.grid-scene-cell-blocked {
+  background: rgba(109, 40, 40, 0.72);
+}
+
+.grid-scene-cell-conveyor {
+  background: rgba(59, 130, 246, 0.78);
+}
+
+.grid-scene-cell-selected {
+  box-shadow: inset 0 0 0 2px rgba(250, 204, 21, 0.95);
+}
+
+.grid-scene-cell-node-selected {
+  box-shadow:
+    inset 0 0 0 2px rgba(249, 115, 22, 0.95),
+    inset 0 0 0 4px rgba(255, 255, 255, 0.2);
+}
+
+.grid-scene-cell-readonly {
+  cursor: default;
+}
+
+.grid-scene-object-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.grid-scene-object-layer-node {
+  z-index: 4;
+}
+
+.grid-scene-object-layer-medium {
+  z-index: 3;
+}
+
+.grid-scene-arrow {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.grid-scene-node-layer {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.grid-scene-node-mark {
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #f8fafc;
+  font-size: 0.56rem;
+  font-weight: 700;
+}
+
+.grid-scene-node-mark-storage { background: #334155; }
+.grid-scene-node-mark-station { background: #b45309; }
+.grid-scene-node-mark-buffer { background: #4d7c0f; }
+.grid-scene-node-mark-entry { background: #0f766e; }
+.grid-scene-node-mark-conveyor_gate { background: #1d4ed8; }
+.grid-scene-node-mark-intersection { background: #475569; }
+.grid-scene-node-mark-lift { background: #7c3aed; }
+
+.grid-scene-resource-mark {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.28);
+  color: #fef3c7;
+  border: 1px solid rgba(253, 224, 71, 0.35);
+  font-size: 0.6rem;
+  font-weight: 700;
+  z-index: 6;
+  box-shadow: 0 4px 10px rgba(2, 6, 23, 0.28);
+}
+
+.grid-scene-runtime-robot-layer {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 4px;
+  z-index: 7;
+}
+
+.grid-scene-runtime-robot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(248, 250, 252, 0.22);
+  box-shadow:
+    0 6px 14px rgba(2, 6, 23, 0.32),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.grid-scene-runtime-robot .topology-glyph {
+  width: 26px;
+  height: 26px;
+}
+
+.grid-scene-runtime-robot-failed {
+  background: linear-gradient(180deg, rgba(249, 115, 22, 0.9), rgba(220, 38, 38, 0.9));
+}
+
+.topology-glyph-runtime-failed {
+  filter: saturate(0.8) brightness(0.92);
+}
+
+.grid-scene-coord {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  opacity: 0;
+  color: rgba(191, 219, 254, 0.55);
+  font-family: 'Fira Code', monospace;
+  font-size: 0.52rem;
+  transition: opacity 120ms ease;
+}
+
+.grid-scene-cell:hover .grid-scene-coord,
+.grid-scene-cell-selected .grid-scene-coord {
+  opacity: 1;
+}
+
+.grid-scene-cell-readonly:hover {
+  box-shadow: none;
+}
+
 .validation-panel {
   display: grid;
   gap: 14px;
@@ -575,10 +1825,757 @@ select {
   .kpi-grid,
   .field-grid,
   .robot-grid,
+  .topology-control-grid,
+  .topology-inline-fields,
+  .topology-studio-layout,
   .dual-column,
   .resource-grid,
   .heatmap-grid {
     grid-template-columns: 1fr;
+  }
+
+  .topology-object-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .topology-property-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-studio-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-object-sidebar {
+    position: static;
+    top: auto;
+    display: grid;
+    flex-direction: initial;
+    height: auto;
+    order: 2;
+  }
+
+  .topology-sidebar-group {
+    display: grid;
+    flex: initial;
+    overflow: visible;
+  }
+
+  .topology-object-grid {
+    flex: initial;
+    overflow: visible;
+  }
+
+  .topology-board-column {
+    order: 1;
+  }
+
+  .topology-board-meta-strip {
+    align-items: flex-start;
+  }
+
+  .topology-properties-column {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+    max-height: calc(100vh - 120px);
+  }
+
+  .grid-editor-canvas,
+  .grid-scene-viewport {
+    min-height: 62vh;
+    max-height: calc(100vh - 140px);
+  }
+}
+
+/* ============================================================
+   v1 拓扑编辑器工作台（TopologyPage / 调色板 / 检查器 / 校验）
+   ============================================================ */
+
+.topology-editor-page .topology-editor-canvas {
+  height: 100%;
+}
+
+.topology-editor-page .topo-canvas-loading {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--muted);
+}
+
+/* --- 工作台三栏布局：调色板 | 画布 | 检查器 --- */
+.topo-workspace {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr) 352px;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+  height: calc(100vh - 320px);
+  min-height: 540px;
+}
+
+.topo-center-column {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.topo-canvas-panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #0f1620;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+}
+
+/* 3D 场景填满面板 */
+.topology-editor-canvas canvas {
+  display: block;
+  outline: none;
+}
+
+/* 框选/拖动预览矩形 */
+.grid-scene-selection-box {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  border: 1px dashed rgba(56, 189, 248, 0.9);
+  background: rgba(56, 189, 248, 0.16);
+  box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.25) inset;
+}
+
+/* --- 顶部元信息上下文条（楼层 / 画布 / 视图） --- */
+.topo-context-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  min-height: 40px;
+  padding: 0 2px;
+}
+
+.topo-context-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.topo-context-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+}
+
+.topology-floor-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.topology-floor-chip {
+  min-width: 40px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+  font-family: 'Fira Code', monospace;
+  font-size: 0.84rem;
+}
+
+.topology-floor-chip-active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), #fb923c);
+  box-shadow: 0 8px 20px rgba(249, 115, 22, 0.22);
+}
+
+.topo-mini-button {
+  min-width: 26px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  align-self: stretch;
+}
+
+.topo-context-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.topo-context-number input {
+  width: 54px;
+  height: 28px;
+  border-radius: 9px;
+}
+
+.topo-context-hints {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.78rem;
+  flex-wrap: wrap;
+}
+
+.topo-context-hints span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* --- 顶部 CRUD 工具栏 --- */
+.topo-toolbar {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 12px 18px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 20px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.topo-toolbar-group {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.topo-toolbar-actions {
+  justify-content: flex-end;
+}
+
+.topo-toolbar-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 360px;
+}
+
+.topo-name-field,
+.topo-record-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.topo-name-field span,
+.topo-record-field span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.06em;
+}
+
+.topo-name-field input,
+.topo-record-field select {
+  min-width: 0;
+  height: 38px;
+}
+
+.topo-name-field input {
+  width: 240px;
+}
+
+.topo-record-field select {
+  width: 280px;
+}
+
+.topo-danger-button {
+  color: var(--danger);
+}
+
+.topo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.topo-badge-dirty {
+  color: #92400e;
+  background: rgba(251, 191, 36, 0.16);
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
+.topo-badge-new {
+  color: #1e3a8a;
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(37, 99, 235, 0.25);
+}
+
+.topo-badge-ok {
+  color: #166534;
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(22, 163, 74, 0.25);
+}
+
+.topo-badge-error {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.1);
+  border-color: rgba(220, 38, 38, 0.25);
+}
+
+.topo-notice {
+  display: inline-flex;
+  align-items: center;
+  max-width: 320px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topo-notice-info {
+  color: #1e3a8a;
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.topo-notice-warn {
+  color: #92400e;
+  background: rgba(251, 191, 36, 0.14);
+}
+
+.topo-notice-error {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.1);
+}
+
+/* --- 左侧对象调色板 --- */
+.topo-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 20px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.topo-palette-group {
+  display: grid;
+  gap: 6px;
+}
+
+.topo-palette-group-title {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.topo-tool-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 3px 8px;
+  border-radius: 13px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.86rem;
+  text-align: left;
+}
+
+.topo-tool-button .topology-glyph {
+  color: #334155;
+}
+
+.topo-tool-button:hover {
+  background: rgba(100, 116, 139, 0.08);
+}
+
+.topo-tool-button-active {
+  border-color: rgba(249, 115, 22, 0.45);
+  background: linear-gradient(90deg, rgba(249, 115, 22, 0.16), rgba(249, 115, 22, 0.05));
+  color: #9a3412;
+}
+
+.topo-zone-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.topo-zone-button:hover {
+  background: rgba(100, 116, 139, 0.08);
+}
+
+.topo-zone-button-active {
+  border-color: rgba(249, 115, 22, 0.45);
+  background: rgba(249, 115, 22, 0.12);
+  color: #9a3412;
+}
+
+.topo-zone-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.35);
+}
+
+.topo-zone-swatch-ctu { background: #0e7490; }
+.topo-zone-swatch-shuttle { background: #b45309; }
+.topo-zone-swatch-conveyor { background: #2563eb; }
+.topo-zone-swatch-station { background: #7c3aed; }
+.topo-zone-swatch-buffer { background: #16a34a; }
+.topo-zone-swatch-mixed { background: #64748b; }
+
+.topo-palette-hint {
+  margin: 2px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(100, 116, 139, 0.18);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+/* --- 右侧检查器（属性 / 校验） --- */
+.topo-inspector {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 20px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.topo-inspector-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 10px 0;
+}
+
+.topo-inspector-tab {
+  flex: 1;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 12px 12px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.topo-inspector-tab.active {
+  color: #9a3412;
+  background: rgba(249, 115, 22, 0.1);
+  font-weight: 600;
+}
+
+.topo-inspector-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 14px;
+}
+
+.topo-property-body {
+  display: grid;
+  gap: 12px;
+}
+
+.topo-property-empty {
+  justify-items: center;
+  text-align: center;
+  padding-top: 34px;
+  color: var(--muted);
+}
+
+.topo-property-legend {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(100, 116, 139, 0.07);
+  font-size: 0.86rem;
+}
+
+.topo-property-legend p {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+
+.topo-property-hero-text {
+  min-width: 0;
+}
+
+.topo-property-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 0.9rem;
+}
+
+.topo-property-row span {
+  color: var(--muted);
+}
+
+.topo-property-row strong {
+  font-family: 'Fira Code', monospace;
+  color: var(--text);
+}
+
+.topo-property-field {
+  display: grid;
+  gap: 5px;
+}
+
+.topo-property-field > span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.05em;
+}
+
+.topo-property-field input,
+.topo-property-field select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+}
+
+.topo-property-danger {
+  justify-self: start;
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.06);
+}
+
+.topo-property-bind {
+  justify-self: start;
+  color: #166534;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.topo-property-stack,
+.topo-property-note-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.topo-property-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.topo-property-geometry {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.topo-property-zone-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.topo-property-zone-metrics span {
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.08);
+  color: var(--muted);
+  font-family: 'Fira Code', monospace;
+  font-size: 0.74rem;
+}
+
+/* --- 校验面板 --- */
+.topo-validation-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.topo-validation-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.topo-validation-counts {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-right: auto;
+}
+
+.topo-validation-section {
+  display: grid;
+  gap: 8px;
+}
+
+.topo-validation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.topo-validation-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.topo-validation-error {
+  border-color: rgba(220, 38, 38, 0.28);
+}
+
+.topo-validation-warning {
+  border-color: rgba(217, 119, 6, 0.26);
+}
+
+.topo-validation-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.topo-validation-text p {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.topo-validation-error .topo-validation-text > svg {
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+.topo-validation-warning .topo-validation-text > svg {
+  color: #d97706;
+  flex-shrink: 0;
+}
+
+.topo-validation-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.topo-validation-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  background: rgba(100, 116, 139, 0.08);
+  color: var(--muted);
+  font-family: 'Fira Code', monospace;
+  font-size: 0.74rem;
+}
+
+.topo-validation-chip:hover {
+  color: #9a3412;
+  border-color: rgba(249, 115, 22, 0.4);
+  background: rgba(249, 115, 22, 0.08);
+}
+
+.topo-validation-empty {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 40px 12px;
+  text-align: center;
+  color: var(--muted);
+}
+
+/* --- 通用：旋转动画 --- */
+.spin {
+  animation: topo-spin 900ms linear infinite;
+}
+
+@keyframes topo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1280px) {
+  .topo-workspace {
+    grid-template-columns: 168px minmax(0, 1fr) 300px;
+  }
+
+  .topo-name-field input {
+    width: 180px;
+  }
+
+  .topo-record-field select {
+    width: 210px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .topo-workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: auto;
+  }
+
+  .topo-palette {
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .topo-center-column {
+    min-height: 60vh;
+  }
+
+  .topo-inspector {
+    min-height: 320px;
   }
 }
 
@@ -590,4 +2587,33 @@ select {
     transition: none !important;
     scroll-behavior: auto !important;
   }
+}
+
+.topology-floor-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.topology-floor-chip {
+  min-height: 30px;
+  padding-inline: 10px;
+  border-radius: 999px;
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+.topology-floor-chip-active {
+  border-color: #f97316;
+  background: rgba(249, 115, 22, 0.14);
+  color: #c2410c;
+}
+
+.simulation-board-note {
+  margin: 4px 0 2px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(100, 116, 139, 0.12);
+  background: rgba(255, 255, 255, 0.64);
 }

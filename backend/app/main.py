@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router, ws_router
 from .core.db import init_db
-from .services.runtime import repo
+from .services.runtime import repo  # noqa: F401  (kept for v1 seeding side-effect)
 
 
 @asynccontextmanager

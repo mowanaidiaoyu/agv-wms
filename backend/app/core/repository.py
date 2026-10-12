@@ -33,6 +33,14 @@ class Repository:
             row = conn.execute("SELECT * FROM topologies WHERE id = ?", (topology_id,)).fetchone()
         return self._decode_payload(row_to_dict(row)) if row else None
 
+    def delete_topology(self, topology_id: str) -> dict[str, Any] | None:
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM topologies WHERE id = ?", (topology_id,)).fetchone()
+            if not row:
+                return None
+            conn.execute("DELETE FROM topologies WHERE id = ?", (topology_id,))
+        return self._decode_payload(row_to_dict(row))
+
     def upsert_scenario(self, scenario_id: str, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = utc_now()
         with get_conn() as conn:
@@ -59,6 +67,9 @@ class Repository:
         with get_conn() as conn:
             rows = conn.execute("SELECT * FROM scenarios ORDER BY updated_at DESC").fetchall()
         return [self._decode_payload(row_to_dict(row)) for row in rows]
+
+    def topology_has_scenarios(self, topology_id: str) -> bool:
+        return any(item["payload"].get("topologyId") == topology_id for item in self.list_scenarios())
 
     def create_run(
         self,

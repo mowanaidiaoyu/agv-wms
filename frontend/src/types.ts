@@ -1,6 +1,36 @@
 export type ZoneType = 'ctu' | 'shuttle' | 'conveyor' | 'buffer' | 'station' | 'mixed'
-export type NodeType = 'intersection' | 'storage' | 'buffer' | 'station' | 'lift' | 'entry' | 'conveyor_gate'
-export type EdgeType = 'aisle' | 'conveyor' | 'lift' | 'cross_zone'
+export type CellType = 'road' | 'blocked' | 'conveyor'
+export type ConveyorDirection = 'right' | 'left' | 'up' | 'down'
+export type NodeType =
+  | 'intersection'
+  | 'storage'
+  | 'buffer'
+  | 'station'
+  | 'lift'
+  | 'entry'
+  | 'conveyor_gate'
+  | 'ctu_robot'
+  | 'shuttle_robot'
+  | 'lift_transfer'
+  | 'turn_transfer'
+export type EditorObjectType =
+  | 'select'
+  | 'batch'
+  | 'erase'
+  | 'road'
+  | 'blocked'
+  | 'conveyor'
+  | 'storage'
+  | 'station'
+  | 'buffer'
+  | 'entry'
+  | 'conveyor_gate'
+  | 'intersection'
+  | 'lift'
+  | 'ctu_robot'
+  | 'shuttle_robot'
+  | 'lift_transfer'
+  | 'turn_transfer'
 export type ResourceType = 'conveyor_segment' | 'buffer_slot' | 'lift' | 'station'
 export type RobotType = 'ctu' | 'shuttle'
 export type DispatchPolicy = 'greedy' | 'hungarian'
@@ -10,39 +40,55 @@ export interface Zone {
   id: string
   label: string
   type: ZoneType
+  floor?: string
   x: number
   y: number
   width: number
   height: number
+  /** 四向车库每层巷道位掩码：`"行,列"` → bit0..bit3 对应货架层 1..4 是否为巷道 */
+  slotAisles?: Record<string, number>
+  /** 四向车库被删除的 2×2 槽位（`"行,列"` 列表）：该位置不再渲染货架/巷道，视为空位 */
+  removedSlots?: string[]
+}
+
+export interface GridConfig {
+  rows: number
+  cols: number
+  cellSize: number
+  originX: number
+  originY: number
+}
+
+export interface TopologyCell {
+  id: string
+  floor?: string
+  row: number
+  col: number
+  type: CellType
+  zoneId?: string | null
+  cost: number
+  walkable: boolean
+  conveyorDirection?: ConveyorDirection | null
+  levels?: number
 }
 
 export interface TopologyNode {
   id: string
   type: NodeType
-  x: number
-  y: number
+  floor?: string
+  row: number
+  col: number
   zoneId?: string | null
   capacity: number
   label: string
-}
-
-export interface TopologyEdge {
-  id: string
-  from: string
-  to: string
-  type: EdgeType
-  length: number
-  bidirectional: boolean
-  capacity: number
-  speedLimit: number
 }
 
 export interface Resource {
   id: string
   type: ResourceType
   label: string
+  cellIds: string[]
   nodeIds: string[]
-  edgeIds: string[]
   capacity: number
   meta: Record<string, unknown>
 }
@@ -54,10 +100,12 @@ export interface TopologyPayload {
     version: string
     viewport: { x: number; y: number; zoom: number }
     tags: string[]
+    floors?: string[]
   }
+  grid: GridConfig
   zones: Zone[]
+  cells: TopologyCell[]
   nodes: TopologyNode[]
-  edges: TopologyEdge[]
   resources: Resource[]
 }
 
@@ -98,7 +146,7 @@ export interface ScenarioPayload {
     robotFailureTick: number | null
     robotFailureId: string | null
     conveyorJammedTick: number | null
-    conveyorEdgeId: string | null
+    conveyorCellId: string | null
   }
   seed: number
   durationTicks: number
@@ -133,10 +181,14 @@ export interface SimulationRobot {
   id: string
   type: RobotType
   currentNode: string
+  currentCellId: string
+  currentFloor?: string
+  currentRow: number
+  currentCol: number
   status: string
   battery: number
   path: string[]
-  targetNode: string
+  targetCellId: string
   currentTaskId: string | null
   waitTicks: number
   failed: boolean
@@ -162,6 +214,12 @@ export interface SimulationTask {
   entryNode: string
   handoffNode: string | null
   conveyorExitNode: string | null
+  sourceCellId: string
+  targetCellId: string
+  stationCellId: string
+  entryCellId: string
+  handoffCellId: string | null
+  conveyorExitCellId: string | null
   stationResourceId: string | null
   priority: number
   etaTicks: number
@@ -179,8 +237,8 @@ export interface SimulationResourceState {
   label: string
   type: ResourceType
   capacity: number
+  cellIds: string[]
   nodeIds: string[]
-  edgeIds: string[]
   occupiedBy: string[]
   queue: string[]
   meta: Record<string, unknown>

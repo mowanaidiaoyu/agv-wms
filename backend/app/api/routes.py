@@ -12,6 +12,8 @@ from ..schemas import (
     TopologyValidationResult,
 )
 from ..services.runtime import repo, simulation_service
+from ..services.scenario_sync import sync_scenario_with_topology_payload
+from ..services.simulation import validate_runtime_inputs
 from ..services.topology_validation import validate_topology_business_rules
 
 router = APIRouter(prefix=API_PREFIX)
@@ -53,16 +55,38 @@ def update_topology(topology_id: str, payload: TopologyPayload):
     return repo.upsert_topology(payload.id, payload.name, payload.model_dump(by_alias=True))
 
 
+@router.delete("/topologies/{topology_id}")
+def delete_topology(topology_id: str):
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    referencing = [item["name"] for item in repo.list_scenarios() if item["payload"].get("topologyId") == topology_id]
+    if referencing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该拓扑被 {len(referencing)} 个场景引用（{'、'.join(referencing)}），请先删除或改绑这些场景后再删除。",
+        )
+    return repo.delete_topology(topology_id)
+
+
 @router.get("/scenarios")
 def list_scenarios():
-    return repo.list_scenarios()
+    scenarios = repo.list_scenarios()
+    topologies = {item["id"]: item["payload"] for item in repo.list_topologies()}
+    for scenario in scenarios:
+        topology = topologies.get(scenario["payload"].get("topologyId"))
+        if topology:
+            scenario["payload"] = sync_scenario_with_topology_payload(topology, scenario["payload"])
+    return scenarios
 
 
 @router.post("/scenarios")
 def create_scenario(payload: ScenarioPayload):
-    if not repo.get_topology(payload.topologyId):
+    topology = repo.get_topology(payload.topologyId)
+    if not topology:
         raise HTTPException(status_code=400, detail="Referenced topology not found")
-    return repo.upsert_scenario(payload.id, payload.name, payload.model_dump())
+    synced_payload = sync_scenario_with_topology_payload(topology["payload"], payload.model_dump())
+    return repo.upsert_scenario(payload.id, payload.name, synced_payload)
 
 
 @router.get("/scenarios/{scenario_id}")
@@ -70,6 +94,9 @@ def get_scenario(scenario_id: str):
     scenario = repo.get_scenario(scenario_id)
     if not scenario:
         raise HTTPException(status_code=404, detail="Scenario not found")
+    topology = repo.get_topology(scenario["payload"].get("topologyId"))
+    if topology:
+        scenario["payload"] = sync_scenario_with_topology_payload(topology["payload"], scenario["payload"])
     return scenario
 
 
@@ -79,7 +106,12 @@ async def start_simulation(payload: dict[str, str]):
     scenario = repo.get_scenario(payload["scenarioId"])
     if not topology or not scenario:
         raise HTTPException(status_code=400, detail="Topology or scenario missing")
-    result = await simulation_service.start(topology["payload"], scenario["payload"])
+    synced_scenario_payload = sync_scenario_with_topology_payload(topology["payload"], scenario["payload"])
+    repo.upsert_scenario(scenario["id"], scenario["name"], synced_scenario_payload)
+    runtime_errors = validate_runtime_inputs(topology["payload"], synced_scenario_payload)
+    if runtime_errors:
+        raise HTTPException(status_code=400, detail=runtime_errors)
+    result = await simulation_service.start(topology["payload"], synced_scenario_payload)
     return result
 
 
@@ -139,7 +171,11 @@ def evaluate_algorithms(payload: AlgorithmEvaluationRequest):
     scenario = repo.get_scenario(payload.scenarioId)
     if not topology or not scenario:
         raise HTTPException(status_code=400, detail="Topology or scenario missing")
-    results = simulation_service.evaluate_algorithms(topology["payload"], scenario["payload"])
+    synced_scenario_payload = sync_scenario_with_topology_payload(topology["payload"], scenario["payload"])
+    runtime_errors = validate_runtime_inputs(topology["payload"], synced_scenario_payload)
+    if runtime_errors:
+        raise HTTPException(status_code=400, detail=runtime_errors)
+    results = simulation_service.evaluate_algorithms(topology["payload"], synced_scenario_payload)
     return {"topologyId": payload.topologyId, "scenarioId": payload.scenarioId, "results": results}
 
 

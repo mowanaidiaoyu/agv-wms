@@ -46,7 +46,7 @@ export function ReportsPage() {
 
   return (
     <div className="page-grid reports-grid">
-      <Surface title="回放与报告" subtitle="从事件时间轴、热力图和指标面板复盘一次协同调度运行。">
+      <Surface title="回放与报告" subtitle="从事件时间轴、热力图和指标面板复盘一次完整协同调度运行。">
         <div className="editor-toolbar">
           <select value={runId} onChange={(event) => setRunId(event.target.value)}>
             {runsQuery.data?.map((run) => (
@@ -57,6 +57,7 @@ export function ReportsPage() {
           </select>
           <button
             className="ghost-button"
+            type="button"
             onClick={() => {
               const payload = {
                 runId,
@@ -98,7 +99,7 @@ export function ReportsPage() {
         </div>
       </Surface>
 
-      <Surface title="输送线利用率趋势" subtitle="metrics_snapshot 事件回放。">
+      <Surface title="输送线利用率趋势" subtitle="基于 `metrics_snapshot` 事件回放运行过程。">
         <TrendChart data={trendData} dataKey="conveyor" color="#64748B" />
       </Surface>
 

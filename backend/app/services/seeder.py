@@ -11,7 +11,9 @@ def seed_defaults(repo: Repository) -> None:
     scenario_path = DATA_DIR / "sample_scenario.json"
     if topology_path.exists():
         topology = json.loads(topology_path.read_text(encoding="utf-8"))
-        repo.upsert_topology(topology["id"], topology["name"], topology)
+        if not repo.get_topology(topology["id"]):
+            repo.upsert_topology(topology["id"], topology["name"], topology)
     if scenario_path.exists():
         scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
-        repo.upsert_scenario(scenario["id"], scenario["name"], scenario)
+        if not repo.get_scenario(scenario["id"]):
+            repo.upsert_scenario(scenario["id"], scenario["name"], scenario)

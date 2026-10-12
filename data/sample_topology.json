@@ -1,462 +1,183 @@
 {
   "id": "topology-demo-01",
-  "name": "智能仓储协同调度示例拓扑",
+  "name": "Demo 6.6 Style Walk Map",
   "meta": {
-    "version": "1.0.0",
+    "version": "2.0.0",
     "viewport": {
       "x": 0,
       "y": 0,
-      "zoom": 0.85
+      "zoom": 1
     },
-    "tags": [
-      "mvp",
-      "ctu",
-      "shuttle",
-      "conveyor"
-    ]
+    "tags": ["grid", "6.6-style", "walk-map", "conveyor"],
+    "floors": ["1F"]
+  },
+  "grid": {
+    "rows": 12,
+    "cols": 14,
+    "cellSize": 32,
+    "originX": 0,
+    "originY": 0
   },
   "zones": [
-    {
-      "id": "zone-ctu",
-      "label": "CTU 拣选区",
-      "type": "ctu",
-      "x": 20,
-      "y": 40,
-      "width": 320,
-      "height": 300
-    },
-    {
-      "id": "zone-conveyor",
-      "label": "输送线与缓存区",
-      "type": "conveyor",
-      "x": 360,
-      "y": 100,
-      "width": 280,
-      "height": 180
-    },
-    {
-      "id": "zone-shuttle",
-      "label": "四向车库区",
-      "type": "shuttle",
-      "x": 680,
-      "y": 40,
-      "width": 320,
-      "height": 300
-    },
-    {
-      "id": "zone-station",
-      "label": "站台与入库口",
-      "type": "station",
-      "x": 360,
-      "y": 320,
-      "width": 280,
-      "height": 120
-    }
+    { "id": "zone-ctu", "label": "CTU Zone", "type": "ctu", "x": 0, "y": 0, "width": 5, "height": 12 },
+    { "id": "zone-conveyor", "label": "Main Conveyor", "type": "conveyor", "x": 2, "y": 4, "width": 10, "height": 3 },
+    { "id": "zone-shuttle", "label": "Shuttle Zone", "type": "shuttle", "x": 9, "y": 0, "width": 5, "height": 12 },
+    { "id": "zone-station", "label": "Station Zone", "type": "station", "x": 7, "y": 8, "width": 6, "height": 3 },
+    { "id": "zone-mixed", "label": "Main Aisle", "type": "mixed", "x": 5, "y": 0, "width": 4, "height": 12 }
+  ],
+  "cells": [
+    { "id": "cell-r1-c0", "row": 1, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c1", "row": 1, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c2", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c3", "row": 1, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c4", "row": 1, "col": 4, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c5", "row": 1, "col": 5, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c6", "row": 1, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c7", "row": 1, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c8", "row": 1, "col": 8, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c9", "row": 1, "col": 9, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c10", "row": 1, "col": 10, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c11", "row": 1, "col": 11, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c12", "row": 1, "col": 12, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r1-c13", "row": 1, "col": 13, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+
+    { "id": "cell-r3-c0", "row": 3, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c1", "row": 3, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c2", "row": 3, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c3", "row": 3, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c4", "row": 3, "col": 4, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c5", "row": 3, "col": 5, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c6", "row": 3, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c7", "row": 3, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c8", "row": 3, "col": 8, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c9", "row": 3, "col": 9, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c10", "row": 3, "col": 10, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c11", "row": 3, "col": 11, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c12", "row": 3, "col": 12, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r3-c13", "row": 3, "col": 13, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+
+    { "id": "cell-r7-c0", "row": 7, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c1", "row": 7, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c2", "row": 7, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c3", "row": 7, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c4", "row": 7, "col": 4, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c5", "row": 7, "col": 5, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c6", "row": 7, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c7", "row": 7, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c8", "row": 7, "col": 8, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c9", "row": 7, "col": 9, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c10", "row": 7, "col": 10, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c11", "row": 7, "col": 11, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c12", "row": 7, "col": 12, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r7-c13", "row": 7, "col": 13, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+
+    { "id": "cell-r9-c0", "row": 9, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c1", "row": 9, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c2", "row": 9, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c3", "row": 9, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c4", "row": 9, "col": 4, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c5", "row": 9, "col": 5, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c6", "row": 9, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c7", "row": 9, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c8", "row": 9, "col": 8, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c9", "row": 9, "col": 9, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c10", "row": 9, "col": 10, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c11", "row": 9, "col": 11, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c12", "row": 9, "col": 12, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+    { "id": "cell-r9-c13", "row": 9, "col": 13, "type": "road", "zoneId": "zone-shuttle", "cost": 1, "walkable": true },
+
+    { "id": "cell-r0-c6", "row": 0, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r0-c7", "row": 0, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r2-c6", "row": 2, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r2-c7", "row": 2, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r4-c6", "row": 4, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r4-c7", "row": 4, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r6-c6", "row": 6, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r6-c7", "row": 6, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r8-c6", "row": 8, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r8-c7", "row": 8, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r10-c6", "row": 10, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r10-c7", "row": 10, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r11-c6", "row": 11, "col": 6, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+    { "id": "cell-r11-c7", "row": 11, "col": 7, "type": "road", "zoneId": "zone-mixed", "cost": 1, "walkable": true },
+
+    { "id": "cell-r5-c2", "row": 5, "col": 2, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c3", "row": 5, "col": 3, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c4", "row": 5, "col": 4, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c5", "row": 5, "col": 5, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c6", "row": 5, "col": 6, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c7", "row": 5, "col": 7, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c8", "row": 5, "col": 8, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c9", "row": 5, "col": 9, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c10", "row": 5, "col": 10, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" },
+    { "id": "cell-r5-c11", "row": 5, "col": 11, "type": "conveyor", "zoneId": "zone-conveyor", "cost": 0.6, "walkable": true, "conveyorDirection": "right" }
   ],
   "nodes": [
-    {
-      "id": "node-ctu-a1",
-      "type": "storage",
-      "x": 120,
-      "y": 90,
-      "zoneId": "zone-ctu",
-      "capacity": 1,
-      "label": "CTU-A1"
-    },
-    {
-      "id": "node-ctu-a2",
-      "type": "storage",
-      "x": 120,
-      "y": 180,
-      "zoneId": "zone-ctu",
-      "capacity": 1,
-      "label": "CTU-A2"
-    },
-    {
-      "id": "node-ctu-a3",
-      "type": "storage",
-      "x": 120,
-      "y": 270,
-      "zoneId": "zone-ctu",
-      "capacity": 1,
-      "label": "CTU-A3"
-    },
-    {
-      "id": "node-ctu-x1",
-      "type": "intersection",
-      "x": 240,
-      "y": 90,
-      "zoneId": "zone-ctu",
-      "capacity": 2,
-      "label": "CTU-X1"
-    },
-    {
-      "id": "node-ctu-x2",
-      "type": "intersection",
-      "x": 240,
-      "y": 180,
-      "zoneId": "zone-ctu",
-      "capacity": 2,
-      "label": "CTU-X2"
-    },
-    {
-      "id": "node-ctu-x3",
-      "type": "intersection",
-      "x": 240,
-      "y": 270,
-      "zoneId": "zone-ctu",
-      "capacity": 2,
-      "label": "CTU-X3"
-    },
-    {
-      "id": "node-transfer-in",
-      "type": "conveyor_gate",
-      "x": 420,
-      "y": 160,
-      "zoneId": "zone-conveyor",
-      "capacity": 2,
-      "label": "Transfer-IN"
-    },
-    {
-      "id": "node-transfer-mid",
-      "type": "buffer",
-      "x": 500,
-      "y": 160,
-      "zoneId": "zone-conveyor",
-      "capacity": 4,
-      "label": "Buffer-MID"
-    },
-    {
-      "id": "node-transfer-out",
-      "type": "conveyor_gate",
-      "x": 580,
-      "y": 160,
-      "zoneId": "zone-conveyor",
-      "capacity": 2,
-      "label": "Transfer-OUT"
-    },
-    {
-      "id": "node-buffer-1",
-      "type": "buffer",
-      "x": 500,
-      "y": 230,
-      "zoneId": "zone-conveyor",
-      "capacity": 3,
-      "label": "BUF-01"
-    },
-    {
-      "id": "node-shuttle-s1",
-      "type": "storage",
-      "x": 780,
-      "y": 90,
-      "zoneId": "zone-shuttle",
-      "capacity": 1,
-      "label": "S-01"
-    },
-    {
-      "id": "node-shuttle-s2",
-      "type": "storage",
-      "x": 780,
-      "y": 180,
-      "zoneId": "zone-shuttle",
-      "capacity": 1,
-      "label": "S-02"
-    },
-    {
-      "id": "node-shuttle-s3",
-      "type": "storage",
-      "x": 780,
-      "y": 270,
-      "zoneId": "zone-shuttle",
-      "capacity": 1,
-      "label": "S-03"
-    },
-    {
-      "id": "node-shuttle-x1",
-      "type": "intersection",
-      "x": 900,
-      "y": 90,
-      "zoneId": "zone-shuttle",
-      "capacity": 2,
-      "label": "SH-X1"
-    },
-    {
-      "id": "node-shuttle-x2",
-      "type": "intersection",
-      "x": 900,
-      "y": 180,
-      "zoneId": "zone-shuttle",
-      "capacity": 2,
-      "label": "SH-X2"
-    },
-    {
-      "id": "node-shuttle-x3",
-      "type": "intersection",
-      "x": 900,
-      "y": 270,
-      "zoneId": "zone-shuttle",
-      "capacity": 2,
-      "label": "SH-X3"
-    },
-    {
-      "id": "node-entry-1",
-      "type": "entry",
-      "x": 420,
-      "y": 360,
-      "zoneId": "zone-station",
-      "capacity": 2,
-      "label": "Entry-01"
-    },
-    {
-      "id": "node-station-1",
-      "type": "station",
-      "x": 500,
-      "y": 360,
-      "zoneId": "zone-station",
-      "capacity": 2,
-      "label": "Station-01"
-    },
-    {
-      "id": "node-station-2",
-      "type": "station",
-      "x": 580,
-      "y": 360,
-      "zoneId": "zone-station",
-      "capacity": 2,
-      "label": "Station-02"
-    }
-  ],
-  "edges": [
-    {
-      "id": "edge-ctu-a1-x1",
-      "from": "node-ctu-a1",
-      "to": "node-ctu-x1",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.4
-    },
-    {
-      "id": "edge-ctu-a2-x2",
-      "from": "node-ctu-a2",
-      "to": "node-ctu-x2",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.4
-    },
-    {
-      "id": "edge-ctu-a3-x3",
-      "from": "node-ctu-a3",
-      "to": "node-ctu-x3",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.4
-    },
-    {
-      "id": "edge-ctu-x1-x2",
-      "from": "node-ctu-x1",
-      "to": "node-ctu-x2",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 2,
-      "speedLimit": 1.4
-    },
-    {
-      "id": "edge-ctu-x2-x3",
-      "from": "node-ctu-x2",
-      "to": "node-ctu-x3",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 2,
-      "speedLimit": 1.4
-    },
-    {
-      "id": "edge-ctu-x2-transfer",
-      "from": "node-ctu-x2",
-      "to": "node-transfer-in",
-      "type": "cross_zone",
-      "length": 1.5,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1
-    },
-    {
-      "id": "edge-transfer-in-mid",
-      "from": "node-transfer-in",
-      "to": "node-transfer-mid",
-      "type": "conveyor",
-      "length": 1,
-      "bidirectional": false,
-      "capacity": 2,
-      "speedLimit": 0.8
-    },
-    {
-      "id": "edge-transfer-mid-out",
-      "from": "node-transfer-mid",
-      "to": "node-transfer-out",
-      "type": "conveyor",
-      "length": 1,
-      "bidirectional": false,
-      "capacity": 2,
-      "speedLimit": 0.8
-    },
-    {
-      "id": "edge-transfer-mid-buffer",
-      "from": "node-transfer-mid",
-      "to": "node-buffer-1",
-      "type": "conveyor",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 2,
-      "speedLimit": 0.7
-    },
-    {
-      "id": "edge-transfer-out-sh2",
-      "from": "node-transfer-out",
-      "to": "node-shuttle-x2",
-      "type": "cross_zone",
-      "length": 1.5,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1
-    },
-    {
-      "id": "edge-sh1-x1",
-      "from": "node-shuttle-s1",
-      "to": "node-shuttle-x1",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.1
-    },
-    {
-      "id": "edge-sh2-x2",
-      "from": "node-shuttle-s2",
-      "to": "node-shuttle-x2",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.1
-    },
-    {
-      "id": "edge-sh3-x3",
-      "from": "node-shuttle-s3",
-      "to": "node-shuttle-x3",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1.1
-    },
-    {
-      "id": "edge-sh-x1-x2",
-      "from": "node-shuttle-x1",
-      "to": "node-shuttle-x2",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 2,
-      "speedLimit": 1.1
-    },
-    {
-      "id": "edge-sh-x2-x3",
-      "from": "node-shuttle-x2",
-      "to": "node-shuttle-x3",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 2,
-      "speedLimit": 1.1
-    },
-    {
-      "id": "edge-entry-station-1",
-      "from": "node-entry-1",
-      "to": "node-station-1",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1
-    },
-    {
-      "id": "edge-station-1-station-2",
-      "from": "node-station-1",
-      "to": "node-station-2",
-      "type": "aisle",
-      "length": 1,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1
-    },
-    {
-      "id": "edge-transfer-in-entry",
-      "from": "node-transfer-in",
-      "to": "node-entry-1",
-      "type": "cross_zone",
-      "length": 1.2,
-      "bidirectional": true,
-      "capacity": 1,
-      "speedLimit": 1
-    }
+    { "id": "node-ctu-a1", "type": "storage", "row": 1, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-A1" },
+    { "id": "node-ctu-a2", "type": "storage", "row": 3, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-A2" },
+    { "id": "node-ctu-a3", "type": "storage", "row": 7, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-A3" },
+    { "id": "node-ctu-a4", "type": "storage", "row": 9, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-A4" },
+    { "id": "ctu-01", "type": "ctu_robot", "row": 1, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01" },
+    { "id": "ctu-02", "type": "ctu_robot", "row": 9, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-02" },
+    { "id": "node-entry-1", "type": "entry", "row": 9, "col": 7, "zoneId": "zone-station", "capacity": 2, "label": "ENTRY-01" },
+    { "id": "node-transfer-in", "type": "conveyor_gate", "row": 5, "col": 2, "zoneId": "zone-conveyor", "capacity": 2, "label": "GATE-IN" },
+    { "id": "node-buffer-1", "type": "buffer", "row": 4, "col": 6, "zoneId": "zone-conveyor", "capacity": 3, "label": "BUF-01" },
+    { "id": "node-buffer-2", "type": "buffer", "row": 6, "col": 7, "zoneId": "zone-conveyor", "capacity": 3, "label": "BUF-02" },
+    { "id": "node-transfer-out", "type": "conveyor_gate", "row": 5, "col": 11, "zoneId": "zone-conveyor", "capacity": 2, "label": "GATE-OUT" },
+    { "id": "node-shuttle-s1", "type": "storage", "row": 1, "col": 12, "zoneId": "zone-shuttle", "capacity": 1, "label": "SH-A1" },
+    { "id": "node-shuttle-s2", "type": "storage", "row": 3, "col": 12, "zoneId": "zone-shuttle", "capacity": 1, "label": "SH-A2" },
+    { "id": "node-shuttle-s3", "type": "storage", "row": 7, "col": 12, "zoneId": "zone-shuttle", "capacity": 1, "label": "SH-A3" },
+    { "id": "node-shuttle-s4", "type": "storage", "row": 9, "col": 12, "zoneId": "zone-shuttle", "capacity": 1, "label": "SH-A4" },
+    { "id": "node-shuttle-x1", "type": "intersection", "row": 3, "col": 13, "zoneId": "zone-shuttle", "capacity": 2, "label": "SH-X1" },
+    { "id": "node-shuttle-x2", "type": "intersection", "row": 7, "col": 13, "zoneId": "zone-shuttle", "capacity": 2, "label": "SH-X2" },
+    { "id": "shuttle-01", "type": "shuttle_robot", "row": 1, "col": 10, "zoneId": "zone-shuttle", "capacity": 1, "label": "SHUTTLE-01" },
+    { "id": "shuttle-02", "type": "shuttle_robot", "row": 7, "col": 10, "zoneId": "zone-shuttle", "capacity": 1, "label": "SHUTTLE-02" },
+    { "id": "node-station-1", "type": "station", "row": 9, "col": 8, "zoneId": "zone-station", "capacity": 2, "label": "ST-01" },
+    { "id": "node-station-2", "type": "station", "row": 9, "col": 10, "zoneId": "zone-station", "capacity": 2, "label": "ST-02" }
   ],
   "resources": [
     {
       "id": "res-conveyor-main",
       "type": "conveyor_segment",
-      "label": "主输送线",
-      "nodeIds": [
-        "node-transfer-in",
-        "node-transfer-mid",
-        "node-transfer-out"
-      ],
-      "edgeIds": [
-        "edge-transfer-in-mid",
-        "edge-transfer-mid-out"
-      ],
+      "label": "Main Conveyor",
+      "cellIds": ["cell-r5-c2", "cell-r5-c3", "cell-r5-c4", "cell-r5-c5", "cell-r5-c6", "cell-r5-c7", "cell-r5-c8", "cell-r5-c9", "cell-r5-c10", "cell-r5-c11"],
+      "nodeIds": ["node-transfer-in", "node-transfer-out"],
       "capacity": 2,
-      "meta": {
-        "releaseThreshold": 0.8
-      }
+      "meta": { "releaseThreshold": 0.8 }
     },
     {
       "id": "res-buffer-01",
       "type": "buffer_slot",
-      "label": "缓存位 01",
-      "nodeIds": [
-        "node-buffer-1"
-      ],
-      "edgeIds": [],
+      "label": "Buffer 01",
+      "cellIds": ["cell-r4-c6"],
+      "nodeIds": ["node-buffer-1"],
+      "capacity": 3,
+      "meta": {}
+    },
+    {
+      "id": "res-buffer-02",
+      "type": "buffer_slot",
+      "label": "Buffer 02",
+      "cellIds": ["cell-r6-c7"],
+      "nodeIds": ["node-buffer-2"],
       "capacity": 3,
       "meta": {}
     },
     {
       "id": "res-station-01",
       "type": "station",
-      "label": "站台 01",
-      "nodeIds": [
-        "node-station-1"
-      ],
-      "edgeIds": [],
+      "label": "Station 01",
+      "cellIds": ["cell-r9-c8"],
+      "nodeIds": ["node-station-1"],
       "capacity": 2,
       "meta": {}
     },
     {
       "id": "res-station-02",
       "type": "station",
-      "label": "站台 02",
-      "nodeIds": [
-        "node-station-2"
-      ],
-      "edgeIds": [],
+      "label": "Station 02",
+      "cellIds": ["cell-r9-c10"],
+      "nodeIds": ["node-station-2"],
       "capacity": 2,
       "meta": {}
     }

@@ -22,7 +22,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   })
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`)
+    let message = `${response.status} ${response.statusText}`
+    try {
+      const payload = (await response.json()) as { detail?: string | string[] | Record<string, unknown> }
+      if (typeof payload.detail === 'string') {
+        message = payload.detail
+      } else if (Array.isArray(payload.detail)) {
+        message = payload.detail.join(' ')
+      } else if (payload.detail) {
+        message = JSON.stringify(payload.detail)
+      }
+    } catch {
+      // Ignore JSON parsing failures and keep the HTTP status message.
+    }
+    throw new Error(message)
   }
   return response.json() as Promise<T>
 }
@@ -50,6 +63,11 @@ export const api = {
     return request<StoredRecord<TopologyPayload>>(`/topologies/${payload.id}`, {
       method: 'PUT',
       body: JSON.stringify(payload),
+    })
+  },
+  deleteTopology(topologyId: string) {
+    return request<StoredRecord<TopologyPayload>>(`/topologies/${topologyId}`, {
+      method: 'DELETE',
     })
   },
   validateTopology(payload: TopologyPayload) {
