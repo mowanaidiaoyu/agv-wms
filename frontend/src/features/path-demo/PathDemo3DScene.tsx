@@ -1,10 +1,59 @@
-import { Canvas } from '@react-three/fiber'
+import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import type { ElementRef } from 'react'
 import { buildSceneSpec, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
+import { constrainCameraAboveGround, PATH_DEMO_ORBIT_SETTINGS } from './cameraControls'
 import type { TrajectoryPoint, TrajectorySample } from './types'
+
+function PathDemoCameraControls({
+  initialPosition,
+  initialTarget,
+  resetToken,
+}: {
+  initialPosition: [number, number, number]
+  initialTarget: [number, number, number]
+  resetToken: number
+}) {
+  const camera = useThree((state) => state.camera)
+  const controlsRef = useRef<ElementRef<typeof OrbitControls>>(null)
+
+  useEffect(() => {
+    const controls = controlsRef.current
+    camera.position.set(...initialPosition)
+    camera.up.set(0, 1, 0)
+    controls?.target.set(...initialTarget)
+    controls?.update()
+    controls?.saveState()
+  }, [camera, initialPosition, initialTarget, resetToken])
+
+  const keepCameraAboveGround = useCallback(() => {
+    const controls = controlsRef.current
+    if (controls && constrainCameraAboveGround(camera.position, controls.target)) controls.update()
+  }, [camera])
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      makeDefault
+      target={initialTarget}
+      enableDamping
+      dampingFactor={0.12}
+      enableRotate={PATH_DEMO_ORBIT_SETTINGS.enableRotate}
+      enableZoom={PATH_DEMO_ORBIT_SETTINGS.enableZoom}
+      enablePan={PATH_DEMO_ORBIT_SETTINGS.enablePan}
+      mouseButtons={PATH_DEMO_ORBIT_SETTINGS.mouseButtons}
+      minDistance={1}
+      maxDistance={2000}
+      minPolarAngle={0.03}
+      maxPolarAngle={Math.PI / 2 - 0.02}
+      screenSpacePanning
+      onChange={keepCameraAboveGround}
+    />
+  )
+}
 
 function RackModel({ rack }: { rack: SceneRack }) {
   const height = rack.levels * rack.levelHeight
@@ -75,11 +124,13 @@ export function PathDemo3DScene({
   activeFloor,
   trajectory,
   sample,
+  cameraResetToken,
 }: {
   topology: TopologyPayload
   activeFloor: string
   trajectory: TrajectoryPoint[]
   sample: TrajectorySample | null
+  cameraResetToken: number
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const visibleItems = useMemo(
@@ -99,7 +150,11 @@ export function PathDemo3DScene({
       <directionalLight position={[14, 24, 12]} intensity={1.5} castShadow />
       {visibleItems.map((item) => <StaticSceneItem key={item.key} item={item} />)}
       <PathDemo3DOverlay trajectory={trajectory} sample={sample} />
-      <OrbitControls makeDefault target={spec.camera.target} enableDamping dampingFactor={0.12} minDistance={2} maxDistance={2000} screenSpacePanning />
+      <PathDemoCameraControls
+        initialPosition={spec.camera.position}
+        initialTarget={spec.camera.target}
+        resetToken={cameraResetToken}
+      />
     </Canvas>
   )
 }

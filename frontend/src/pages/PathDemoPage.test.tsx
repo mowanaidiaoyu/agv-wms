@@ -7,7 +7,9 @@ import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import { PathDemoPage } from './PathDemoPage'
 
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
-  PathDemo3DScene: () => <div data-testid="path-demo-scene" />,
+  PathDemo3DScene: ({ cameraResetToken }: { cameraResetToken: number }) => (
+    <div data-testid="path-demo-scene" data-camera-reset-token={cameraResetToken} />
+  ),
 }))
 
 vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
@@ -92,5 +94,13 @@ describe('PathDemoPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '规划路径' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('different connected components')
     expect(screen.getByRole('button', { name: '开始运行' })).toBeDisabled()
+  })
+
+  it('resets only the camera view from the operation panel', async () => {
+    renderPage()
+    const scene = await screen.findByTestId('path-demo-scene')
+    expect(scene).toHaveAttribute('data-camera-reset-token', '0')
+    fireEvent.click(screen.getByRole('button', { name: '重置视角' }))
+    expect(scene).toHaveAttribute('data-camera-reset-token', '1')
   })
 })

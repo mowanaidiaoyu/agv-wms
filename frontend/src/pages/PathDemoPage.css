@@ -52,6 +52,7 @@
 
 .path-demo-panel select { width: 100%; min-width: 0; }
 .path-demo-plan-button { width: 100%; justify-content: center; }
+.path-demo-camera-reset { width: 100%; justify-content: center; }
 
 .path-demo-playback-controls {
   display: grid;
@@ -84,6 +85,7 @@
 .path-demo-stats dd { margin: 0; color: #e2e8f0; text-align: right; }
 
 .path-demo-viewport {
+  position: relative;
   min-height: 720px;
   overflow: hidden;
   border: 1px solid #273449;
@@ -91,6 +93,17 @@
   background: #0a0f19;
   box-shadow: inset 0 0 60px rgba(14, 116, 144, 0.08);
 }
+
+.path-demo-viewport canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+}
+
+.path-demo-viewport canvas:active { cursor: grabbing; }
 
 .path-demo-empty {
   display: grid;

@@ -26,6 +26,7 @@ export function PathDemoPage() {
   const [plan, setPlan] = useState<PathDemoPlan | null>(null)
   const [planning, setPlanning] = useState(false)
   const [planningError, setPlanningError] = useState('')
+  const [cameraResetToken, setCameraResetToken] = useState(0)
 
   useEffect(() => {
     if (topologyId || !topologiesQuery.data?.length) return
@@ -188,6 +189,13 @@ export function PathDemoPage() {
             onReset={resetPlayback}
             onRateChange={setPlaybackRate}
           />
+          <button
+            className="ghost-button path-demo-camera-reset"
+            type="button"
+            onClick={() => setCameraResetToken((value) => value + 1)}
+          >
+            重置视角
+          </button>
 
           <dl className="path-demo-stats">
             <div><dt>连通分量</dt><dd>{optionsQuery.data?.components.length ?? '—'}</dd></div>
@@ -210,6 +218,7 @@ export function PathDemoPage() {
                 activeFloor={activeFloor}
                 trajectory={trajectory}
                 sample={sample}
+                cameraResetToken={cameraResetToken}
               />
             </Suspense>
           ) : (
