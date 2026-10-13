@@ -2,6 +2,7 @@ import { MOUSE, Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
 import {
   constrainCameraAboveGround,
+  createPreservedFollowOffset,
   createVehicleFocusPose,
   followVehicleTarget,
   MIN_CAMERA_HEIGHT,
@@ -49,6 +50,12 @@ describe('path demo camera controls', () => {
     })
     expect(target.x).toBeGreaterThan(2)
     expect(target.x).toBeLessThan(7)
+  })
+
+  it('preserves the user orbit offset when switching the followed vehicle', () => {
+    const cameraPosition = new Vector3(14, 7, -3)
+    const target = new Vector3(8, 1, -9)
+    expect(createPreservedFollowOffset(cameraPosition, target).toArray()).toEqual([6, 6, 6])
   })
 
   it('uses delta-time smoothing and reaches a stable overview pose', () => {

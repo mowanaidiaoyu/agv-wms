@@ -8,11 +8,13 @@ export function PathDemo3DOverlay({
   sample,
   vehicles = [],
   endpointMarkers = [],
+  selectedVehicleId,
 }: {
   trajectory: TrajectoryPoint[]
   sample: TrajectorySample | null
   vehicles?: PathDemoVehicleView[]
   endpointMarkers?: PathDemoEndpointMarker[]
+  selectedVehicleId?: string
 }) {
   if (vehicles.length) {
     return (
@@ -20,7 +22,14 @@ export function PathDemo3DOverlay({
         {vehicles.map((vehicle) => (
           <group key={vehicle.vehicleId}>
             <PathTrajectory trajectory={vehicle.trajectory} color={vehicle.color} />
-            {vehicle.sample ? <DemoVehicle sample={vehicle.sample} label={vehicle.label} color={vehicle.color} /> : null}
+            {vehicle.sample ? (
+              <DemoVehicle
+                sample={vehicle.sample}
+                label={vehicle.label}
+                color={vehicle.color}
+                selected={vehicle.vehicleId === selectedVehicleId}
+              />
+            ) : null}
           </group>
         ))}
         <VehicleEndpointMarkers markers={endpointMarkers} />

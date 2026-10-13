@@ -6,6 +6,7 @@ import { Vector3 } from 'three'
 import type { PlaybackStatus, TrajectorySample } from './types'
 import {
   constrainCameraAboveGround,
+  createPreservedFollowOffset,
   createVehicleFocusPose,
   DEFAULT_VEHICLE_FOCUS_OFFSET,
   FOLLOW_ENTRY_DISTANCE,
@@ -91,9 +92,17 @@ export function CameraFollowController({
     }
     const currentSample = sampleRef.current
     if (!currentSample) return
+    if (actionRequest.type === 'switch-follow-target') {
+      transitionRef.current = {
+        kind: 'follow',
+        cameraOffset: createPreservedFollowOffset(camera.position, controls.target),
+        allowWhilePaused: true,
+      }
+      return
+    }
     const pose = createVehicleFocusPose(currentSample.world)
     transitionRef.current = { kind: 'locate', ...pose }
-  }, [actionRequest, initialPosition, initialTarget])
+  }, [actionRequest, camera.position, initialPosition, initialTarget])
 
   useEffect(() => {
     const controls = controlsRef.current

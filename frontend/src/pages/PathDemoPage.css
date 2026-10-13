@@ -270,6 +270,11 @@
   content: '';
 }
 
+.path-demo-vehicle-label.is-selected {
+  outline: 2px solid #f8fafc;
+  outline-offset: 3px;
+}
+
 .path-demo-endpoint-label {
   display: block;
   padding: 3px 6px;

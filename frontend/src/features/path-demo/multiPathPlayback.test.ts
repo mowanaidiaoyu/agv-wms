@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TopologyPayload } from '../../types'
-import { buildMultiVehicleViews, buildScheduledTrajectory } from './multiPathPlayback'
+import { buildConfiguredVehicleStartSample, buildMultiVehicleViews, buildScheduledTrajectory } from './multiPathPlayback'
 import type { MultiPathPlan, MultiPathVehiclePlan } from './types'
 
 const topology: TopologyPayload = {
@@ -91,5 +91,20 @@ describe('multi path playback', () => {
     expect(views).toHaveLength(6)
     expect(new Set(views.map((view) => view.color)).size).toBe(6)
     expect(views[5].color).toBe('#123456')
+  })
+
+  it('builds an unplanned camera preview from the selected vehicle configured start only', () => {
+    const preview = buildConfiguredVehicleStartSample({
+      vehicle_id: 'CTU-06',
+      start_cell_id: 'preview-start',
+      goal_cell_id: 'preview-goal',
+    }, [cell('preview-start', 3, 2)], topology)
+    expect(preview).toMatchObject({ vehicleId: 'CTU-06', row: 3, col: 2, elapsedSeconds: 0 })
+    expect(preview?.world).toEqual([-2.5, 0.5, 1.5])
+    expect(buildConfiguredVehicleStartSample({
+      vehicle_id: 'CTU-06',
+      start_cell_id: 'blocked',
+      goal_cell_id: 'preview-goal',
+    }, [{ ...cell('blocked', 3, 2), type: 'blocked' }], topology)).toBeNull()
   })
 })

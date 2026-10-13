@@ -92,6 +92,7 @@ export function PathDemo3DScene({
   roadCells = [],
   roadSelectionEnabled = false,
   endpointMarkers = [],
+  selectedVehicleId,
   onRoadCellSelect,
   onInvalidRoadSelection,
 }: {
@@ -107,6 +108,7 @@ export function PathDemo3DScene({
   roadCells?: PathDemoCell[]
   roadSelectionEnabled?: boolean
   endpointMarkers?: PathDemoEndpointMarker[]
+  selectedVehicleId?: string
   onRoadCellSelect?: (cell: PathDemoCell) => void
   onInvalidRoadSelection?: () => void
 }) {
@@ -132,6 +134,7 @@ export function PathDemo3DScene({
         sample={sample}
         vehicles={vehicles}
         endpointMarkers={endpointMarkers}
+        selectedVehicleId={selectedVehicleId}
       />
       <RoadCellSelectionLayer
         topology={topology}

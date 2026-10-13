@@ -9,6 +9,7 @@ import type {
   PathDemoVehicleView,
   MultiPathVehicleRequest,
   TrajectoryPoint,
+  TrajectorySample,
 } from './types'
 
 export const MULTI_VEHICLE_STYLES = [
@@ -66,6 +67,33 @@ export function buildMultiVehicleViews(
       sample: sampleTrajectory(trajectory, elapsedSeconds),
     }
   })
+}
+
+export function buildConfiguredVehicleStartSample(
+  vehicle: MultiPathVehicleRequest | undefined,
+  roadCells: PathDemoCell[],
+  topology: TopologyPayload,
+): TrajectorySample | null {
+  if (!vehicle?.start_cell_id) return null
+  const cell = roadCells.find((candidate) => candidate.id === vehicle.start_cell_id && candidate.type === 'road')
+  if (!cell) return null
+  const floors = topology.meta.floors?.length ? topology.meta.floors : ['1F']
+  const floorIndex = Math.max(0, floors.indexOf(cell.floor))
+  return {
+    vehicleId: vehicle.vehicle_id,
+    topologyId: topology.id,
+    floor: cell.floor,
+    row: cell.row,
+    col: cell.col,
+    pathIndex: 0,
+    elapsedSeconds: 0,
+    world: [
+      worldX(cell.col, topology.grid.cols),
+      floorPlaneY(floorIndex) + 0.5,
+      worldZ(cell.row, topology.grid.rows),
+    ],
+    headingRadians: 0,
+  }
 }
 
 

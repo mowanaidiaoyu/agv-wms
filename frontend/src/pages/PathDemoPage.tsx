@@ -4,6 +4,7 @@ import { PathPlaybackController } from '../features/path-demo/PathPlaybackContro
 import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import {
+  buildConfiguredVehicleStartSample,
   buildEndpointMarkers,
   buildMultiVehicleViews,
   MULTI_VEHICLE_STYLES,
@@ -72,10 +73,9 @@ export function PathDemoPage() {
   const [presetScenarioId, setPresetScenarioId] = useState<MultiPathDemoScenario['id']>('parallel')
   const [presetVehicles, setPresetVehicles] = useState<MultiPathVehicleRequest[]>([])
   const [customVehicles, setCustomVehicles] = useState<MultiPathVehicleRequest[]>([])
-  const [selectedConfigVehicleId, setSelectedConfigVehicleId] = useState('CTU-01')
+  const [selectedVehicleId, setSelectedVehicleId] = useState('CTU-01')
   const [roadSelection, setRoadSelection] = useState<RoadSelection>(null)
   const [selectionError, setSelectionError] = useState('')
-  const [followVehicleId, setFollowVehicleId] = useState('CTU-01')
   const [planningStatus, setPlanningStatus] = useState<PlanningStatus>('idle')
   const [planningError, setPlanningError] = useState('')
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
@@ -99,6 +99,11 @@ export function PathDemoPage() {
     queryFn: () => pathDemoApi.multiScenarios(topologyId),
     enabled: Boolean(topologyId) && demoMode !== 'single',
   })
+  const roadCells = useMemo(() => multiScenariosQuery.data?.road_cells ?? [], [multiScenariosQuery.data])
+  const activeVehicles = useMemo(
+    () => demoMode === 'preset' ? presetVehicles : demoMode === 'custom' ? customVehicles : [],
+    [customVehicles, demoMode, presetVehicles],
+  )
 
   const trajectory = useMemo(
     () => (plan && topologyRecord ? buildTrajectory(plan.path_cells, topologyRecord.payload) : []),
@@ -126,12 +131,23 @@ export function PathDemoPage() {
     ),
     [demoMode, multiPlan, playbackState.elapsedSeconds, topologyRecord],
   )
-  const followedVehicleSample = demoMode !== 'single'
-    ? (multiVehicleViews.find((vehicle) => vehicle.vehicleId === followVehicleId)?.sample ?? null)
+  const selectedPlannedVehicleSample = demoMode !== 'single'
+    ? (multiVehicleViews.find((vehicle) => vehicle.vehicleId === selectedVehicleId)?.sample ?? null)
     : sample
-
-  const roadCells = useMemo(() => multiScenariosQuery.data?.road_cells ?? [], [multiScenariosQuery.data])
-  const activeVehicles = demoMode === 'preset' ? presetVehicles : customVehicles
+  const configuredStartPreview = useMemo(
+    () => (
+      demoMode === 'custom' && topologyRecord
+        ? buildConfiguredVehicleStartSample(
+            customVehicles.find((vehicle) => vehicle.vehicle_id === selectedVehicleId),
+            roadCells,
+            topologyRecord.payload,
+          )
+        : null
+    ),
+    [customVehicles, demoMode, roadCells, selectedVehicleId, topologyRecord],
+  )
+  const selectedVehicleSample = selectedPlannedVehicleSample ?? configuredStartPreview
+  const hasFollowableTrajectory = Boolean(selectedPlannedVehicleSample)
   const activeConfigurationError = demoMode === 'single' ? '' : validateMultiVehicleConfiguration(activeVehicles, roadCells)
   const endpointMarkers = useMemo(
     () => (
@@ -173,11 +189,19 @@ export function PathDemoPage() {
     const normalized = normalizeVehicles(selected.vehicles)
     setPresetScenarioId(selected.id)
     setPresetVehicles(normalized)
-    if (!customVehicles.length) setCustomVehicles(normalized.map((vehicle) => ({ ...vehicle })))
-    if (!normalized.some((vehicle) => vehicle.vehicle_id === followVehicleId)) {
-      setFollowVehicleId(normalized[0]?.vehicle_id ?? 'CTU-01')
+    setCustomVehicles((current) => current.length ? current : normalized.map((vehicle) => ({ ...vehicle })))
+  }, [multiScenariosQuery.data, presetScenarioId])
+
+  useEffect(() => {
+    if (demoMode === 'single') {
+      if (selectedVehicleId !== 'CTU-01') setSelectedVehicleId('CTU-01')
+      return
     }
-  }, [customVehicles.length, followVehicleId, multiScenariosQuery.data, presetScenarioId])
+    if (!activeVehicles.length) return
+    if (!activeVehicles.some((vehicle) => vehicle.vehicle_id === selectedVehicleId)) {
+      setSelectedVehicleId(activeVehicles[0].vehicle_id)
+    }
+  }, [activeVehicles, demoMode, selectedVehicleId])
 
   const requestCameraAction = (type: CameraActionRequest['type']) => {
     setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
@@ -243,8 +267,7 @@ export function PathDemoPage() {
     if (customVehicles.length <= 1) return
     const nextVehicles = customVehicles.filter((vehicle) => vehicle.vehicle_id !== vehicleId)
     setCustomVehicles(nextVehicles)
-    if (selectedConfigVehicleId === vehicleId) setSelectedConfigVehicleId(nextVehicles[0].vehicle_id)
-    if (followVehicleId === vehicleId) setFollowVehicleId(nextVehicles[0].vehicle_id)
+    if (selectedVehicleId === vehicleId) setSelectedVehicleId(nextVehicles[0].vehicle_id)
     if (roadSelection?.vehicleId === vehicleId) setRoadSelection(null)
     invalidatePlan()
   }
@@ -298,8 +321,6 @@ export function PathDemoPage() {
                 setDemoMode(nextMode)
                 setRoadSelection(null)
                 setSelectionError('')
-                const nextVehicles = nextMode === 'preset' ? presetVehicles : customVehicles
-                setFollowVehicleId(nextVehicles[0]?.vehicle_id ?? 'CTU-01')
                 invalidatePlan()
               }}
             >
@@ -350,7 +371,6 @@ export function PathDemoPage() {
                     const vehicles = normalizeVehicles(selected.vehicles)
                     setPresetScenarioId(selected.id)
                     setPresetVehicles(vehicles)
-                    setFollowVehicleId(vehicles[0]?.vehicle_id ?? 'CTU-01')
                     invalidatePlan()
                   }}
                 >
@@ -375,8 +395,7 @@ export function PathDemoPage() {
                     const vehicle = createCustomVehicle(customVehicles, roadCells)
                     if (!vehicle) return
                     setCustomVehicles((current) => [...current, vehicle])
-                    setSelectedConfigVehicleId(vehicle.vehicle_id)
-                    setFollowVehicleId(vehicle.vehicle_id)
+                    setSelectedVehicleId(vehicle.vehicle_id)
                     invalidatePlan()
                   }}
                 >
@@ -387,11 +406,11 @@ export function PathDemoPage() {
               {customVehicles.map((vehicle) => (
                 <fieldset
                   key={vehicle.vehicle_id}
-                  className={`path-demo-vehicle-config ${selectedConfigVehicleId === vehicle.vehicle_id ? 'is-selected' : ''}`}
-                  onFocus={() => setSelectedConfigVehicleId(vehicle.vehicle_id)}
+                  className={`path-demo-vehicle-config ${selectedVehicleId === vehicle.vehicle_id ? 'is-selected' : ''}`}
+                  onFocus={() => setSelectedVehicleId(vehicle.vehicle_id)}
                 >
                   <legend>
-                    <button className="path-demo-vehicle-selector" type="button" onClick={() => setSelectedConfigVehicleId(vehicle.vehicle_id)}>
+                    <button className="path-demo-vehicle-selector" type="button" onClick={() => setSelectedVehicleId(vehicle.vehicle_id)}>
                       <span className="path-demo-color-dot" style={{ backgroundColor: vehicle.display_color ?? undefined }} />
                       {vehicle.vehicle_id}
                     </button>
@@ -423,7 +442,7 @@ export function PathDemoPage() {
                   <button
                     className={roadSelection?.vehicleId === vehicle.vehicle_id && roadSelection.kind === 'start' ? 'accent-button' : 'ghost-button'}
                     type="button"
-                    onClick={() => { setSelectedConfigVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'start' }); setSelectionError('') }}
+                    onClick={() => { setSelectedVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'start' }); setSelectionError('') }}
                   >图选起点</button>
                   <label>
                     {vehicle.vehicle_id} 终点
@@ -435,7 +454,7 @@ export function PathDemoPage() {
                   <button
                     className={roadSelection?.vehicleId === vehicle.vehicle_id && roadSelection.kind === 'goal' ? 'accent-button' : 'ghost-button'}
                     type="button"
-                    onClick={() => { setSelectedConfigVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'goal' }); setSelectionError('') }}
+                    onClick={() => { setSelectedVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'goal' }); setSelectionError('') }}
                   >图选终点</button>
                   <label>
                     显示颜色
@@ -498,25 +517,40 @@ export function PathDemoPage() {
             {demoMode !== 'single' ? (
               <label>
                 选择跟随车辆
-                <select value={followVehicleId} disabled={!multiPlan} onChange={(event) => { setFollowVehicleId(event.target.value); requestCameraAction('locate') }}>
+                <select
+                  value={selectedVehicleId}
+                  disabled={!activeVehicles.length}
+                  onChange={(event) => {
+                    setSelectedVehicleId(event.target.value)
+                    requestCameraAction(cameraViewMode === 'follow' ? 'switch-follow-target' : 'locate')
+                  }}
+                >
                   {activeVehicles.map((vehicle) => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}
                 </select>
               </label>
             ) : null}
             <div className="path-demo-camera-buttons">
-              <button className="ghost-button" type="button" disabled={!followedVehicleSample} onClick={() => { setCameraViewMode('free'); requestCameraAction('locate') }}>定位小车</button>
+              <button className="ghost-button" type="button" disabled={!selectedVehicleSample} onClick={() => { setCameraViewMode('free'); requestCameraAction('locate') }}>定位小车</button>
               <button
                 className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'}
                 type="button"
-                disabled={!followedVehicleSample}
+                disabled={!hasFollowableTrajectory}
                 aria-pressed={cameraViewMode === 'follow'}
                 onClick={() => setCameraViewMode((current) => current === 'follow' ? 'free' : 'follow')}
               >跟随小车：{cameraViewMode === 'follow' ? '开' : '关'}</button>
               <button className="ghost-button" type="button" disabled={cameraViewMode === 'free'} onClick={() => setCameraViewMode('free')}>自由视角</button>
               <button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCameraAction('overview') }}>仓库全景</button>
             </div>
-            <p className="path-demo-note">当前车辆：{demoMode === 'single' ? 'CTU-01' : followVehicleId}</p>
-            {!followedVehicleSample ? <p className="path-demo-note">请先规划路径，生成车辆位置后再定位或跟随。</p> : null}
+            <p className="path-demo-note">当前车辆：{demoMode === 'single' ? 'CTU-01' : selectedVehicleId}</p>
+            {demoMode === 'custom' && !selectedPlannedVehicleSample && configuredStartPreview ? (
+              <p className="path-demo-note">当前车辆尚未规划路径，可定位到已配置起点。</p>
+            ) : null}
+            {demoMode === 'custom' && !selectedPlannedVehicleSample && !configuredStartPreview ? (
+              <p className="path-demo-note">当前车辆尚未配置合法起点，无法定位。</p>
+            ) : null}
+            {demoMode !== 'custom' && !selectedVehicleSample ? (
+              <p className="path-demo-note">请先规划路径，生成车辆位置后再定位或跟随。</p>
+            ) : null}
           </section>
 
           <dl className="path-demo-stats">
@@ -575,7 +609,8 @@ export function PathDemoPage() {
                 cameraViewMode={cameraViewMode}
                 cameraActionRequest={cameraActionRequest}
                 vehicles={multiVehicleViews}
-                followedVehicleSample={followedVehicleSample}
+                followedVehicleSample={selectedVehicleSample}
+                selectedVehicleId={selectedVehicleId}
                 roadCells={roadCells}
                 roadSelectionEnabled={demoMode === 'custom' && roadSelection !== null}
                 endpointMarkers={endpointMarkers}

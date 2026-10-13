@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
@@ -20,6 +20,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     endpointMarkers = [],
     roadSelectionEnabled,
     onRoadCellSelect,
+    selectedVehicleId,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -30,6 +31,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     endpointMarkers?: PathDemoEndpointMarker[]
     roadSelectionEnabled?: boolean
     onRoadCellSelect?: (cell: PathDemoCell) => void
+    selectedVehicleId?: string
   }) => (
     <div>
       <div
@@ -41,6 +43,8 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-playback-status={playbackStatus}
         data-vehicle-ids={vehicles.map((vehicle) => vehicle.vehicleId).join(',')}
         data-followed-vehicle={followedVehicleSample?.vehicleId ?? ''}
+        data-followed-world={followedVehicleSample?.world.join(',') ?? ''}
+        data-selected-vehicle={selectedVehicleId ?? ''}
         data-endpoint-markers={endpointMarkers.map((marker) => `${marker.vehicleId}:${marker.kind}`).join(',')}
         data-road-selection-enabled={roadSelectionEnabled ? 'true' : 'false'}
       />
@@ -168,12 +172,46 @@ const multiPlan = {
   avoidance_count: 3,
   planning_time_ms: 2,
 }
+
+const sixVehiclePlan = {
+  ...multiPlan,
+  vehicles: Array.from({ length: 6 }, (_, index) => {
+    const vehicleId = `CTU-0${index + 1}`
+    const plannedStart = index === 5 ? cells[8] : cells[index]
+    const plannedGoal = cells[(index + 1) % cells.length]
+    return {
+      vehicle_id: vehicleId,
+      start: plannedStart,
+      goal: plannedGoal,
+      steps: [
+        { time_step: 0, time_seconds: 0, action: 'start' as const, cell: plannedStart },
+        { time_step: 1, time_seconds: 0.25, action: 'wait' as const, cell: plannedStart },
+        { time_step: 2, time_seconds: 0.5, action: 'move' as const, cell: plannedGoal },
+      ],
+      total_distance: 1,
+      estimated_duration_seconds: 0.5,
+      wait_time_seconds: 0.25,
+      avoidance_count: 1,
+      visited_states: 3,
+    }
+  }),
+}
 function renderPage() {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <PathDemoPage />
     </QueryClientProvider>,
   )
+}
+
+async function enterCustomModeWithSixVehicles() {
+  fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+  const addButton = await screen.findByRole('button', { name: '添加车辆' })
+  await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
+  fireEvent.click(addButton)
+  fireEvent.click(addButton)
+  fireEvent.click(addButton)
+  await waitFor(() => expect(screen.getByText('车辆配置（6/6）')).toBeInTheDocument())
 }
 
 beforeEach(() => {
@@ -311,7 +349,7 @@ describe('PathDemoPage', () => {
     fireEvent.click(addButton)
     expect(screen.getByText('车辆配置（6/6）')).toBeInTheDocument()
     expect(addButton).toBeDisabled()
-    expect(screen.getByDisplayValue('CTU-06')).toBeInTheDocument()
+    expect(screen.getAllByDisplayValue('CTU-06')).toHaveLength(2)
 
     const deleteButtons = screen.getAllByRole('button', { name: '删除车辆' })
     fireEvent.click(deleteButtons.at(-1)!)
@@ -349,6 +387,103 @@ describe('PathDemoPage', () => {
     resolvePlan?.(multiPlan)
     await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', ''))
     expect(screen.getByText('未规划')).toBeInTheDocument()
+  })
+
+  it('keeps CTU-06 selected and locates its configured start before planning', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await enterCustomModeWithSixVehicles()
+
+    const vehicleSelect = screen.getByLabelText('选择跟随车辆')
+    const scene = screen.getByTestId('path-demo-scene')
+    expect(vehicleSelect).toHaveValue('CTU-06')
+    expect(screen.getByText('当前车辆：CTU-06')).toBeInTheDocument()
+    expect(scene).toHaveAttribute('data-selected-vehicle', 'CTU-06')
+    expect(scene).toHaveAttribute('data-followed-vehicle', 'CTU-06')
+    expect(scene).toHaveAttribute('data-followed-world', '0.5,0.5,-1.5')
+    expect(screen.getByText('当前车辆尚未规划路径，可定位到已配置起点。')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '定位小车' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '跟随小车：关' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: '定位小车' }))
+    expect(scene).toHaveAttribute('data-camera-action', 'locate')
+
+    fireEvent.change(screen.getByLabelText('CTU-01 优先级'), { target: { value: '9' } })
+    expect(vehicleSelect).toHaveValue('CTU-06')
+
+    const ctu02Fieldset = screen.getByDisplayValue('CTU-02').closest('fieldset')
+    expect(ctu02Fieldset).not.toBeNull()
+    fireEvent.click(within(ctu02Fieldset!).getByRole('button', { name: '删除车辆' }))
+    expect(vehicleSelect).toHaveValue('CTU-06')
+    expect(screen.getByText('当前车辆：CTU-06')).toBeInTheDocument()
+
+    const ctu06Input = screen.getAllByDisplayValue('CTU-06').find((element) => element.tagName === 'INPUT')
+    const ctu06Fieldset = ctu06Input?.closest('fieldset')
+    expect(ctu06Fieldset).not.toBeNull()
+    fireEvent.click(within(ctu06Fieldset!).getByRole('button', { name: '删除车辆' }))
+    expect(vehicleSelect).toHaveValue('CTU-01')
+    expect(screen.getByText('当前车辆：CTU-01')).toBeInTheDocument()
+  })
+
+  it('switches FOLLOW from CTU-01 to CTU-06 and CTU-03 using planned samples', async () => {
+    vi.mocked(pathDemoApi.planMulti).mockResolvedValueOnce(sixVehiclePlan)
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await enterCustomModeWithSixVehicles()
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+
+    const scene = screen.getByTestId('path-demo-scene')
+    const vehicleSelect = screen.getByLabelText('选择跟随车辆')
+    await waitFor(() => expect(scene).toHaveAttribute('data-vehicle-ids', 'CTU-01,CTU-02,CTU-03,CTU-04,CTU-05,CTU-06'))
+
+    fireEvent.change(vehicleSelect, { target: { value: 'CTU-01' } })
+    fireEvent.click(screen.getByRole('button', { name: '跟随小车：关' }))
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'follow')
+
+    fireEvent.change(vehicleSelect, { target: { value: 'CTU-06' } })
+    expect(vehicleSelect).toHaveValue('CTU-06')
+    expect(screen.getByText('当前车辆：CTU-06')).toBeInTheDocument()
+    expect(scene).toHaveAttribute('data-followed-vehicle', 'CTU-06')
+    expect(scene).toHaveAttribute('data-followed-world', '1.5,0.5,-1.5')
+    expect(scene).toHaveAttribute('data-camera-action', 'switch-follow-target')
+
+    fireEvent.change(vehicleSelect, { target: { value: 'CTU-03' } })
+    expect(vehicleSelect).toHaveValue('CTU-03')
+    expect(scene).toHaveAttribute('data-followed-vehicle', 'CTU-03')
+    expect(scene).toHaveAttribute('data-camera-view-mode', 'follow')
+
+    fireEvent.click(screen.getByRole('button', { name: '开始运行' }))
+    const pauseButton = await screen.findByRole('button', { name: '暂停' })
+    fireEvent.click(pauseButton)
+    expect(await screen.findByRole('button', { name: '继续' })).toBeInTheDocument()
+    expect(vehicleSelect).toHaveValue('CTU-03')
+    fireEvent.click(screen.getByRole('button', { name: '继续' }))
+    expect(vehicleSelect).toHaveValue('CTU-03')
+  })
+
+  it('disables unplanned locate when the selected custom vehicle has no legal start', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await enterCustomModeWithSixVehicles()
+    fireEvent.change(screen.getByLabelText('CTU-06 起点'), { target: { value: '' } })
+    expect(screen.getByLabelText('选择跟随车辆')).toHaveValue('CTU-06')
+    expect(screen.getByRole('button', { name: '定位小车' })).toBeDisabled()
+    expect(screen.getByText('当前车辆尚未配置合法起点，无法定位。')).toBeInTheDocument()
+  })
+
+  it('does not let an obsolete custom plan response replace CTU-06 selection', async () => {
+    let resolvePlan: ((value: typeof sixVehiclePlan) => void) | undefined
+    vi.mocked(pathDemoApi.planMulti).mockImplementationOnce(() => new Promise((resolve) => { resolvePlan = resolve }))
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await enterCustomModeWithSixVehicles()
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+    fireEvent.change(screen.getByLabelText('CTU-01 优先级'), { target: { value: '8' } })
+    resolvePlan?.(sixVehiclePlan)
+
+    await waitFor(() => expect(screen.getByText('未规划')).toBeInTheDocument())
+    expect(screen.getByLabelText('选择跟随车辆')).toHaveValue('CTU-06')
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', '')
   })
 })
 

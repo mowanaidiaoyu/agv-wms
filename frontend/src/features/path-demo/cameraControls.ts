@@ -2,7 +2,7 @@ import { MOUSE, Vector3 } from 'three'
 import type { PlaybackStatus } from './types'
 
 export type CameraViewMode = 'free' | 'follow'
-export type CameraAction = 'locate' | 'overview'
+export type CameraAction = 'locate' | 'overview' | 'switch-follow-target'
 
 export interface CameraActionRequest {
   type: CameraAction
@@ -26,6 +26,14 @@ export const CAMERA_TRANSITION_RATE = 5
 export const CAMERA_FOLLOW_RATE = 8
 export const DEFAULT_VEHICLE_FOCUS_OFFSET: [number, number, number] = [6, 5, 8]
 export const FOLLOW_ENTRY_DISTANCE = 12
+
+export function createPreservedFollowOffset(cameraPosition: Vector3, target: Vector3): Vector3 {
+  const offset = cameraPosition.clone().sub(target)
+  if (!isFiniteVector(offset) || offset.lengthSq() < 0.0001) {
+    return new Vector3(...DEFAULT_VEHICLE_FOCUS_OFFSET)
+  }
+  return offset
+}
 
 export function smoothingAlpha(rate: number, deltaSeconds: number): number {
   if (!Number.isFinite(rate) || !Number.isFinite(deltaSeconds) || rate <= 0 || deltaSeconds <= 0) return 0
