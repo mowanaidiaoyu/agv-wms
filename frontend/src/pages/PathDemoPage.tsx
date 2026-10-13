@@ -2,7 +2,8 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
 import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
-import { pathDemoApi } from '../features/path-demo/pathDemoApi'
+import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
+import { DEFAULT_MULTI_PATH_PLANNING_CONFIG, pathDemoApi } from '../features/path-demo/pathDemoApi'
 import {
   buildConfiguredVehicleStartSample,
   buildEndpointMarkers,
@@ -81,6 +82,7 @@ export function PathDemoPage() {
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
   const requestSequenceRef = useRef(0)
+  const setCustomDraft = useMultiPathExperimentStore((state) => state.setCustomDraft)
 
   useEffect(() => {
     if (topologyId || !topologiesQuery.data?.length) return
@@ -89,6 +91,16 @@ export function PathDemoPage() {
   }, [topologiesQuery.data, topologyId])
 
   const topologyRecord = topologiesQuery.data?.find((item) => item.id === topologyId)
+
+  useEffect(() => {
+    if (demoMode !== 'custom' || !topologyRecord) return
+    setCustomDraft({
+      topologyId,
+      topologyVersion: topologyRecord.payload.meta.version,
+      vehicles: customVehicles.map((vehicle) => ({ ...vehicle })),
+      planningConfig: { ...DEFAULT_MULTI_PATH_PLANNING_CONFIG },
+    })
+  }, [customVehicles, demoMode, setCustomDraft, topologyId, topologyRecord])
   const optionsQuery = useQuery({
     queryKey: ['path-demo-options', topologyId],
     queryFn: () => pathDemoApi.options(topologyId),

@@ -157,3 +157,59 @@ class MultiPathDemoScenariosResponse(BaseModel):
     largest_road_component_id: str
     road_cells: list[PathDemoCell]
     scenarios: list[MultiPathDemoScenario]
+
+
+class MultiPathEvaluationRequest(BaseModel):
+    topology_id: str = Field(min_length=1)
+    mode: Literal["preset", "custom"]
+    scenario_id: Literal["parallel", "node-conflict", "edge-swap"] | None = None
+    vehicles: list[MultiPathVehicleRequest] = Field(default_factory=list, max_length=6)
+    planning_config: MultiPathPlanningConfig = Field(default_factory=MultiPathPlanningConfig)
+
+
+class MultiPathEvaluationInputSnapshot(BaseModel):
+    topology_id: str
+    topology_name: str
+    topology_version: str
+    mode: Literal["preset", "custom"]
+    scenario_id: Literal["parallel", "node-conflict", "edge-swap"] | None = None
+    vehicles: list[MultiPathVehicleRequest]
+    planning_config: MultiPathPlanningConfig
+    algorithms: list[PathDemoAlgorithm]
+
+
+class MultiPathEvaluationVehicleMetrics(BaseModel):
+    vehicle_id: str
+    total_distance: float
+    estimated_duration_seconds: float
+    wait_time_seconds: float
+    avoidance_count: int
+    visited_states: int
+
+
+class MultiPathEvaluationMetrics(BaseModel):
+    total_path_distance: float
+    makespan_seconds: float
+    total_wait_time_seconds: float
+    average_wait_time_seconds: float
+    detected_conflicts: int
+    resolved_conflicts: int
+    remaining_conflicts: int
+    avoidance_count: int
+    vehicles: list[MultiPathEvaluationVehicleMetrics]
+
+
+class MultiPathEvaluationAlgorithmResult(BaseModel):
+    algorithm: PathDemoAlgorithm
+    planning_status: Literal["success", "failed"]
+    error_reason: str | None
+    planning_time_ms: float
+    metrics: MultiPathEvaluationMetrics | None
+    plan: MultiPathPlanResponse | None
+
+
+class MultiPathEvaluationResponse(BaseModel):
+    experiment_id: str
+    created_at: str
+    input_snapshot: MultiPathEvaluationInputSnapshot
+    results: list[MultiPathEvaluationAlgorithmResult]

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
+import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
 import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import type { MultiPathVehicleRequest, PathDemoCell, PathDemoEndpointMarker, PathDemoVehicleView, PlaybackStatus, TrajectorySample } from '../features/path-demo/types'
@@ -59,6 +60,15 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
 
 vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
+  DEFAULT_MULTI_PATH_PLANNING_CONFIG: {
+    time_step_seconds: 0.25,
+    speed_cells_per_second: 4,
+    max_time_steps: 512,
+    max_expanded_states: 200000,
+    vehicle_width_cells: 0.58,
+    vehicle_length_cells: 0.72,
+    safety_margin_cells: 0.05,
+  },
   pathDemoApi: { options: vi.fn(), plan: vi.fn(), multiScenarios: vi.fn(), planMulti: vi.fn() },
 }))
 
@@ -215,6 +225,7 @@ async function enterCustomModeWithSixVehicles() {
 }
 
 beforeEach(() => {
+  useMultiPathExperimentStore.setState({ customDraft: null, evaluation: null, viewedAlgorithm: null })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
@@ -222,6 +233,18 @@ beforeEach(() => {
   vi.mocked(pathDemoApi.planMulti).mockResolvedValue(multiPlan)
 })
 describe('PathDemoPage', () => {
+  it('shares the current custom vehicle DTO with the algorithm lab store', async () => {
+    renderPage()
+    await enterCustomModeWithSixVehicles()
+    await waitFor(() => expect(useMultiPathExperimentStore.getState().customDraft?.vehicles).toHaveLength(6))
+    expect(useMultiPathExperimentStore.getState().customDraft).toMatchObject({
+      topologyId: topology.id,
+      topologyVersion: topology.meta.version,
+      planningConfig: { time_step_seconds: 0.25, speed_cells_per_second: 4 },
+    })
+    expect(useMultiPathExperimentStore.getState().customDraft?.vehicles[5].vehicle_id).toBe('CTU-06')
+  })
+
   it('loads 666 defaults, plans a real path, and invalidates it when the algorithm changes', async () => {
     renderPage()
     expect(await screen.findByText('真实拓扑单车 3D 轨迹演示')).toBeInTheDocument()

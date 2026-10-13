@@ -1,5 +1,7 @@
 import type {
   MultiPathDemoScenariosResponse,
+  MultiPathEvaluation,
+  MultiPathPlanningConfig,
   MultiPathPlan,
   MultiPathVehicleRequest,
   PathDemoAlgorithm,
@@ -27,6 +29,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return response.json() as Promise<T>
 }
+
+export const DEFAULT_MULTI_PATH_PLANNING_CONFIG: MultiPathPlanningConfig = {
+  time_step_seconds: 0.25,
+  speed_cells_per_second: 4,
+  max_time_steps: 512,
+  max_expanded_states: 200000,
+  vehicle_width_cells: 0.58,
+  vehicle_length_cells: 0.72,
+  safety_margin_cells: 0.05,
+}
+
 export const pathDemoApi = {
   options(topologyId: string) {
     return request<PathDemoTopologyOptions>(`/path-demo/topologies/${topologyId}/options`)
@@ -66,15 +79,31 @@ export const pathDemoApi = {
         scenario_id: scenarioId,
         vehicles,
         algorithm,
-        planning_config: {
-          time_step_seconds: 0.25,
-          speed_cells_per_second: 4,
-          max_time_steps: 512,
-          max_expanded_states: 200000,
-          vehicle_width_cells: 0.58,
-          vehicle_length_cells: 0.72,
-          safety_margin_cells: 0.05,
-        },
+        planning_config: DEFAULT_MULTI_PATH_PLANNING_CONFIG,
+      }),
+    })
+  },
+  evaluateMulti({
+    topologyId,
+    mode,
+    scenarioId,
+    vehicles = [],
+    planningConfig = DEFAULT_MULTI_PATH_PLANNING_CONFIG,
+  }: {
+    topologyId: string
+    mode: 'preset' | 'custom'
+    scenarioId?: 'parallel' | 'node-conflict' | 'edge-swap'
+    vehicles?: MultiPathVehicleRequest[]
+    planningConfig?: MultiPathPlanningConfig
+  }) {
+    return request<MultiPathEvaluation>('/path-demo/evaluate-multi', {
+      method: 'POST',
+      body: JSON.stringify({
+        topology_id: topologyId,
+        mode,
+        scenario_id: scenarioId,
+        vehicles,
+        planning_config: planningConfig,
       }),
     })
   },

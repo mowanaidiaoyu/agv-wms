@@ -78,6 +78,16 @@ export interface MultiPathVehicleRequest {
   display_color?: string | null
 }
 
+export interface MultiPathPlanningConfig {
+  time_step_seconds: number
+  speed_cells_per_second: number
+  max_time_steps: number
+  max_expanded_states: number
+  vehicle_width_cells: number
+  vehicle_length_cells: number
+  safety_margin_cells: number
+}
+
 export interface MultiPathDemoScenario {
   id: 'parallel' | 'node-conflict' | 'edge-swap'
   name: string
@@ -146,6 +156,52 @@ export interface MultiPathPlan {
   conflicts: MultiPathConflictMetrics
   avoidance_count: number
   planning_time_ms: number
+}
+
+export interface MultiPathEvaluationVehicleMetrics {
+  vehicle_id: string
+  total_distance: number
+  estimated_duration_seconds: number
+  wait_time_seconds: number
+  avoidance_count: number
+  visited_states: number
+}
+
+export interface MultiPathEvaluationMetrics {
+  total_path_distance: number
+  makespan_seconds: number
+  total_wait_time_seconds: number
+  average_wait_time_seconds: number
+  detected_conflicts: number
+  resolved_conflicts: number
+  remaining_conflicts: number
+  avoidance_count: number
+  vehicles: MultiPathEvaluationVehicleMetrics[]
+}
+
+export interface MultiPathEvaluationAlgorithmResult {
+  algorithm: PathDemoAlgorithm
+  planning_status: 'success' | 'failed'
+  error_reason: string | null
+  planning_time_ms: number
+  metrics: MultiPathEvaluationMetrics | null
+  plan: MultiPathPlan | null
+}
+
+export interface MultiPathEvaluation {
+  experiment_id: string
+  created_at: string
+  input_snapshot: {
+    topology_id: string
+    topology_name: string
+    topology_version: string
+    mode: 'preset' | 'custom'
+    scenario_id: MultiPathDemoScenario['id'] | null
+    vehicles: MultiPathVehicleRequest[]
+    planning_config: MultiPathPlanningConfig
+    algorithms: PathDemoAlgorithm[]
+  }
+  results: MultiPathEvaluationAlgorithmResult[]
 }
 
 export interface PathDemoVehicleView {
