@@ -80,9 +80,20 @@ def get_multi_path_demo_scenarios(topology_id: str):
 def create_multi_path_demo_plan(request: MultiPathPlanRequest):
     record = _topology_or_404(request.topology_id)
     try:
+        vehicles = [vehicle.model_dump() for vehicle in request.vehicles]
+        if request.mode == "custom" and request.scenario_id is not None:
+            raise PathDemoError("Custom mode cannot include scenario_id")
+        if request.mode == "preset" or request.scenario_id is not None:
+            if request.scenario_id is None:
+                raise PathDemoError("Preset mode requires scenario_id")
+            scenarios = build_multi_demo_scenarios(record["payload"])
+            selected = next((item for item in scenarios if item["id"] == request.scenario_id), None)
+            if selected is None:
+                raise PathDemoError(f"Unknown preset scenario: {request.scenario_id}")
+            vehicles = selected["vehicles"]
         result = plan_multi_paths(
             record["payload"],
-            [vehicle.model_dump() for vehicle in request.vehicles],
+            vehicles,
             request.algorithm,
             request.planning_config.model_dump(),
         )

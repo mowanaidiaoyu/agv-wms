@@ -45,11 +45,25 @@ export const pathDemoApi = {
   multiScenarios(topologyId: string) {
     return request<MultiPathDemoScenariosResponse>(`/path-demo/topologies/${topologyId}/multi-scenarios`)
   },
-  planMulti(topologyId: string, vehicles: MultiPathVehicleRequest[], algorithm: PathDemoAlgorithm) {
+  planMulti({
+    topologyId,
+    vehicles = [],
+    algorithm,
+    mode,
+    scenarioId,
+  }: {
+    topologyId: string
+    vehicles?: MultiPathVehicleRequest[]
+    algorithm: PathDemoAlgorithm
+    mode?: 'preset' | 'custom'
+    scenarioId?: 'parallel' | 'node-conflict' | 'edge-swap'
+  }) {
     return request<MultiPathPlan>('/path-demo/plan-multi', {
       method: 'POST',
       body: JSON.stringify({
         topology_id: topologyId,
+        mode,
+        scenario_id: scenarioId,
         vehicles,
         algorithm,
         planning_config: {

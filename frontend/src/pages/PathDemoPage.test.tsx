@@ -4,8 +4,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
+import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
-import type { PathDemoVehicleView, PlaybackStatus, TrajectorySample } from '../features/path-demo/types'
+import type { MultiPathVehicleRequest, PathDemoCell, PathDemoEndpointMarker, PathDemoVehicleView, PlaybackStatus, TrajectorySample } from '../features/path-demo/types'
 import { PathDemoPage } from './PathDemoPage'
 
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
@@ -16,6 +17,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     playbackStatus,
     vehicles = [],
     followedVehicleSample,
+    endpointMarkers = [],
+    roadSelectionEnabled,
+    onRoadCellSelect,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -23,17 +27,29 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     playbackStatus: PlaybackStatus
     vehicles?: PathDemoVehicleView[]
     followedVehicleSample?: TrajectorySample | null
+    endpointMarkers?: PathDemoEndpointMarker[]
+    roadSelectionEnabled?: boolean
+    onRoadCellSelect?: (cell: PathDemoCell) => void
   }) => (
-    <div
-      data-testid="path-demo-scene"
-      data-camera-view-mode={cameraViewMode}
-      data-camera-action={cameraActionRequest?.type ?? ''}
-      data-camera-action-sequence={cameraActionRequest?.sequence ?? ''}
-      data-sample-world={sample?.world.join(',') ?? ''}
-      data-playback-status={playbackStatus}
-      data-vehicle-ids={vehicles.map((vehicle) => vehicle.vehicleId).join(',')}
-      data-followed-vehicle={followedVehicleSample?.vehicleId ?? ''}
-    />
+    <div>
+      <div
+        data-testid="path-demo-scene"
+        data-camera-view-mode={cameraViewMode}
+        data-camera-action={cameraActionRequest?.type ?? ''}
+        data-camera-action-sequence={cameraActionRequest?.sequence ?? ''}
+        data-sample-world={sample?.world.join(',') ?? ''}
+        data-playback-status={playbackStatus}
+        data-vehicle-ids={vehicles.map((vehicle) => vehicle.vehicleId).join(',')}
+        data-followed-vehicle={followedVehicleSample?.vehicleId ?? ''}
+        data-endpoint-markers={endpointMarkers.map((marker) => `${marker.vehicleId}:${marker.kind}`).join(',')}
+        data-road-selection-enabled={roadSelectionEnabled ? 'true' : 'false'}
+      />
+      <button
+        type="button"
+        data-testid="mock-road-cell"
+        onClick={() => onRoadCellSelect?.({ id: 'cell-r3-c3', floor: '1F', row: 3, col: 3, type: 'road', component_id: 'component-1' })}
+      >mock road cell</button>
+    </div>
   ),
 }))
 
@@ -57,6 +73,12 @@ const cells = [
   { id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, type: 'road', component_id: 'component-1' },
   { id: 'cell-r1-c2', floor: '1F', row: 1, col: 2, type: 'road', component_id: 'component-1' },
   { id: 'cell-r1-c3', floor: '1F', row: 1, col: 3, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r2-c0', floor: '1F', row: 2, col: 0, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r2-c1', floor: '1F', row: 2, col: 1, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r2-c2', floor: '1F', row: 2, col: 2, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r2-c3', floor: '1F', row: 2, col: 3, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r3-c2', floor: '1F', row: 3, col: 2, type: 'road', component_id: 'component-1' },
+  { id: 'cell-r3-c3', floor: '1F', row: 3, col: 3, type: 'road', component_id: 'component-1' },
 ]
 
 const options = {
@@ -245,16 +267,21 @@ describe('PathDemoPage', () => {
   it('plans and renders three backend-scheduled vehicles with selectable follow targets', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('终点（可行驶道路）')).toHaveValue(cells[2].id))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'multi' } })
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: '冲突演示场景' })).toHaveValue('parallel'))
     expect(screen.getByRole('option', { name: '场景 B：交叉节点竞争' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: '场景 C：相向边交换风险' })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '规划多车路径' }))
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
     const scene = await screen.findByTestId('path-demo-scene')
     await waitFor(() => expect(scene).toHaveAttribute('data-vehicle-ids', 'CTU-01,CTU-02,CTU-03'))
-    expect(pathDemoApi.planMulti).toHaveBeenCalledWith(topology.id, multiVehicles, 'astar')
-    expect(screen.getByText('最终执行冲突')).toBeInTheDocument()
+    expect(pathDemoApi.planMulti).toHaveBeenCalledWith({
+      topologyId: topology.id,
+      algorithm: 'astar',
+      mode: 'preset',
+      scenarioId: 'parallel',
+    })
+    expect(screen.getByText('检测节点冲突')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('选择跟随车辆'), { target: { value: 'CTU-02' } })
     expect(scene).toHaveAttribute('data-followed-vehicle', 'CTU-02')
@@ -265,11 +292,79 @@ describe('PathDemoPage', () => {
     vi.mocked(pathDemoApi.planMulti).mockRejectedValueOnce(new Error('No conflict-free space-time path found'))
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'multi' } })
-    const planButton = screen.getByRole('button', { name: '规划多车路径' })
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    const planButton = screen.getByRole('button', { name: '开始多车规划' })
     await waitFor(() => expect(planButton).toBeEnabled())
     fireEvent.click(planButton)
     expect(await screen.findByRole('alert')).toHaveTextContent('No conflict-free space-time path found')
     expect(screen.getByRole('button', { name: '开始运行' })).toBeDisabled()
+  })
+
+  it('adds and deletes custom vehicles without affecting the preset list', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+    const addButton = await screen.findByRole('button', { name: '添加车辆' })
+    await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
+    fireEvent.click(addButton)
+    fireEvent.click(addButton)
+    fireEvent.click(addButton)
+    expect(screen.getByText('车辆配置（6/6）')).toBeInTheDocument()
+    expect(addButton).toBeDisabled()
+    expect(screen.getByDisplayValue('CTU-06')).toBeInTheDocument()
+
+    const deleteButtons = screen.getAllByRole('button', { name: '删除车辆' })
+    fireEvent.click(deleteButtons.at(-1)!)
+    expect(screen.getByText('车辆配置（5/6）')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    expect(await screen.findByRole('combobox', { name: '冲突演示场景' })).toHaveValue('parallel')
+    expect(screen.getByText('场景 A：无冲突并行运行')).toBeInTheDocument()
+  })
+
+  it('selects a verified road cell for the active vehicle and exposes endpoint markers', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+    await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
+    fireEvent.click(screen.getAllByRole('button', { name: '图选起点' })[0])
+    expect(screen.getByRole('status')).toHaveTextContent('正在为 CTU-01 选择起点')
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-road-selection-enabled', 'true')
+    fireEvent.click(screen.getByTestId('mock-road-cell'))
+    expect(screen.getByLabelText('CTU-01 起点')).toHaveValue('cell-r3-c3')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-endpoint-markers', expect.stringContaining('CTU-01:start'))
+  })
+
+  it('ignores an obsolete planning response after the mode changes', async () => {
+    let resolvePlan: ((value: typeof multiPlan) => void) | undefined
+    vi.mocked(pathDemoApi.planMulti).mockImplementationOnce(() => new Promise((resolve) => { resolvePlan = resolve }))
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    const planButton = await screen.findByRole('button', { name: '开始多车规划' })
+    await waitFor(() => expect(planButton).toBeEnabled())
+    fireEvent.click(planButton)
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'single' } })
+    resolvePlan?.(multiPlan)
+    await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', ''))
+    expect(screen.getByText('未规划')).toBeInTheDocument()
+  })
+})
+
+describe('custom multi-vehicle configuration helpers', () => {
+  it('allocates unique IDs up to six vehicles and validates duplicate endpoints', () => {
+    let vehicles: MultiPathVehicleRequest[] = multiVehicles.map((vehicle, index) => ({ ...vehicle, vehicle_type: 'ctu', priority: index + 1 }))
+    for (let count = 4; count <= 6; count += 1) {
+      const next = createCustomVehicle(vehicles, cells)
+      expect(next?.vehicle_id).toBe(`CTU-0${count}`)
+      vehicles = [...vehicles, next!]
+    }
+    expect(createCustomVehicle(vehicles, cells)).toBeNull()
+    expect(validateMultiVehicleConfiguration(vehicles.slice(0, 5), cells)).toBe('')
+    expect(validateMultiVehicleConfiguration([
+      vehicles[0],
+      { ...vehicles[1], start_cell_id: vehicles[0].start_cell_id },
+    ], cells)).toContain('同一个起点')
   })
 })

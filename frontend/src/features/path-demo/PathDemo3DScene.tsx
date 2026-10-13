@@ -4,8 +4,16 @@ import { buildSceneSpec, type SceneItem, type SceneRack } from '../../lib/topolo
 import type { TopologyPayload } from '../../types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
+import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
 import type { CameraActionRequest, CameraViewMode } from './cameraControls'
-import type { PathDemoVehicleView, PlaybackStatus, TrajectoryPoint, TrajectorySample } from './types'
+import type {
+  PathDemoCell,
+  PathDemoEndpointMarker,
+  PathDemoVehicleView,
+  PlaybackStatus,
+  TrajectoryPoint,
+  TrajectorySample,
+} from './types'
 
 function RackModel({ rack }: { rack: SceneRack }) {
   const height = rack.levels * rack.levelHeight
@@ -81,6 +89,11 @@ export function PathDemo3DScene({
   cameraActionRequest,
   vehicles = [],
   followedVehicleSample,
+  roadCells = [],
+  roadSelectionEnabled = false,
+  endpointMarkers = [],
+  onRoadCellSelect,
+  onInvalidRoadSelection,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -91,6 +104,11 @@ export function PathDemo3DScene({
   cameraActionRequest: CameraActionRequest | null
   vehicles?: PathDemoVehicleView[]
   followedVehicleSample?: TrajectorySample | null
+  roadCells?: PathDemoCell[]
+  roadSelectionEnabled?: boolean
+  endpointMarkers?: PathDemoEndpointMarker[]
+  onRoadCellSelect?: (cell: PathDemoCell) => void
+  onInvalidRoadSelection?: () => void
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const visibleItems = useMemo(
@@ -109,7 +127,20 @@ export function PathDemo3DScene({
       <hemisphereLight intensity={0.5} color="#d7dee9" groundColor="#0b101a" />
       <directionalLight position={[14, 24, 12]} intensity={1.5} castShadow />
       {visibleItems.map((item) => <StaticSceneItem key={item.key} item={item} />)}
-      <PathDemo3DOverlay trajectory={trajectory} sample={sample} vehicles={vehicles} />
+      <PathDemo3DOverlay
+        trajectory={trajectory}
+        sample={sample}
+        vehicles={vehicles}
+        endpointMarkers={endpointMarkers}
+      />
+      <RoadCellSelectionLayer
+        topology={topology}
+        activeFloor={activeFloor}
+        roadCells={roadCells}
+        enabled={roadSelectionEnabled}
+        onSelect={onRoadCellSelect}
+        onInvalidSelection={onInvalidRoadSelection}
+      />
       <CameraFollowController
         initialPosition={spec.camera.position}
         initialTarget={spec.camera.target}

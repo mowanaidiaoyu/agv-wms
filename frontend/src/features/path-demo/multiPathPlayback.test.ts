@@ -80,4 +80,16 @@ describe('multi path playback', () => {
     expect(new Set(views.map((view) => view.sample?.elapsedSeconds))).toEqual(new Set([0.375]))
     expect(views[0].sample?.headingRadians).toBeCloseTo(Math.PI / 2)
   })
+
+  it('supports six independent vehicle styles and honors configured colors', () => {
+    const vehicles = Array.from({ length: 6 }, (_, index) => ({
+      ...vehiclePlan,
+      vehicle_id: `CTU-0${index + 1}`,
+      display_color: index === 5 ? '#123456' : null,
+    }))
+    const views = buildMultiVehicleViews({ ...plan, vehicles }, topology, 0.25)
+    expect(views).toHaveLength(6)
+    expect(new Set(views.map((view) => view.color)).size).toBe(6)
+    expect(views[5].color).toBe('#123456')
+  })
 })

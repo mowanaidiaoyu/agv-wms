@@ -57,8 +57,11 @@ class PathDemoPlanResponse(BaseModel):
 
 class MultiPathVehicleRequest(BaseModel):
     vehicle_id: str = Field(min_length=1)
+    vehicle_type: Literal["ctu"] = "ctu"
     start_cell_id: str = Field(min_length=1)
     goal_cell_id: str = Field(min_length=1)
+    priority: int = Field(default=1, ge=1, le=100)
+    display_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class MultiPathPlanningConfig(BaseModel):
@@ -73,7 +76,9 @@ class MultiPathPlanningConfig(BaseModel):
 
 class MultiPathPlanRequest(BaseModel):
     topology_id: str = Field(min_length=1)
-    vehicles: list[MultiPathVehicleRequest] = Field(min_length=1, max_length=10)
+    mode: Literal["preset", "custom"] | None = None
+    scenario_id: Literal["parallel", "node-conflict", "edge-swap"] | None = None
+    vehicles: list[MultiPathVehicleRequest] = Field(default_factory=list, max_length=6)
     algorithm: PathDemoAlgorithm = "astar"
     planning_config: MultiPathPlanningConfig = Field(default_factory=MultiPathPlanningConfig)
 
@@ -87,6 +92,9 @@ class MultiPathStep(BaseModel):
 
 class MultiPathVehiclePlan(BaseModel):
     vehicle_id: str
+    vehicle_type: Literal["ctu"] = "ctu"
+    priority: int
+    display_color: str | None = None
     start: PathDemoCell
     goal: PathDemoCell
     steps: list[MultiPathStep]

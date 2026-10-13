@@ -269,12 +269,14 @@ def _remaining_conflicts(paths: list[list[Position]], safety_distance: float) ->
 
 def plan_multi_paths(
     topology: dict[str, Any],
-    vehicles: list[dict[str, str]],
+    vehicles: list[dict[str, Any]],
     algorithm: str,
     planning_config: dict[str, Any],
 ) -> dict[str, Any]:
     if algorithm not in {"astar", "dijkstra"}:
         raise PathDemoError(f"Unsupported algorithm: {algorithm}")
+    if not 1 <= len(vehicles) <= 6:
+        raise PathDemoError("Multi-vehicle planning requires between 1 and 6 vehicles")
     limits = PlanningLimits(**planning_config)
     if not math.isclose(limits.time_step_seconds * limits.speed_cells_per_second, 1.0, abs_tol=1e-9):
         raise PathDemoError(
@@ -296,8 +298,19 @@ def plan_multi_paths(
     if len(set(vehicle_ids)) != len(vehicle_ids):
         raise PathDemoError("Vehicle IDs must be unique")
 
-    normalized: list[tuple[dict[str, str], Position, Position]] = []
-    for vehicle in vehicles:
+    ordered_vehicles = [
+        vehicle
+        for _, vehicle in sorted(
+            enumerate(vehicles),
+            key=lambda item: (int(item[1].get("priority", 1)), item[0]),
+        )
+    ]
+    goal_ids = [vehicle["goal_cell_id"] for vehicle in ordered_vehicles]
+    if len(set(goal_ids)) != len(goal_ids):
+        raise PathDemoError("Vehicles cannot share a persistent goal road node", status_code=409)
+
+    normalized: list[tuple[dict[str, Any], Position, Position]] = []
+    for vehicle in ordered_vehicles:
         start_cell = cells_by_id.get(vehicle["start_cell_id"])
         goal_cell = cells_by_id.get(vehicle["goal_cell_id"])
         if start_cell is None:
@@ -326,15 +339,18 @@ def plan_multi_paths(
     vehicle_results: list[dict[str, Any]] = []
     for vehicle, start, goal in normalized:
         baseline_distance = _shortest_distance(graph, start, goal)
-        path, visited_states = _space_time_path(
-            graph,
-            start,
-            goal,
-            algorithm,
-            reservations,
-            limits,
-            tracker,
-        )
+        try:
+            path, visited_states = _space_time_path(
+                graph,
+                start,
+                goal,
+                algorithm,
+                reservations,
+                limits,
+                tracker,
+            )
+        except PathDemoError as exc:
+            raise PathDemoError(f"Vehicle {vehicle['vehicle_id']}: {exc.detail}", status_code=exc.status_code) from exc
         reservations.append(path)
         movement_steps = sum(first != second for first, second in zip(path, path[1:]))
         wait_steps = len(path) - 1 - movement_steps
@@ -354,6 +370,9 @@ def plan_multi_paths(
         vehicle_results.append(
             {
                 "vehicle_id": vehicle["vehicle_id"],
+                "vehicle_type": vehicle.get("vehicle_type", "ctu"),
+                "priority": int(vehicle.get("priority", 1)),
+                "display_color": vehicle.get("display_color"),
                 "start": _cell_payload(road_lookup[start], component_id),
                 "goal": _cell_payload(road_lookup[goal], component_id),
                 "steps": steps,
@@ -551,11 +570,14 @@ def build_multi_demo_scenarios(topology: dict[str, Any]) -> list[dict[str, Any]]
     if edge_third is None:
         raise PathDemoError("Unable to place the third vehicle away from the edge-swap scenario")
 
-    def vehicle_payload(vehicle_id: str, start: Position, goal: Position) -> dict[str, str]:
+    def vehicle_payload(vehicle_id: str, start: Position, goal: Position) -> dict[str, Any]:
+        priority = int(vehicle_id.rsplit("-", 1)[-1])
         return {
             "vehicle_id": vehicle_id,
+            "vehicle_type": "ctu",
             "start_cell_id": road_lookup[start]["id"],
             "goal_cell_id": road_lookup[goal]["id"],
+            "priority": priority,
         }
 
     return [

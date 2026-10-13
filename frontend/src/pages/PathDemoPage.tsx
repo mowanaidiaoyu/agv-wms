@@ -1,15 +1,23 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
+import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
-import { buildMultiVehicleViews } from '../features/path-demo/multiPathPlayback'
+import {
+  buildEndpointMarkers,
+  buildMultiVehicleViews,
+  MULTI_VEHICLE_STYLES,
+} from '../features/path-demo/multiPathPlayback'
 import { buildTrajectory, sampleTrajectory, usePathPlayback } from '../features/path-demo/pathPlayback'
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import type {
+  MultiPathDemoScenario,
   MultiPathPlan,
   MultiPathVehicleRequest,
   PathDemoAlgorithm,
+  PathDemoCell,
   PathDemoPlan,
+  RoadSelectionKind,
 } from '../features/path-demo/types'
 import { api } from '../lib/api'
 import './PathDemoPage.css'
@@ -25,6 +33,17 @@ const statusLabel = {
   completed: '已到达',
 }
 
+const planningStatusLabel = {
+  idle: '未规划',
+  planning: '规划中',
+  success: '规划成功',
+  failed: '规划失败',
+}
+
+type DemoMode = 'single' | 'preset' | 'custom'
+type PlanningStatus = keyof typeof planningStatusLabel
+type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
+
 function multiVehicleStatusLabel(globalStatus: keyof typeof statusLabel, elapsedSeconds: number, durationSeconds: number) {
   if (globalStatus === 'idle') return '待运行'
   if (elapsedSeconds >= durationSeconds) return '已到达'
@@ -32,7 +51,14 @@ function multiVehicleStatusLabel(globalStatus: keyof typeof statusLabel, elapsed
   return '运行中'
 }
 
-type DemoMode = 'single' | 'multi'
+function normalizeVehicles(vehicles: MultiPathVehicleRequest[]): MultiPathVehicleRequest[] {
+  return vehicles.map((vehicle, index) => ({
+    ...vehicle,
+    vehicle_type: 'ctu',
+    priority: vehicle.priority ?? index + 1,
+    display_color: vehicle.display_color ?? MULTI_VEHICLE_STYLES[index]?.color ?? '#e2e8f0',
+  }))
+}
 
 export function PathDemoPage() {
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
@@ -43,13 +69,18 @@ export function PathDemoPage() {
   const [goalCellId, setGoalCellId] = useState('')
   const [plan, setPlan] = useState<PathDemoPlan | null>(null)
   const [multiPlan, setMultiPlan] = useState<MultiPathPlan | null>(null)
-  const [multiScenarioId, setMultiScenarioId] = useState('')
-  const [multiVehicles, setMultiVehicles] = useState<MultiPathVehicleRequest[]>([])
+  const [presetScenarioId, setPresetScenarioId] = useState<MultiPathDemoScenario['id']>('parallel')
+  const [presetVehicles, setPresetVehicles] = useState<MultiPathVehicleRequest[]>([])
+  const [customVehicles, setCustomVehicles] = useState<MultiPathVehicleRequest[]>([])
+  const [selectedConfigVehicleId, setSelectedConfigVehicleId] = useState('CTU-01')
+  const [roadSelection, setRoadSelection] = useState<RoadSelection>(null)
+  const [selectionError, setSelectionError] = useState('')
   const [followVehicleId, setFollowVehicleId] = useState('CTU-01')
-  const [planning, setPlanning] = useState(false)
+  const [planningStatus, setPlanningStatus] = useState<PlanningStatus>('idle')
   const [planningError, setPlanningError] = useState('')
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
+  const requestSequenceRef = useRef(0)
 
   useEffect(() => {
     if (topologyId || !topologiesQuery.data?.length) return
@@ -66,7 +97,7 @@ export function PathDemoPage() {
   const multiScenariosQuery = useQuery({
     queryKey: ['path-demo-multi-scenarios', topologyId],
     queryFn: () => pathDemoApi.multiScenarios(topologyId),
-    enabled: Boolean(topologyId) && demoMode === 'multi',
+    enabled: Boolean(topologyId) && demoMode !== 'single',
   })
 
   const trajectory = useMemo(
@@ -74,7 +105,7 @@ export function PathDemoPage() {
     [plan, topologyRecord],
   )
   const singleDuration = trajectory.at(-1)?.arrivalSeconds ?? 0
-  const duration = demoMode === 'multi' ? (multiPlan?.makespan_seconds ?? 0) : singleDuration
+  const duration = demoMode === 'single' ? singleDuration : (multiPlan?.makespan_seconds ?? 0)
   const {
     state: playbackState,
     start: startPlayback,
@@ -89,15 +120,38 @@ export function PathDemoPage() {
   )
   const multiVehicleViews = useMemo(
     () => (
-      demoMode === 'multi' && multiPlan && topologyRecord
+      demoMode !== 'single' && multiPlan && topologyRecord
         ? buildMultiVehicleViews(multiPlan, topologyRecord.payload, playbackState.elapsedSeconds)
         : []
     ),
     [demoMode, multiPlan, playbackState.elapsedSeconds, topologyRecord],
   )
-  const followedVehicleSample = demoMode === 'multi'
+  const followedVehicleSample = demoMode !== 'single'
     ? (multiVehicleViews.find((vehicle) => vehicle.vehicleId === followVehicleId)?.sample ?? null)
     : sample
+
+  const roadCells = useMemo(() => multiScenariosQuery.data?.road_cells ?? [], [multiScenariosQuery.data])
+  const activeVehicles = demoMode === 'preset' ? presetVehicles : customVehicles
+  const activeConfigurationError = demoMode === 'single' ? '' : validateMultiVehicleConfiguration(activeVehicles, roadCells)
+  const endpointMarkers = useMemo(
+    () => (
+      demoMode !== 'single' && topologyRecord
+        ? buildEndpointMarkers(activeVehicles, roadCells, topologyRecord.payload)
+        : []
+    ),
+    [activeVehicles, demoMode, roadCells, topologyRecord],
+  )
+
+  const invalidatePlan = () => {
+    requestSequenceRef.current += 1
+    setPlan(null)
+    setMultiPlan(null)
+    setPlanningStatus('idle')
+    setPlanningError('')
+    setCameraViewMode('free')
+    setCameraActionRequest(null)
+    resetPlayback()
+  }
 
   useEffect(() => {
     if (!optionsQuery.data) return
@@ -105,6 +159,7 @@ export function PathDemoPage() {
     setGoalCellId(optionsQuery.data.default_goal.id)
     setPlan(null)
     setMultiPlan(null)
+    setPlanningStatus('idle')
     setPlanningError('')
     setCameraViewMode('free')
     setCameraActionRequest(null)
@@ -112,31 +167,27 @@ export function PathDemoPage() {
   }, [optionsQuery.data, resetPlayback])
 
   useEffect(() => {
-    if (!multiScenariosQuery.data?.scenarios.length || multiScenarioId) return
-    const initialScenario = multiScenariosQuery.data.scenarios[0]
-    setMultiScenarioId(initialScenario.id)
-    setMultiVehicles(initialScenario.vehicles)
-    setFollowVehicleId(initialScenario.vehicles[0]?.vehicle_id ?? 'CTU-01')
-  }, [multiScenarioId, multiScenariosQuery.data])
-
-  const invalidatePlan = () => {
-    setPlan(null)
-    setMultiPlan(null)
-    setPlanningError('')
-    setCameraViewMode('free')
-    setCameraActionRequest(null)
-    resetPlayback()
-  }
+    const scenarios = multiScenariosQuery.data?.scenarios
+    if (!scenarios?.length) return
+    const selected = scenarios.find((item) => item.id === presetScenarioId) ?? scenarios[0]
+    const normalized = normalizeVehicles(selected.vehicles)
+    setPresetScenarioId(selected.id)
+    setPresetVehicles(normalized)
+    if (!customVehicles.length) setCustomVehicles(normalized.map((vehicle) => ({ ...vehicle })))
+    if (!normalized.some((vehicle) => vehicle.vehicle_id === followVehicleId)) {
+      setFollowVehicleId(normalized[0]?.vehicle_id ?? 'CTU-01')
+    }
+  }, [customVehicles.length, followVehicleId, multiScenariosQuery.data, presetScenarioId])
 
   const requestCameraAction = (type: CameraActionRequest['type']) => {
     setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
   }
 
   const requestPlan = async () => {
-    if (!topologyId) return
-    if (demoMode === 'single' && (!startCellId || !goalCellId)) return
-    if (demoMode === 'multi' && multiVehicles.length !== 3) return
-    setPlanning(true)
+    if (!topologyId || (demoMode === 'single' && (!startCellId || !goalCellId)) || activeConfigurationError) return
+    const requestId = requestSequenceRef.current + 1
+    requestSequenceRef.current = requestId
+    setPlanningStatus('planning')
     setPlanningError('')
     setPlan(null)
     setMultiPlan(null)
@@ -144,35 +195,79 @@ export function PathDemoPage() {
     setCameraActionRequest(null)
     resetPlayback()
     try {
-      if (demoMode === 'multi') {
-        setMultiPlan(await pathDemoApi.planMulti(topologyId, multiVehicles, algorithm))
+      if (demoMode === 'preset') {
+        const result = await pathDemoApi.planMulti({ topologyId, algorithm, mode: 'preset', scenarioId: presetScenarioId })
+        if (requestSequenceRef.current === requestId) setMultiPlan(result)
+      } else if (demoMode === 'custom') {
+        const result = await pathDemoApi.planMulti({ topologyId, vehicles: customVehicles, algorithm, mode: 'custom' })
+        if (requestSequenceRef.current === requestId) setMultiPlan(result)
       } else {
-        setPlan(await pathDemoApi.plan(topologyId, startCellId, goalCellId, algorithm))
+        const result = await pathDemoApi.plan(topologyId, startCellId, goalCellId, algorithm)
+        if (requestSequenceRef.current === requestId) setPlan(result)
       }
+      if (requestSequenceRef.current === requestId) setPlanningStatus('success')
     } catch (error) {
+      if (requestSequenceRef.current !== requestId) return
       setPlan(null)
       setMultiPlan(null)
+      setPlanningStatus('failed')
       setPlanningError(error instanceof Error ? error.message : '路径规划失败')
-    } finally {
-      setPlanning(false)
     }
+  }
+
+  const setCustomEndpoint = (vehicleId: string, kind: RoadSelectionKind, cellId: string) => {
+    const duplicate = customVehicles.some((vehicle) => (
+      vehicle.vehicle_id !== vehicleId
+      && (kind === 'start' ? vehicle.start_cell_id : vehicle.goal_cell_id) === cellId
+    ))
+    if (cellId && duplicate) {
+      setSelectionError(`该${kind === 'start' ? '起点' : '终点'}已被其他车辆使用。`)
+      return false
+    }
+    setCustomVehicles((current) => current.map((vehicle) => (
+      vehicle.vehicle_id === vehicleId
+        ? { ...vehicle, [kind === 'start' ? 'start_cell_id' : 'goal_cell_id']: cellId }
+        : vehicle
+    )))
+    setSelectionError('')
+    invalidatePlan()
+    return true
+  }
+
+  const handleRoadCellSelect = (cell: PathDemoCell) => {
+    if (!roadSelection) return
+    if (setCustomEndpoint(roadSelection.vehicleId, roadSelection.kind, cell.id)) setRoadSelection(null)
+  }
+
+  const removeCustomVehicle = (vehicleId: string) => {
+    if (customVehicles.length <= 1) return
+    const nextVehicles = customVehicles.filter((vehicle) => vehicle.vehicle_id !== vehicleId)
+    setCustomVehicles(nextVehicles)
+    if (selectedConfigVehicleId === vehicleId) setSelectedConfigVehicleId(nextVehicles[0].vehicle_id)
+    if (followVehicleId === vehicleId) setFollowVehicleId(nextVehicles[0].vehicle_id)
+    if (roadSelection?.vehicleId === vehicleId) setRoadSelection(null)
+    invalidatePlan()
   }
 
   const optionsError = optionsQuery.error instanceof Error ? optionsQuery.error.message : ''
   const scenariosError = multiScenariosQuery.error instanceof Error ? multiScenariosQuery.error.message : ''
-  const activeFloor = multiPlan?.vehicles[0]?.start.floor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
-  const roadCells = multiScenariosQuery.data?.road_cells ?? []
-  const canPlay = demoMode === 'multi' ? Boolean(multiPlan && multiPlan.makespan_seconds > 0) : trajectory.length > 1
+  const markerFloor = demoMode !== 'single'
+    ? roadCells.find((cell) => cell.id === activeVehicles[0]?.start_cell_id)?.floor
+    : undefined
+  const activeFloor = multiPlan?.vehicles[0]?.start.floor ?? markerFloor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
+  const canPlay = demoMode === 'single' ? trajectory.length > 1 : Boolean(multiPlan && multiPlan.makespan_seconds > 0)
+  const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
+  const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
 
   return (
     <section className="path-demo-page">
       <header className="path-demo-header">
         <div>
           <p className="eyebrow">Gate C-3D-3 · deterministic space-time path playback</p>
-          <h2>{demoMode === 'multi' ? '真实拓扑多车 3D 冲突避让演示' : '真实拓扑单车 3D 轨迹演示'}</h2>
+          <h2>{demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
           <p>路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。</p>
         </div>
-        <span className="path-demo-mode">CTU · {demoMode === 'multi' ? '多车离线演示' : '单车演示模式'}</span>
+        <span className="path-demo-mode">CTU · {demoMode === 'single' ? '单车演示模式' : '多车离线演示'}</span>
       </header>
 
       <div className="path-demo-layout">
@@ -185,8 +280,9 @@ export function PathDemoPage() {
                 setTopologyId(event.target.value)
                 setStartCellId('')
                 setGoalCellId('')
-                setMultiScenarioId('')
-                setMultiVehicles([])
+                setPresetVehicles([])
+                setCustomVehicles([])
+                setRoadSelection(null)
                 invalidatePlan()
               }}
             >
@@ -200,45 +296,31 @@ export function PathDemoPage() {
               onChange={(event) => {
                 const nextMode = event.target.value as DemoMode
                 setDemoMode(nextMode)
+                setRoadSelection(null)
+                setSelectionError('')
+                const nextVehicles = nextMode === 'preset' ? presetVehicles : customVehicles
+                setFollowVehicleId(nextVehicles[0]?.vehicle_id ?? 'CTU-01')
                 invalidatePlan()
-                if (nextMode === 'multi') {
-                  const initialScenario = multiScenariosQuery.data?.scenarios[0]
-                  if (initialScenario) {
-                    setMultiScenarioId(initialScenario.id)
-                    setMultiVehicles(initialScenario.vehicles)
-                  }
-                }
               }}
             >
               <option value="single">单车轨迹</option>
-              <option value="multi">三车冲突避让</option>
+              <option value="preset">预设多车场景（A/B/C）</option>
+              <option value="custom">自定义多车（1–6 辆）</option>
             </select>
           </label>
           <label>
             路径算法
-            <select
-              value={algorithm}
-              onChange={(event) => {
-                setAlgorithm(event.target.value as PathDemoAlgorithm)
-                invalidatePlan()
-              }}
-            >
+            <select value={algorithm} onChange={(event) => { setAlgorithm(event.target.value as PathDemoAlgorithm); invalidatePlan() }}>
               <option value="astar">A*</option>
               <option value="dijkstra">Dijkstra</option>
             </select>
           </label>
+
           {demoMode === 'single' ? (
             <>
               <label>
                 起点（可行驶道路）
-                <select
-                  value={startCellId}
-                  disabled={!optionsQuery.data}
-                  onChange={(event) => {
-                    setStartCellId(event.target.value)
-                    invalidatePlan()
-                  }}
-                >
+                <select value={startCellId} disabled={!optionsQuery.data} onChange={(event) => { setStartCellId(event.target.value); invalidatePlan() }}>
                   {(optionsQuery.data?.traversable_cells ?? []).filter((cell) => cell.type === 'road').map((cell) => (
                     <option key={cell.id} value={cell.id}>{cell.id} · {cell.floor} · {cell.component_id}</option>
                   ))}
@@ -246,96 +328,152 @@ export function PathDemoPage() {
               </label>
               <label>
                 终点（可行驶道路）
-                <select
-                  value={goalCellId}
-                  disabled={!optionsQuery.data}
-                  onChange={(event) => {
-                    setGoalCellId(event.target.value)
-                    invalidatePlan()
-                  }}
-                >
+                <select value={goalCellId} disabled={!optionsQuery.data} onChange={(event) => { setGoalCellId(event.target.value); invalidatePlan() }}>
                   {(optionsQuery.data?.traversable_cells ?? []).filter((cell) => cell.type === 'road').map((cell) => (
                     <option key={cell.id} value={cell.id}>{cell.id} · {cell.floor} · {cell.component_id}</option>
                   ))}
                 </select>
               </label>
             </>
-          ) : (
-            <section className="path-demo-multi-config" aria-label="多车路径配置">
+          ) : null}
+
+          {demoMode === 'preset' ? (
+            <section className="path-demo-multi-config" aria-label="预设多车场景">
               <label>
                 冲突演示场景
                 <select
-                  value={multiScenarioId}
+                  value={presetScenarioId}
                   disabled={!multiScenariosQuery.data}
                   onChange={(event) => {
                     const selected = multiScenariosQuery.data?.scenarios.find((item) => item.id === event.target.value)
                     if (!selected) return
-                    setMultiScenarioId(selected.id)
-                    setMultiVehicles(selected.vehicles)
-                    setFollowVehicleId(selected.vehicles[0]?.vehicle_id ?? 'CTU-01')
+                    const vehicles = normalizeVehicles(selected.vehicles)
+                    setPresetScenarioId(selected.id)
+                    setPresetVehicles(vehicles)
+                    setFollowVehicleId(vehicles[0]?.vehicle_id ?? 'CTU-01')
                     invalidatePlan()
                   }}
                 >
-                  {(multiScenariosQuery.data?.scenarios ?? []).map((scenario) => (
-                    <option key={scenario.id} value={scenario.id}>{scenario.name}</option>
-                  ))}
-                  {multiScenarioId === 'custom' ? <option value="custom">自定义</option> : null}
+                  {(multiScenariosQuery.data?.scenarios ?? []).map((scenario) => <option key={scenario.id} value={scenario.id}>{scenario.name}</option>)}
                 </select>
               </label>
-              {multiScenariosQuery.data?.scenarios.find((item) => item.id === multiScenarioId)?.description ? (
-                <p className="path-demo-note">
-                  {multiScenariosQuery.data.scenarios.find((item) => item.id === multiScenarioId)?.description}
-                </p>
+              {multiScenariosQuery.data?.scenarios.find((item) => item.id === presetScenarioId)?.description ? (
+                <p className="path-demo-note">{multiScenariosQuery.data.scenarios.find((item) => item.id === presetScenarioId)?.description}</p>
               ) : null}
-              {multiVehicles.map((vehicle, vehicleIndex) => (
-                <fieldset key={vehicle.vehicle_id} className="path-demo-vehicle-config">
-                  <legend>{vehicle.vehicle_id}</legend>
+            </section>
+          ) : null}
+
+          {demoMode === 'custom' ? (
+            <section className="path-demo-multi-config" aria-label="自定义多车配置">
+              <div className="path-demo-config-toolbar">
+                <strong>车辆配置（{customVehicles.length}/6）</strong>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={customVehicles.length >= 6 || !roadCells.length}
+                  onClick={() => {
+                    const vehicle = createCustomVehicle(customVehicles, roadCells)
+                    if (!vehicle) return
+                    setCustomVehicles((current) => [...current, vehicle])
+                    setSelectedConfigVehicleId(vehicle.vehicle_id)
+                    setFollowVehicleId(vehicle.vehicle_id)
+                    invalidatePlan()
+                  }}
+                >
+                  添加车辆
+                </button>
+              </div>
+              <p className="path-demo-note">点击“图选起点/终点”后单击道路格；拖动仍用于旋转视角。</p>
+              {customVehicles.map((vehicle) => (
+                <fieldset
+                  key={vehicle.vehicle_id}
+                  className={`path-demo-vehicle-config ${selectedConfigVehicleId === vehicle.vehicle_id ? 'is-selected' : ''}`}
+                  onFocus={() => setSelectedConfigVehicleId(vehicle.vehicle_id)}
+                >
+                  <legend>
+                    <button className="path-demo-vehicle-selector" type="button" onClick={() => setSelectedConfigVehicleId(vehicle.vehicle_id)}>
+                      <span className="path-demo-color-dot" style={{ backgroundColor: vehicle.display_color ?? undefined }} />
+                      {vehicle.vehicle_id}
+                    </button>
+                  </legend>
+                  <label>车辆 ID<input value={vehicle.vehicle_id} readOnly /></label>
+                  <label>车辆类型<input value="CTU" readOnly /></label>
+                  <label>
+                    优先级
+                    <input
+                      aria-label={`${vehicle.vehicle_id} 优先级`}
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={vehicle.priority}
+                      onChange={(event) => {
+                        const priority = Math.max(1, Math.min(100, Number(event.target.value) || 1))
+                        setCustomVehicles((current) => current.map((item) => item.vehicle_id === vehicle.vehicle_id ? { ...item, priority } : item))
+                        invalidatePlan()
+                      }}
+                    />
+                  </label>
                   <label>
                     {vehicle.vehicle_id} 起点
-                    <select
-                      value={vehicle.start_cell_id}
-                      onChange={(event) => {
-                        setMultiScenarioId('custom')
-                        setMultiVehicles((current) => current.map((item, index) => (
-                          index === vehicleIndex ? { ...item, start_cell_id: event.target.value } : item
-                        )))
-                        invalidatePlan()
-                      }}
-                    >
+                    <select value={vehicle.start_cell_id} onChange={(event) => setCustomEndpoint(vehicle.vehicle_id, 'start', event.target.value)}>
+                      <option value="">请选择</option>
                       {roadCells.map((cell) => <option key={cell.id} value={cell.id}>{cell.id}</option>)}
                     </select>
                   </label>
+                  <button
+                    className={roadSelection?.vehicleId === vehicle.vehicle_id && roadSelection.kind === 'start' ? 'accent-button' : 'ghost-button'}
+                    type="button"
+                    onClick={() => { setSelectedConfigVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'start' }); setSelectionError('') }}
+                  >图选起点</button>
                   <label>
                     {vehicle.vehicle_id} 终点
-                    <select
-                      value={vehicle.goal_cell_id}
-                      onChange={(event) => {
-                        setMultiScenarioId('custom')
-                        setMultiVehicles((current) => current.map((item, index) => (
-                          index === vehicleIndex ? { ...item, goal_cell_id: event.target.value } : item
-                        )))
-                        invalidatePlan()
-                      }}
-                    >
+                    <select value={vehicle.goal_cell_id} onChange={(event) => setCustomEndpoint(vehicle.vehicle_id, 'goal', event.target.value)}>
+                      <option value="">请选择</option>
                       {roadCells.map((cell) => <option key={cell.id} value={cell.id}>{cell.id}</option>)}
                     </select>
                   </label>
+                  <button
+                    className={roadSelection?.vehicleId === vehicle.vehicle_id && roadSelection.kind === 'goal' ? 'accent-button' : 'ghost-button'}
+                    type="button"
+                    onClick={() => { setSelectedConfigVehicleId(vehicle.vehicle_id); setRoadSelection({ vehicleId: vehicle.vehicle_id, kind: 'goal' }); setSelectionError('') }}
+                  >图选终点</button>
+                  <label>
+                    显示颜色
+                    <input
+                      aria-label={`${vehicle.vehicle_id} 显示颜色`}
+                      type="color"
+                      value={vehicle.display_color ?? '#e2e8f0'}
+                      onChange={(event) => {
+                        setCustomVehicles((current) => current.map((item) => item.vehicle_id === vehicle.vehicle_id ? { ...item, display_color: event.target.value } : item))
+                        invalidatePlan()
+                      }}
+                    />
+                  </label>
+                  <div className="path-demo-config-actions">
+                    <button className="ghost-button" type="button" onClick={() => setCustomEndpoint(vehicle.vehicle_id, 'start', '')}>清除起点</button>
+                    <button className="ghost-button" type="button" onClick={() => setCustomEndpoint(vehicle.vehicle_id, 'goal', '')}>清除终点</button>
+                    <button className="ghost-button danger" type="button" disabled={customVehicles.length <= 1} onClick={() => removeCustomVehicle(vehicle.vehicle_id)}>删除车辆</button>
+                  </div>
                 </fieldset>
               ))}
+              {roadSelection ? (
+                <div className="path-demo-selection-mode" role="status">
+                  正在为 {roadSelection.vehicleId} 选择{roadSelection.kind === 'start' ? '起点' : '终点'}
+                  <button className="ghost-button" type="button" onClick={() => setRoadSelection(null)}>退出地图选择</button>
+                </div>
+              ) : null}
+              {selectionError ? <p className="path-demo-error" role="alert">{selectionError}</p> : null}
+              {activeConfigurationError ? <p className="path-demo-error">{activeConfigurationError}</p> : null}
             </section>
-          )}
+          ) : null}
 
           <button
             className="accent-button path-demo-plan-button"
             type="button"
-            disabled={
-              planning
-              || optionsQuery.isFetching
-              || (demoMode === 'single' ? !startCellId || !goalCellId : multiVehicles.length !== 3)
-            }
+            disabled={planningStatus === 'planning' || optionsQuery.isFetching || Boolean(activeConfigurationError) || (demoMode === 'single' && (!startCellId || !goalCellId))}
             onClick={() => void requestPlan()}
           >
-            {planning ? '规划中…' : demoMode === 'multi' ? '规划多车路径' : '规划路径'}
+            {planningStatus === 'planning' ? '规划中…' : demoMode === 'single' ? '规划路径' : '开始多车规划'}
           </button>
 
           {optionsQuery.isLoading ? <p className="path-demo-note">正在分析可行驶连通分量…</p> : null}
@@ -355,80 +493,47 @@ export function PathDemoPage() {
           <section className="path-demo-camera-controls" aria-label="视角控制">
             <div className="path-demo-camera-heading">
               <strong>视角控制</strong>
-              <span className={`path-demo-view-badge is-${cameraViewMode}`}>
-                当前视角：{cameraViewMode === 'follow' ? '跟随' : '自由'}
-              </span>
+              <span className={`path-demo-view-badge is-${cameraViewMode}`}>当前视角：{cameraViewMode === 'follow' ? '跟随' : '自由'}</span>
             </div>
-            {demoMode === 'multi' ? (
+            {demoMode !== 'single' ? (
               <label>
                 选择跟随车辆
-                <select
-                  value={followVehicleId}
-                  disabled={!multiPlan}
-                  onChange={(event) => {
-                    setFollowVehicleId(event.target.value)
-                    requestCameraAction('locate')
-                  }}
-                >
-                  {multiVehicles.map((vehicle) => (
-                    <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>
-                  ))}
+                <select value={followVehicleId} disabled={!multiPlan} onChange={(event) => { setFollowVehicleId(event.target.value); requestCameraAction('locate') }}>
+                  {activeVehicles.map((vehicle) => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}
                 </select>
               </label>
             ) : null}
             <div className="path-demo-camera-buttons">
-              <button
-                className="ghost-button"
-                type="button"
-                disabled={!followedVehicleSample}
-                onClick={() => {
-                  setCameraViewMode('free')
-                  requestCameraAction('locate')
-                }}
-              >
-                定位小车
-              </button>
+              <button className="ghost-button" type="button" disabled={!followedVehicleSample} onClick={() => { setCameraViewMode('free'); requestCameraAction('locate') }}>定位小车</button>
               <button
                 className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'}
                 type="button"
                 disabled={!followedVehicleSample}
                 aria-pressed={cameraViewMode === 'follow'}
-                onClick={() => setCameraViewMode((current) => (current === 'follow' ? 'free' : 'follow'))}
-              >
-                跟随小车：{cameraViewMode === 'follow' ? '开' : '关'}
-              </button>
-              <button
-                className="ghost-button"
-                type="button"
-                disabled={cameraViewMode === 'free'}
-                onClick={() => setCameraViewMode('free')}
-              >
-                自由视角
-              </button>
-              <button
-                className="ghost-button"
-                type="button"
-                onClick={() => {
-                  setCameraViewMode('free')
-                  requestCameraAction('overview')
-                }}
-              >
-                仓库全景
-              </button>
+                onClick={() => setCameraViewMode((current) => current === 'follow' ? 'free' : 'follow')}
+              >跟随小车：{cameraViewMode === 'follow' ? '开' : '关'}</button>
+              <button className="ghost-button" type="button" disabled={cameraViewMode === 'free'} onClick={() => setCameraViewMode('free')}>自由视角</button>
+              <button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCameraAction('overview') }}>仓库全景</button>
             </div>
-            <p className="path-demo-note">当前车辆：{demoMode === 'multi' ? followVehicleId : 'CTU-01'}</p>
+            <p className="path-demo-note">当前车辆：{demoMode === 'single' ? 'CTU-01' : followVehicleId}</p>
             {!followedVehicleSample ? <p className="path-demo-note">请先规划路径，生成车辆位置后再定位或跟随。</p> : null}
           </section>
 
           <dl className="path-demo-stats">
+            <div><dt>规划状态</dt><dd>{planningStatusLabel[planningStatus]}</dd></div>
             <div><dt>连通分量</dt><dd>{optionsQuery.data?.components.length ?? '—'}</dd></div>
             <div><dt>最大分量</dt><dd>{optionsQuery.data?.components[0]?.cell_count ?? '—'} 格</dd></div>
-            {demoMode === 'multi' ? (
+            {demoMode !== 'single' ? (
               <>
-                <div><dt>车辆数量</dt><dd>{multiPlan?.vehicles.length ?? '—'}</dd></div>
+                <div><dt>车辆数量</dt><dd>{multiPlan?.vehicles.length ?? activeVehicles.length}</dd></div>
+                <div><dt>总距离</dt><dd>{totalDistance === undefined ? '—' : `${totalDistance} 格`}</dd></div>
+                <div><dt>总等待时间</dt><dd>{totalWait === undefined ? '—' : `${totalWait.toFixed(2)} s`}</dd></div>
+                <div><dt>总完成时间</dt><dd>{multiPlan ? `${multiPlan.makespan_seconds.toFixed(2)} s` : '—'}</dd></div>
                 <div><dt>检测节点冲突</dt><dd>{multiPlan?.conflicts.detected_node_conflicts ?? '—'}</dd></div>
                 <div><dt>检测边冲突</dt><dd>{multiPlan?.conflicts.detected_edge_conflicts ?? '—'}</dd></div>
-                <div><dt>最终执行冲突</dt><dd>{multiPlan ? multiPlan.conflicts.remaining_node_conflicts + multiPlan.conflicts.remaining_edge_conflicts + multiPlan.conflicts.remaining_geometry_conflicts : '—'}</dd></div>
+                <div><dt>最终节点冲突</dt><dd>{multiPlan?.conflicts.remaining_node_conflicts ?? '—'}</dd></div>
+                <div><dt>最终边冲突</dt><dd>{multiPlan?.conflicts.remaining_edge_conflicts ?? '—'}</dd></div>
+                <div><dt>最终几何冲突</dt><dd>{multiPlan?.conflicts.remaining_geometry_conflicts ?? '—'}</dd></div>
                 <div><dt>避让次数</dt><dd>{multiPlan?.avoidance_count ?? '—'}</dd></div>
                 <div><dt>规划耗时</dt><dd>{multiPlan ? `${multiPlan.planning_time_ms.toFixed(2)} ms` : '—'}</dd></div>
               </>
@@ -444,7 +549,7 @@ export function PathDemoPage() {
             <div><dt>运动状态</dt><dd>{statusLabel[playbackState.status]}</dd></div>
             <div><dt>演示时间</dt><dd>{playbackState.elapsedSeconds.toFixed(2)} / {duration.toFixed(2)} s</dd></div>
           </dl>
-          {demoMode === 'multi' && multiPlan ? (
+          {demoMode !== 'single' && multiPlan ? (
             <div className="path-demo-vehicle-results" aria-label="多车规划结果">
               {multiPlan.vehicles.map((vehicle) => (
                 <div key={vehicle.vehicle_id}>
@@ -471,11 +576,14 @@ export function PathDemoPage() {
                 cameraActionRequest={cameraActionRequest}
                 vehicles={multiVehicleViews}
                 followedVehicleSample={followedVehicleSample}
+                roadCells={roadCells}
+                roadSelectionEnabled={demoMode === 'custom' && roadSelection !== null}
+                endpointMarkers={endpointMarkers}
+                onRoadCellSelect={handleRoadCellSelect}
+                onInvalidRoadSelection={() => setSelectionError('该位置不是当前道路连通分量中的可行驶道路格。')}
               />
             </Suspense>
-          ) : (
-            <div className="path-demo-empty">正在读取拓扑…</div>
-          )}
+          ) : <div className="path-demo-empty">正在读取拓扑…</div>}
         </div>
       </div>
     </section>

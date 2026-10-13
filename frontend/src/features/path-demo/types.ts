@@ -71,8 +71,11 @@ export interface TrajectorySample {
 
 export interface MultiPathVehicleRequest {
   vehicle_id: string
+  vehicle_type?: 'ctu'
   start_cell_id: string
   goal_cell_id: string
+  priority?: number
+  display_color?: string | null
 }
 
 export interface MultiPathDemoScenario {
@@ -100,6 +103,9 @@ export interface MultiPathStep {
 
 export interface MultiPathVehiclePlan {
   vehicle_id: string
+  vehicle_type?: 'ctu'
+  priority?: number
+  display_color?: string | null
   start: PathDemoCell
   goal: PathDemoCell
   steps: MultiPathStep[]
@@ -148,4 +154,14 @@ export interface PathDemoVehicleView {
   color: string
   trajectory: TrajectoryPoint[]
   sample: TrajectorySample | null
+}
+
+export type RoadSelectionKind = 'start' | 'goal'
+
+export interface PathDemoEndpointMarker {
+  vehicleId: string
+  kind: RoadSelectionKind
+  label: string
+  color: string
+  world: [number, number, number]
 }
