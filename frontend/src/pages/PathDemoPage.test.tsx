@@ -22,6 +22,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     roadSelectionEnabled,
     onRoadCellSelect,
     selectedVehicleId,
+    conflictEvent,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -33,6 +34,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     roadSelectionEnabled?: boolean
     onRoadCellSelect?: (cell: PathDemoCell) => void
     selectedVehicleId?: string
+    conflictEvent?: { event_id: string } | null
   }) => (
     <div>
       <div
@@ -48,6 +50,8 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-selected-vehicle={selectedVehicleId ?? ''}
         data-endpoint-markers={endpointMarkers.map((marker) => `${marker.vehicleId}:${marker.kind}`).join(',')}
         data-road-selection-enabled={roadSelectionEnabled ? 'true' : 'false'}
+        data-conflict-event={conflictEvent?.event_id ?? ''}
+        data-camera-target={cameraActionRequest?.targetWorld?.join(',') ?? ''}
       />
       <button
         type="button"
@@ -179,6 +183,27 @@ const multiPlan = {
     remaining_edge_conflicts: 0,
     remaining_geometry_conflicts: 0,
   },
+  conflict_events: [{
+    event_id: 'node-CTU-02-CTU-01-1-cell-r1-c2',
+    conflict_type: 'node' as const,
+    status: 'resolved' as const,
+    time_step: 1,
+    time_seconds: 0.25,
+    cell: cells[1],
+    from_cell: cells[1],
+    involved_vehicle_ids: ['CTU-01', 'CTU-02'],
+    priority_vehicle_id: 'CTU-01',
+    priority: 1,
+    yielding_vehicle_id: 'CTU-02',
+    yielding_priority: 2,
+    reservation_action: 'candidate_rejected' as const,
+    avoidance_action: 'wait' as const,
+    wait_cell: cells[1],
+    wait_start_time_seconds: 0,
+    wait_end_time_seconds: 0.25,
+    wait_duration_seconds: 0.25,
+    result: 'conflict_free_plan' as const,
+  }],
   avoidance_count: 3,
   planning_time_ms: 2,
 }
@@ -347,6 +372,34 @@ describe('PathDemoPage', () => {
     fireEvent.change(screen.getByLabelText('选择跟随车辆'), { target: { value: 'CTU-02' } })
     expect(scene).toHaveAttribute('data-followed-vehicle', 'CTU-02')
     expect(scene).toHaveAttribute('data-camera-action', 'locate')
+  })
+
+  it('shows the real scene-B node event, seeks before it, and focuses its backend cell', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    const scenarioSelect = await screen.findByRole('combobox', { name: '冲突演示场景' })
+    await waitFor(() => expect(scenarioSelect).toHaveValue('parallel'))
+    fireEvent.change(scenarioSelect, { target: { value: 'node-conflict' } })
+    await waitFor(() => expect(scenarioSelect).toHaveValue('node-conflict'))
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+
+    expect(await screen.findByRole('region', { name: '冲突避让事件' })).toHaveTextContent('cell-r1-c2')
+    expect(screen.getByText('规划候选冲突，不是实际碰撞')).toBeInTheDocument()
+    expect(screen.getByText(/CTU-01 P1 → CTU-02 P2/)).toBeInTheDocument()
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-conflict-event', 'node-CTU-02-CTU-01-1-cell-r1-c2')
+
+    fireEvent.change(screen.getByLabelText('播放速度'), { target: { value: '2' } })
+    fireEvent.click(screen.getByLabelText('竞争事件自动慢放'))
+    await waitFor(() => expect(screen.getByLabelText('播放速度')).toHaveValue('0.25'))
+    expect(screen.getByText('总等待时间').nextElementSibling).toHaveTextContent('0.75 s')
+
+    fireEvent.click(screen.getByRole('button', { name: '定位该事件' }))
+    const scene = screen.getByTestId('path-demo-scene')
+    expect(scene).toHaveAttribute('data-camera-action', 'focus-point')
+    expect(scene).toHaveAttribute('data-camera-target', '0.5,0.22,0.5')
+    expect(scene).toHaveAttribute('data-playback-status', 'paused')
+    expect(screen.getAllByText(/等待让行/).length).toBeGreaterThan(0)
   })
 
   it('shows a multi-vehicle no-solution response without starting playback', async () => {

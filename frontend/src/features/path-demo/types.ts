@@ -43,8 +43,10 @@ export type PlaybackStatus = 'idle' | 'running' | 'paused' | 'completed'
 export interface PlaybackState {
   status: PlaybackStatus
   elapsedSeconds: number
-  rate: 1 | 2 | 4
+  rate: PlaybackRate
 }
+
+export type PlaybackRate = 0.25 | 0.5 | 1 | 2 | 4
 
 export interface TrajectoryPoint {
   vehicleId: string
@@ -138,6 +140,28 @@ export interface MultiPathConflictMetrics {
   remaining_geometry_conflicts: number
 }
 
+export interface MultiPathConflictEvent {
+  event_id: string
+  conflict_type: 'node' | 'edge' | 'geometry'
+  status: 'resolved' | 'remaining'
+  time_step: number
+  time_seconds: number
+  cell: PathDemoCell
+  from_cell: PathDemoCell
+  involved_vehicle_ids: string[]
+  priority_vehicle_id: string
+  priority: number
+  yielding_vehicle_id: string
+  yielding_priority: number
+  reservation_action: 'candidate_rejected'
+  avoidance_action: 'wait' | 'reroute' | 'reroute_and_wait'
+  wait_cell: PathDemoCell | null
+  wait_start_time_seconds: number | null
+  wait_end_time_seconds: number | null
+  wait_duration_seconds: number
+  result: 'conflict_free_plan'
+}
+
 export interface MultiPathPlan {
   topology_id: string
   topology_name: string
@@ -154,6 +178,7 @@ export interface MultiPathPlan {
   makespan_seconds: number
   vehicles: MultiPathVehiclePlan[]
   conflicts: MultiPathConflictMetrics
+  conflict_events?: MultiPathConflictEvent[]
   avoidance_count: number
   planning_time_ms: number
 }
@@ -254,6 +279,7 @@ export interface PathDemoVehicleView {
   color: string
   trajectory: TrajectoryPoint[]
   sample: TrajectorySample | null
+  statusText?: string
 }
 
 export type RoadSelectionKind = 'start' | 'goal'

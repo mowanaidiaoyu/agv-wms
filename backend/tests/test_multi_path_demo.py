@@ -129,6 +129,7 @@ def test_real_666_parallel_scenario_has_no_conflicts(topology_666: dict, scenari
     assert len(result["vehicles"]) == 3
     assert result["avoidance_count"] == 0
     assert sum(result["conflicts"].values()) == 0
+    assert result["conflict_events"] == []
     assert_execution_is_safe(result)
 
 
@@ -137,6 +138,17 @@ def test_real_666_node_competition_inserts_wait(topology_666: dict, scenarios_66
     assert result["conflicts"]["detected_node_conflicts"] > 0
     assert result["conflicts"]["remaining_node_conflicts"] == 0
     assert any(vehicle["wait_time_seconds"] > 0 for vehicle in result["vehicles"])
+    node_event = next(event for event in result["conflict_events"] if event["conflict_type"] == "node")
+    assert node_event["cell"]["id"] == "cell-r96-c21"
+    assert node_event["time_step"] == 2
+    assert node_event["time_seconds"] == 0.5
+    assert node_event["priority_vehicle_id"] == "CTU-01"
+    assert node_event["yielding_vehicle_id"] == "CTU-02"
+    assert node_event["wait_cell"]["id"] == "cell-r96-c22"
+    assert node_event["wait_start_time_seconds"] == 0.5
+    assert node_event["wait_end_time_seconds"] == 0.75
+    assert node_event["wait_duration_seconds"] == 0.25
+    assert node_event["status"] == "resolved"
     assert_execution_is_safe(result)
 
 
@@ -145,6 +157,7 @@ def test_real_666_edge_swap_is_detected_and_resolved(topology_666: dict, scenari
     assert result["conflicts"]["detected_edge_conflicts"] > 0
     assert result["conflicts"]["remaining_edge_conflicts"] == 0
     assert any(vehicle["wait_time_seconds"] > 0 for vehicle in result["vehicles"])
+    assert any(event["conflict_type"] == "edge" for event in result["conflict_events"])
     assert_execution_is_safe(result)
 
 
@@ -154,6 +167,7 @@ def test_same_input_produces_the_same_space_time_plan(topology_666: dict, scenar
     second = plan_multi_paths(topology_666, vehicles, "dijkstra", config())
     assert [vehicle["steps"] for vehicle in first["vehicles"]] == [vehicle["steps"] for vehicle in second["vehicles"]]
     assert first["conflicts"] == second["conflicts"]
+    assert first["conflict_events"] == second["conflict_events"]
 
 
 @pytest.mark.parametrize("vehicle_count", [1, 2, 3, 5, 6])

@@ -1,6 +1,6 @@
 import { PathPlaybackController } from './PathPlaybackController'
 import { stepPlaybackTime } from './pathPlayback'
-import type { PlaybackState } from './types'
+import type { PlaybackRate, PlaybackState } from './types'
 import './HistoricalPlaybackControls.css'
 
 function formatSeconds(value: number) {
@@ -28,7 +28,7 @@ export function HistoricalPlaybackControls({
   onReset: () => void
   onSeek: (elapsedSeconds: number) => void
   onRestart: () => void
-  onRateChange: (rate: 1 | 2 | 4) => void
+  onRateChange: (rate: PlaybackRate) => void
 }) {
   const canPlay = totalDuration > 0
   const progress = canPlay ? Math.min(100, (state.elapsedSeconds / totalDuration) * 100) : 0
@@ -48,6 +48,7 @@ export function HistoricalPlaybackControls({
         onResume={onResume}
         onReset={onReset}
         onRateChange={onRateChange}
+        rates={[1, 2, 4]}
       />
       <div className="historical-playback-heading">
         <strong>历史轨迹时间轴</strong>

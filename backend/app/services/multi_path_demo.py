@@ -21,9 +21,21 @@ class ConflictTracker:
     node: set[tuple[Any, ...]] = field(default_factory=set)
     edge: set[tuple[Any, ...]] = field(default_factory=set)
     geometry: set[tuple[Any, ...]] = field(default_factory=set)
+    events: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
 
     def record(self, kind: ConflictKind, signature: tuple[Any, ...]) -> None:
         getattr(self, kind).add(signature)
+
+    def record_event(self, kind: ConflictKind, signature: tuple[Any, ...], event: dict[str, Any]) -> None:
+        self.record(kind, signature)
+        event_key = (
+            kind,
+            event["yielding_vehicle_id"],
+            event["priority_vehicle_id"],
+            event["time_step"],
+            event["cell"],
+        )
+        self.events.setdefault(event_key, event)
 
 
 @dataclass(frozen=True)
@@ -167,6 +179,9 @@ def _space_time_path(
     reservations: list[list[Position]],
     limits: PlanningLimits,
     tracker: ConflictTracker,
+    vehicle_id: str,
+    vehicle_priority: int,
+    reserved_vehicles: list[dict[str, Any]],
 ) -> tuple[list[Position], int]:
     sequence = count()
     frontier: list[tuple[int, int, int, Position]] = []
@@ -200,7 +215,21 @@ def _space_time_path(
             conflict = _transition_conflict(current, nxt, arrival_step, reservations, limits.safety_distance_cells)
             if conflict:
                 kind, other_index = conflict
-                tracker.record(kind, (other_index, arrival_step, current, nxt))
+                signature = (other_index, arrival_step, current, nxt)
+                other_path = reservations[other_index]
+                reserved_vehicle = reserved_vehicles[other_index]
+                tracker.record_event(kind, signature, {
+                    "conflict_type": kind,
+                    "time_step": arrival_step,
+                    "current": current,
+                    "cell": nxt,
+                    "reserved_from": _position_at(other_path, max(0, arrival_step - 1)),
+                    "reserved_to": _position_at(other_path, arrival_step),
+                    "yielding_vehicle_id": vehicle_id,
+                    "yielding_priority": vehicle_priority,
+                    "priority_vehicle_id": reserved_vehicle["vehicle_id"],
+                    "priority": reserved_vehicle["priority"],
+                })
                 continue
             next_state = (nxt, arrival_step)
             if next_state in visited:
@@ -265,6 +294,95 @@ def _remaining_conflicts(paths: list[list[Position]], safety_distance: float) ->
                 elif _minimum_segment_distance(first_previous, first, second_previous, second) < safety_distance - 1e-9:
                     counts["geometry"] += 1
     return counts
+
+
+def _wait_intervals(path: list[Position], time_step_seconds: float) -> list[dict[str, Any]]:
+    intervals: list[dict[str, Any]] = []
+    index = 1
+    while index < len(path):
+        if path[index] != path[index - 1]:
+            index += 1
+            continue
+        start_step = index - 1
+        cell = path[index]
+        while index + 1 < len(path) and path[index + 1] == cell:
+            index += 1
+        end_step = index
+        intervals.append({
+            "cell": cell,
+            "start_time_seconds": start_step * time_step_seconds,
+            "end_time_seconds": end_step * time_step_seconds,
+            "duration_seconds": (end_step - start_step) * time_step_seconds,
+        })
+        index += 1
+    return intervals
+
+
+def _conflict_event_payloads(
+    tracker: ConflictTracker,
+    reservations: list[list[Position]],
+    vehicle_results: list[dict[str, Any]],
+    road_lookup: dict[Position, dict[str, Any]],
+    graph: dict[Position, tuple[Position, ...]],
+    component_by_position: dict[Position, str],
+    limits: PlanningLimits,
+) -> list[dict[str, Any]]:
+    result_by_id = {item["vehicle_id"]: item for item in vehicle_results}
+    path_by_id = {
+        item["vehicle_id"]: reservations[index]
+        for index, item in enumerate(vehicle_results)
+    }
+    payloads: list[dict[str, Any]] = []
+    for event in sorted(
+        tracker.events.values(),
+        key=lambda item: (item["time_step"], item["conflict_type"], item["yielding_vehicle_id"], item["cell"]),
+    ):
+        yielding_id = event["yielding_vehicle_id"]
+        yielding_result = result_by_id[yielding_id]
+        waits = _wait_intervals(path_by_id[yielding_id], limits.time_step_seconds)
+        event_time_seconds = event["time_step"] * limits.time_step_seconds
+        wait = next(
+            (
+                item for item in waits
+                if item["end_time_seconds"] + 1e-9 >= event_time_seconds
+            ),
+            None,
+        )
+        detoured = yielding_result["total_distance"] > _shortest_distance(
+            graph,
+            path_by_id[yielding_id][0],
+            path_by_id[yielding_id][-1],
+        )
+        avoidance_action = "reroute_and_wait" if detoured and wait else "wait" if wait else "reroute"
+        cell = event["cell"]
+        from_cell = event["current"]
+        wait_cell = wait["cell"] if wait else None
+        event_id = (
+            f"{event['conflict_type']}-{yielding_id}-{event['priority_vehicle_id']}-"
+            f"{event['time_step']}-{road_lookup[cell]['id']}"
+        )
+        payloads.append({
+            "event_id": event_id,
+            "conflict_type": event["conflict_type"],
+            "status": "resolved",
+            "time_step": event["time_step"],
+            "time_seconds": event_time_seconds,
+            "cell": _cell_payload(road_lookup[cell], component_by_position[cell]),
+            "from_cell": _cell_payload(road_lookup[from_cell], component_by_position[from_cell]),
+            "involved_vehicle_ids": [event["priority_vehicle_id"], yielding_id],
+            "priority_vehicle_id": event["priority_vehicle_id"],
+            "priority": event["priority"],
+            "yielding_vehicle_id": yielding_id,
+            "yielding_priority": event["yielding_priority"],
+            "reservation_action": "candidate_rejected",
+            "avoidance_action": avoidance_action,
+            "wait_cell": _cell_payload(road_lookup[wait_cell], component_by_position[wait_cell]) if wait_cell else None,
+            "wait_start_time_seconds": wait["start_time_seconds"] if wait else None,
+            "wait_end_time_seconds": wait["end_time_seconds"] if wait else None,
+            "wait_duration_seconds": wait["duration_seconds"] if wait else 0.0,
+            "result": "conflict_free_plan",
+        })
+    return payloads
 
 
 def plan_multi_paths(
@@ -335,6 +453,7 @@ def plan_multi_paths(
                 raise PathDemoError("Initial vehicle geometry violates the configured safety distance", status_code=409)
 
     reservations: list[list[Position]] = []
+    reserved_vehicles: list[dict[str, Any]] = []
     tracker = ConflictTracker()
     vehicle_results: list[dict[str, Any]] = []
     for vehicle, start, goal in normalized:
@@ -348,10 +467,17 @@ def plan_multi_paths(
                 reservations,
                 limits,
                 tracker,
+                str(vehicle["vehicle_id"]),
+                int(vehicle.get("priority", 1)),
+                reserved_vehicles,
             )
         except PathDemoError as exc:
             raise PathDemoError(f"Vehicle {vehicle['vehicle_id']}: {exc.detail}", status_code=exc.status_code) from exc
         reservations.append(path)
+        reserved_vehicles.append({
+            "vehicle_id": str(vehicle["vehicle_id"]),
+            "priority": int(vehicle.get("priority", 1)),
+        })
         movement_steps = sum(first != second for first, second in zip(path, path[1:]))
         wait_steps = len(path) - 1 - movement_steps
         detour_steps = max(0, movement_steps - baseline_distance)
@@ -391,6 +517,15 @@ def plan_multi_paths(
     detected_node = len(tracker.node)
     detected_edge = len(tracker.edge)
     detected_geometry = len(tracker.geometry)
+    conflict_events = _conflict_event_payloads(
+        tracker,
+        reservations,
+        vehicle_results,
+        road_lookup,
+        graph,
+        component_by_position,
+        limits,
+    )
     return {
         "algorithm": algorithm,
         "planning_status": "success",
@@ -414,6 +549,7 @@ def plan_multi_paths(
             "remaining_edge_conflicts": remaining["edge"],
             "remaining_geometry_conflicts": remaining["geometry"],
         },
+        "conflict_events": conflict_events,
         "avoidance_count": sum(result["avoidance_count"] for result in vehicle_results),
         "planning_time_ms": (perf_counter() - started_at) * 1000,
     }

@@ -1,6 +1,12 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
+import { ConflictAvoidancePanel } from '../features/path-demo/ConflictAvoidancePanel'
+import {
+  conflictSeekTime,
+  primaryNodeConflict,
+  resolveConflictPlaybackRate,
+} from '../features/path-demo/conflictVisualization'
 import { createCustomVehicle, validateMultiVehicleConfiguration } from '../features/path-demo/customVehicleConfig'
 import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
 import { DEFAULT_MULTI_PATH_PLANNING_CONFIG, pathDemoApi } from '../features/path-demo/pathDemoApi'
@@ -9,19 +15,23 @@ import {
   buildEndpointMarkers,
   buildMultiVehicleViews,
   MULTI_VEHICLE_STYLES,
+  sampleAllVehiclesAtTime,
 } from '../features/path-demo/multiPathPlayback'
 import { buildTrajectory, sampleTrajectory, usePathPlayback } from '../features/path-demo/pathPlayback'
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import type {
   MultiPathDemoScenario,
+  MultiPathConflictEvent,
   MultiPathPlan,
   MultiPathVehicleRequest,
   PathDemoAlgorithm,
   PathDemoCell,
   PathDemoPlan,
+  PlaybackRate,
   RoadSelectionKind,
 } from '../features/path-demo/types'
 import { api } from '../lib/api'
+import { floorPlaneY, worldX, worldZ } from '../lib/topology3d'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -46,11 +56,16 @@ type DemoMode = 'single' | 'preset' | 'custom'
 type PlanningStatus = keyof typeof planningStatusLabel
 type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
 
-function multiVehicleStatusLabel(globalStatus: keyof typeof statusLabel, elapsedSeconds: number, durationSeconds: number) {
+function liveVehicleStatusLabel(
+  globalStatus: keyof typeof statusLabel,
+  snapshot: ReturnType<typeof sampleAllVehiclesAtTime>[number] | undefined,
+  plannedWaitSeconds: number,
+) {
   if (globalStatus === 'idle') return '待运行'
-  if (elapsedSeconds >= durationSeconds) return '已到达'
-  if (globalStatus === 'paused') return '已暂停'
-  return '运行中'
+  if (snapshot?.status === 'COMPLETED') return '已到达'
+  if (snapshot?.status === 'WAITING') return `等待让行（${snapshot.accumulatedWaitSeconds.toFixed(2)} / ${plannedWaitSeconds.toFixed(2)} s）`
+  if (globalStatus === 'paused') return '已暂停（移动中）'
+  return '移动中'
 }
 
 function normalizeVehicles(vehicles: MultiPathVehicleRequest[]): MultiPathVehicleRequest[] {
@@ -81,6 +96,9 @@ export function PathDemoPage() {
   const [planningError, setPlanningError] = useState('')
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
+  const [preferredPlaybackRate, setPreferredPlaybackRate] = useState<PlaybackRate>(1)
+  const [autoSlowConflict, setAutoSlowConflict] = useState(false)
+  const [selectedConflictEventId, setSelectedConflictEventId] = useState('')
   const requestSequenceRef = useRef(0)
   const setCustomDraft = useMultiPathExperimentStore((state) => state.setCustomDraft)
 
@@ -129,20 +147,36 @@ export function PathDemoPage() {
     pause: pausePlayback,
     resume: resumePlayback,
     reset: resetPlayback,
+    seek: seekPlayback,
     setRate: setPlaybackRate,
   } = usePathPlayback(duration)
   const sample = useMemo(
     () => sampleTrajectory(trajectory, playbackState.elapsedSeconds),
     [playbackState.elapsedSeconds, trajectory],
   )
-  const multiVehicleViews = useMemo(
-    () => (
-      demoMode !== 'single' && multiPlan && topologyRecord
-        ? buildMultiVehicleViews(multiPlan, topologyRecord.payload, playbackState.elapsedSeconds)
-        : []
-    ),
-    [demoMode, multiPlan, playbackState.elapsedSeconds, topologyRecord],
+  const vehicleSnapshots = useMemo(
+    () => multiPlan ? sampleAllVehiclesAtTime(multiPlan, playbackState.elapsedSeconds) : [],
+    [multiPlan, playbackState.elapsedSeconds],
   )
+  const multiVehicleViews = useMemo(() => {
+    if (demoMode === 'single' || !multiPlan || !topologyRecord) return []
+    return buildMultiVehicleViews(multiPlan, topologyRecord.payload, playbackState.elapsedSeconds).map((view) => {
+      const vehicle = multiPlan.vehicles.find((item) => item.vehicle_id === view.vehicleId)
+      const snapshot = vehicleSnapshots.find((item) => item.vehicleId === view.vehicleId)
+      return {
+        ...view,
+        statusText: liveVehicleStatusLabel(playbackState.status, snapshot, vehicle?.wait_time_seconds ?? 0),
+      }
+    })
+  }, [demoMode, multiPlan, playbackState.elapsedSeconds, playbackState.status, topologyRecord, vehicleSnapshots])
+  const nodeConflictEvents = useMemo(
+    () => (multiPlan?.conflict_events ?? []).filter((event) => event.conflict_type === 'node'),
+    [multiPlan],
+  )
+  const primaryConflictEvent = useMemo(() => primaryNodeConflict(nodeConflictEvents), [nodeConflictEvents])
+  const selectedConflictEvent = nodeConflictEvents.find((event) => event.event_id === selectedConflictEventId)
+    ?? primaryConflictEvent
+  const showNodeConflictVisualization = demoMode === 'preset' && presetScenarioId === 'node-conflict' && Boolean(multiPlan)
   const selectedPlannedVehicleSample = demoMode !== 'single'
     ? (multiVehicleViews.find((vehicle) => vehicle.vehicleId === selectedVehicleId)?.sample ?? null)
     : sample
@@ -215,8 +249,57 @@ export function PathDemoPage() {
     }
   }, [activeVehicles, demoMode, selectedVehicleId])
 
-  const requestCameraAction = (type: CameraActionRequest['type']) => {
-    setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
+  useEffect(() => {
+    if (!showNodeConflictVisualization) {
+      setSelectedConflictEventId('')
+      return
+    }
+    setSelectedConflictEventId((current) => (
+      nodeConflictEvents.some((event) => event.event_id === current)
+        ? current
+        : (primaryConflictEvent?.event_id ?? '')
+    ))
+  }, [nodeConflictEvents, primaryConflictEvent, showNodeConflictVisualization])
+
+  useEffect(() => {
+    const effectiveRate = resolveConflictPlaybackRate(
+      preferredPlaybackRate,
+      autoSlowConflict && showNodeConflictVisualization,
+      selectedConflictEvent,
+      playbackState.elapsedSeconds,
+      multiPlan?.time_step_seconds ?? 0,
+    )
+    if (playbackState.rate !== effectiveRate) setPlaybackRate(effectiveRate)
+  }, [
+    autoSlowConflict,
+    multiPlan?.time_step_seconds,
+    playbackState.elapsedSeconds,
+    playbackState.rate,
+    preferredPlaybackRate,
+    selectedConflictEvent,
+    setPlaybackRate,
+    showNodeConflictVisualization,
+  ])
+
+  const requestCameraAction = (type: CameraActionRequest['type'], targetWorld?: [number, number, number]) => {
+    setCameraActionRequest((current) => ({ type, targetWorld, sequence: (current?.sequence ?? 0) + 1 }))
+  }
+
+  const locateConflictEvent = (event: MultiPathConflictEvent, seekToEvent: boolean) => {
+    if (!topologyRecord) return
+    const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
+    const floorIndex = Math.max(0, floors.indexOf(event.cell.floor))
+    const targetWorld: [number, number, number] = [
+      worldX(event.cell.col, topologyRecord.payload.grid.cols),
+      floorPlaneY(floorIndex) + 0.22,
+      worldZ(event.cell.row, topologyRecord.payload.grid.rows),
+    ]
+    setSelectedConflictEventId(event.event_id)
+    setCameraViewMode('free')
+    requestCameraAction('focus-point', targetWorld)
+    if (seekToEvent && multiPlan) {
+      seekPlayback(conflictSeekTime(event, multiPlan.time_step_seconds))
+    }
   }
 
   const requestPlan = async () => {
@@ -519,8 +602,24 @@ export function PathDemoPage() {
             onPause={pausePlayback}
             onResume={resumePlayback}
             onReset={resetPlayback}
-            onRateChange={setPlaybackRate}
+            onRateChange={(rate) => {
+              setPreferredPlaybackRate(rate)
+              setPlaybackRate(rate)
+            }}
           />
+          {showNodeConflictVisualization && selectedConflictEvent ? (
+            <div className="path-demo-auto-slow">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={autoSlowConflict}
+                  onChange={(event) => setAutoSlowConflict(event.target.checked)}
+                />
+                竞争事件自动慢放
+              </label>
+              <p>事件前一个时间片至等待结束后一个时间片使用 0.25x，随后恢复用户选择的 {preferredPlaybackRate}x；规划时间和等待指标不变。</p>
+            </div>
+          ) : null}
           <section className="path-demo-camera-controls" aria-label="视角控制">
             <div className="path-demo-camera-heading">
               <strong>视角控制</strong>
@@ -552,6 +651,14 @@ export function PathDemoPage() {
               >跟随小车：{cameraViewMode === 'follow' ? '开' : '关'}</button>
               <button className="ghost-button" type="button" disabled={cameraViewMode === 'free'} onClick={() => setCameraViewMode('free')}>自由视角</button>
               <button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCameraAction('overview') }}>仓库全景</button>
+              {showNodeConflictVisualization ? (
+                <button
+                  className="ghost-button path-demo-conflict-camera"
+                  type="button"
+                  disabled={!selectedConflictEvent}
+                  onClick={() => selectedConflictEvent && locateConflictEvent(selectedConflictEvent, false)}
+                >查看竞争节点</button>
+              ) : null}
             </div>
             <p className="path-demo-note">当前车辆：{demoMode === 'single' ? 'CTU-01' : selectedVehicleId}</p>
             {demoMode === 'custom' && !selectedPlannedVehicleSample && configuredStartPreview ? (
@@ -602,10 +709,21 @@ export function PathDemoPage() {
                   <strong>{vehicle.vehicle_id}</strong>
                   <span>{vehicle.total_distance} 格</span>
                   <span>等待 {vehicle.wait_time_seconds.toFixed(2)} s</span>
-                  <span>{multiVehicleStatusLabel(playbackState.status, playbackState.elapsedSeconds, vehicle.estimated_duration_seconds)}</span>
+                  <span>{liveVehicleStatusLabel(
+                    playbackState.status,
+                    vehicleSnapshots.find((snapshot) => snapshot.vehicleId === vehicle.vehicle_id),
+                    vehicle.wait_time_seconds,
+                  )}</span>
                 </div>
               ))}
             </div>
+          ) : null}
+          {showNodeConflictVisualization && multiPlan ? (
+            <ConflictAvoidancePanel
+              events={nodeConflictEvents}
+              selectedEventId={selectedConflictEvent?.event_id}
+              onLocate={(event) => locateConflictEvent(event, true)}
+            />
           ) : null}
         </aside>
 
@@ -628,6 +746,7 @@ export function PathDemoPage() {
                 endpointMarkers={endpointMarkers}
                 onRoadCellSelect={handleRoadCellSelect}
                 onInvalidRoadSelection={() => setSelectionError('该位置不是当前道路连通分量中的可行驶道路格。')}
+                conflictEvent={showNodeConflictVisualization ? selectedConflictEvent : null}
               />
             </Suspense>
           ) : <div className="path-demo-empty">正在读取拓扑…</div>}

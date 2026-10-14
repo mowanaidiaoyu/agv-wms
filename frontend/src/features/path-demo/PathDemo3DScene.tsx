@@ -1,6 +1,6 @@
 import { Canvas } from '@react-three/fiber'
 import { useMemo } from 'react'
-import { buildSceneSpec, type SceneItem, type SceneRack } from '../../lib/topology3d'
+import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
@@ -9,6 +9,7 @@ import type { CameraActionRequest, CameraViewMode } from './cameraControls'
 import type {
   PathDemoCell,
   PathDemoEndpointMarker,
+  MultiPathConflictEvent,
   PathDemoVehicleView,
   PlaybackStatus,
   TrajectoryPoint,
@@ -95,6 +96,7 @@ export function PathDemo3DScene({
   selectedVehicleId,
   onRoadCellSelect,
   onInvalidRoadSelection,
+  conflictEvent,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -111,12 +113,23 @@ export function PathDemo3DScene({
   selectedVehicleId?: string
   onRoadCellSelect?: (cell: PathDemoCell) => void
   onInvalidRoadSelection?: () => void
+  conflictEvent?: MultiPathConflictEvent | null
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const visibleItems = useMemo(
     () => spec.items.filter((item) => (item.kind === 'slab' ? item.label === activeFloor : item.floor === activeFloor)),
     [activeFloor, spec.items],
   )
+  const conflictWorld = useMemo<[number, number, number] | null>(() => {
+    if (!conflictEvent || conflictEvent.cell.floor !== activeFloor) return null
+    const floors = topology.meta.floors?.length ? topology.meta.floors : ['1F']
+    const floorIndex = Math.max(0, floors.indexOf(conflictEvent.cell.floor))
+    return [
+      worldX(conflictEvent.cell.col, topology.grid.cols),
+      floorPlaneY(floorIndex) + 0.22,
+      worldZ(conflictEvent.cell.row, topology.grid.rows),
+    ]
+  }, [activeFloor, conflictEvent, topology])
   return (
     <Canvas
       dpr={[1, 1.5]}
@@ -135,6 +148,8 @@ export function PathDemo3DScene({
         vehicles={vehicles}
         endpointMarkers={endpointMarkers}
         selectedVehicleId={selectedVehicleId}
+        conflictEvent={conflictEvent}
+        conflictWorld={conflictWorld}
       />
       <RoadCellSelectionLayer
         topology={topology}

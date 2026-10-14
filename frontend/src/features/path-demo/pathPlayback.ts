@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { floorPlaneY, worldX, worldZ } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
-import type { PathDemoCell, PlaybackState, TrajectoryPoint, TrajectorySample } from './types'
+import type { PathDemoCell, PlaybackRate, PlaybackState, TrajectoryPoint, TrajectorySample } from './types'
 
 export const DEMO_VEHICLE_ID = 'ctu-path-demo-01'
 export const DEMO_SPEED_CELLS_PER_SECOND = 4
@@ -103,7 +103,7 @@ export function sampleTrajectory(trajectory: TrajectoryPoint[], elapsedSeconds: 
     headingRadians,
   }
 }
-export function initialPlaybackState(rate: 1 | 2 | 4 = 1): PlaybackState {
+export function initialPlaybackState(rate: PlaybackRate = 1): PlaybackState {
   return { status: 'idle', elapsedSeconds: 0, rate }
 }
 
@@ -209,7 +209,7 @@ export function usePathPlayback(totalDuration: number, timelineKey?: string) {
       ? { ...current, status: 'running', elapsedSeconds: 0 }
       : resetPlayback(current))
   }, [totalDuration])
-  const setRate = useCallback((rate: 1 | 2 | 4) => setState((current) => ({ ...current, rate })), [])
+  const setRate = useCallback((rate: PlaybackRate) => setState((current) => ({ ...current, rate })), [])
 
   return { state, start, pause, resume, reset, seek, restart, setRate }
 }

@@ -118,6 +118,28 @@ class MultiPathConflictMetrics(BaseModel):
     remaining_geometry_conflicts: int
 
 
+class MultiPathConflictEvent(BaseModel):
+    event_id: str
+    conflict_type: Literal["node", "edge", "geometry"]
+    status: Literal["resolved", "remaining"]
+    time_step: int
+    time_seconds: float
+    cell: PathDemoCell
+    from_cell: PathDemoCell
+    involved_vehicle_ids: list[str]
+    priority_vehicle_id: str
+    priority: int
+    yielding_vehicle_id: str
+    yielding_priority: int
+    reservation_action: Literal["candidate_rejected"]
+    avoidance_action: Literal["wait", "reroute", "reroute_and_wait"]
+    wait_cell: PathDemoCell | None = None
+    wait_start_time_seconds: float | None = None
+    wait_end_time_seconds: float | None = None
+    wait_duration_seconds: float = 0
+    result: Literal["conflict_free_plan"]
+
+
 class MultiPathPlanResponse(BaseModel):
     topology_id: str
     topology_name: str
@@ -134,6 +156,7 @@ class MultiPathPlanResponse(BaseModel):
     makespan_seconds: float
     vehicles: list[MultiPathVehiclePlan]
     conflicts: MultiPathConflictMetrics
+    conflict_events: list[MultiPathConflictEvent] = Field(default_factory=list)
     avoidance_count: int
     planning_time_ms: float
 

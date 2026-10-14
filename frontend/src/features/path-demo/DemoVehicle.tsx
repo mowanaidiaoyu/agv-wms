@@ -6,11 +6,13 @@ export function DemoVehicle({
   label = 'CTU-01',
   color = '#22d3ee',
   selected = false,
+  statusText,
 }: {
   sample: TrajectorySample
   label?: string
   color?: string
   selected?: boolean
+  statusText?: string
 }) {
   return (
     <group position={sample.world} rotation={[0, sample.headingRadians, 0]}>
@@ -47,6 +49,7 @@ export function DemoVehicle({
           aria-hidden="true"
         >
           <span>{label}</span>
+          {statusText ? <small>{statusText}</small> : null}
         </div>
       </Html>
     </group>

@@ -2,11 +2,12 @@ import { MOUSE, Vector3 } from 'three'
 import type { PlaybackStatus } from './types'
 
 export type CameraViewMode = 'free' | 'follow'
-export type CameraAction = 'locate' | 'overview' | 'switch-follow-target'
+export type CameraAction = 'locate' | 'overview' | 'switch-follow-target' | 'focus-point'
 
 export interface CameraActionRequest {
   type: CameraAction
   sequence: number
+  targetWorld?: [number, number, number]
 }
 
 export const PATH_DEMO_ORBIT_SETTINGS = {

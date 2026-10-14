@@ -90,6 +90,16 @@ export function CameraFollowController({
       }
       return
     }
+    if (actionRequest.type === 'focus-point' && actionRequest.targetWorld) {
+      const target = new Vector3(...actionRequest.targetWorld)
+      target.y += VEHICLE_TARGET_HEIGHT
+      transitionRef.current = {
+        kind: 'locate',
+        target,
+        cameraPosition: target.clone().add(new Vector3(7, 8, 10)),
+      }
+      return
+    }
     const currentSample = sampleRef.current
     if (!currentSample) return
     if (actionRequest.type === 'switch-follow-target') {
