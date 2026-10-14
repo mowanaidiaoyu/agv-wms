@@ -8,6 +8,7 @@ import { validateMultiVehicleConfiguration } from '../features/path-demo/customV
 import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
 import { DEFAULT_MULTI_PATH_PLANNING_CONFIG, pathDemoApi } from '../features/path-demo/pathDemoApi'
 import type { MultiPathDemoScenario, MultiPathVehicleRequest } from '../features/path-demo/types'
+import { SkuInventoryLab } from '../features/sku-heat/SkuInventoryLab'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
 import './LabPage.css'
@@ -158,6 +159,7 @@ export function LabPage() {
 
   return (
     <div className="page-grid lab-grid">
+      <SkuInventoryLab />
       <Surface
         className="multi-path-lab"
         title="多车路径规划实验"

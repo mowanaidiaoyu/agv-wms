@@ -9,6 +9,11 @@ import type {
   TopologyPayload,
   TopologyValidationResult,
 } from '../types'
+import type {
+  ABCResponse,
+  HeatPredictionRequest,
+  HeatPredictionResponse,
+} from '../features/sku-heat/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
 const WS_BASE = 'ws://127.0.0.1:8000/ws'
@@ -119,6 +124,17 @@ export const api = {
     return request<{ results: AlgorithmEvaluationResult[] }>('/algorithms/evaluate', {
       method: 'POST',
       body: JSON.stringify({ topologyId, scenarioId }),
+    })
+  },
+  getSkuAbc(asOfDate: string, lookbackDays: number, signal?: AbortSignal) {
+    const query = new URLSearchParams({ as_of_date: asOfDate, lookback_days: String(lookbackDays) })
+    return request<ABCResponse>(`/algorithm/sku/abc?${query}`, { signal })
+  },
+  predictSkuHeat(payload: HeatPredictionRequest, signal?: AbortSignal) {
+    return request<HeatPredictionResponse>('/algorithm/sku/heat/predict', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
     })
   },
 }

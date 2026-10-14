@@ -1,0 +1,71 @@
+.sku-inventory-lab { grid-column: 1 / -1; }
+
+.sku-source-notice {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: 10px;
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.2);
+}
+
+.sku-source-notice span { font-family: ui-monospace, monospace; font-size: 12px; }
+.sku-source-notice p { grid-column: 1 / -1; margin: 0; color: #d6d3d1; font-size: 12px; }
+
+.sku-lab-tabs { display: flex; gap: 8px; margin-bottom: 14px; border-bottom: 1px solid #273449; }
+.sku-lab-tabs button { padding: 9px 13px; border: 0; border-bottom: 2px solid transparent; color: #94a3b8; background: none; cursor: pointer; }
+.sku-lab-tabs button.is-active { border-bottom-color: #22d3ee; color: #e2e8f0; }
+
+.sku-algorithm-panel { display: grid; gap: 14px; }
+.sku-algorithm-panel[hidden] { display: none; }
+
+.sku-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.sku-config-grid label,
+.sku-table-toolbar label { display: grid; gap: 5px; color: #94a3b8; font-size: 12px; }
+.sku-config-grid input,
+.sku-config-grid select,
+.sku-table-toolbar input,
+.sku-table-toolbar select { width: 100%; }
+.sku-config-grid button { min-height: 39px; justify-content: center; }
+
+.sku-coverage-note { margin: 0; color: #94a3b8; font-size: 12px; }
+.sku-algorithm-meta { display: flex; flex-wrap: wrap; gap: 7px; }
+.sku-algorithm-meta span { padding: 5px 8px; border: 1px solid #334155; border-radius: 999px; color: #cbd5e1; background: rgba(15, 23, 42, 0.55); font-size: 11px; }
+
+.sku-class-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.sku-class-overview article { display: grid; gap: 4px; padding: 12px; border: 1px solid #334155; border-radius: 10px; background: rgba(15, 23, 42, 0.62); }
+.sku-class-overview article strong { color: #f8fafc; font-size: 25px; }
+.sku-class-overview article small { color: #94a3b8; }
+.sku-class-overview .is-class-a { border-color: rgba(34, 211, 238, 0.6); }
+.sku-class-overview .is-class-b { border-color: rgba(251, 146, 60, 0.6); }
+.sku-class-overview .is-class-c { border-color: rgba(192, 132, 252, 0.6); }
+
+.sku-table-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(140px, 220px); gap: 10px; }
+.sku-class-pill { display: inline-flex; min-width: 24px; justify-content: center; padding: 2px 6px; border-radius: 999px; font-weight: 800; }
+.sku-class-pill.is-a { color: #a5f3fc; background: rgba(8, 145, 178, 0.3); }
+.sku-class-pill.is-b { color: #fed7aa; background: rgba(194, 65, 12, 0.3); }
+.sku-class-pill.is-c { color: #e9d5ff; background: rgba(126, 34, 206, 0.3); }
+
+.sku-selection { display: grid; gap: 8px; }
+.sku-selection-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #e2e8f0; }
+.sku-selection-heading div { display: flex; gap: 6px; }
+.sku-checkbox-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px; max-height: 210px; overflow: auto; padding: 8px; border: 1px solid #334155; border-radius: 9px; }
+.sku-checkbox-grid label { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; color: #cbd5e1; font-size: 12px; }
+.sku-checkbox-grid small { color: #94a3b8; }
+
+@media (max-width: 900px) {
+  .sku-config-grid { grid-template-columns: 1fr 1fr; }
+  .sku-class-overview { grid-template-columns: 1fr; }
+  .sku-source-notice { grid-template-columns: 1fr; }
+  .sku-source-notice p { grid-column: auto; }
+}
