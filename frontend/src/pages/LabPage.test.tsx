@@ -80,6 +80,9 @@ function makePlan(algorithm: 'astar' | 'dijkstra'): MultiPathPlan {
 function makeEvaluation(experimentId = 'experiment-1'): MultiPathEvaluation {
   return {
     experiment_id: experimentId,
+    schema_version: 'multi-path-evaluation/v1',
+    experiment_type: 'offline_multi_path_planning',
+    status: 'success',
     created_at: '2026-10-13T00:00:00Z',
     input_snapshot: {
       topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
@@ -107,7 +110,8 @@ function renderPage() {
       <MemoryRouter initialEntries={['/lab']}>
         <Routes>
           <Route path="/lab" element={<LabPage />} />
-          <Route path="/lab/multi-path-result/:algorithm" element={<div>轨迹结果路由</div>} />
+          <Route path="/lab/multi-path-result/:experimentId/:algorithm" element={<div>轨迹结果路由</div>} />
+          <Route path="/reports/multi-path/:experimentId" element={<div>历史报告路由</div>} />
           <Route path="/path-demo" element={<div>路径演示路由</div>} />
         </Routes>
       </MemoryRouter>
@@ -135,7 +139,8 @@ describe('LabPage multi-path evaluation', () => {
   it('keeps an in-memory experiment snapshot when returning to the lab without changing input', async () => {
     useMultiPathExperimentStore.setState({ evaluation: makeEvaluation('return-snapshot') })
     renderPage()
-    expect(await screen.findByText(/实验快照 return-snapshot/)).toBeInTheDocument()
+    expect(await screen.findByText(/已持久化实验 return-snapshot/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '查看历史报告' })).toHaveAttribute('href', '/reports/multi-path/return-snapshot')
     await waitFor(() => expect(screen.getByLabelText('仓库拓扑')).toHaveValue(topology.id))
     expect(useMultiPathExperimentStore.getState().evaluation?.experiment_id).toBe('return-snapshot')
   })
@@ -195,5 +200,15 @@ describe('LabPage multi-path evaluation', () => {
     await waitFor(() => expect(useMultiPathExperimentStore.getState().evaluation?.experiment_id).toBe('latest'))
     await act(async () => first.resolve(makeEvaluation('obsolete')))
     expect(useMultiPathExperimentStore.getState().evaluation?.experiment_id).toBe('latest')
+  })
+
+  it('does not claim a saved result when persistence fails', async () => {
+    vi.mocked(pathDemoApi.evaluateMulti).mockRejectedValueOnce(new Error('Multi-path evaluation could not be persisted'))
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: '运行 A* / Dijkstra 对比' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '运行 A* / Dijkstra 对比' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Multi-path evaluation could not be persisted')
+    expect(useMultiPathExperimentStore.getState().evaluation).toBeNull()
+    expect(screen.queryByText(/已持久化实验/)).not.toBeInTheDocument()
   })
 })

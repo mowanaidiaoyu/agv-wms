@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import APP_DATA_DIR, DB_PATH
+from .config import DB_PATH
 
 
 def utc_now() -> str:
@@ -18,9 +18,10 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def init_db() -> None:
-    _ensure_parent(DB_PATH)
-    with sqlite3.connect(DB_PATH) as conn:
+def init_db(db_path: Path = DB_PATH) -> None:
+    _ensure_parent(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
         conn.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -60,14 +61,39 @@ def init_db() -> None:
               payload TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS multi_path_evaluations (
+              experiment_id TEXT PRIMARY KEY,
+              schema_version TEXT NOT NULL,
+              experiment_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              topology_id TEXT NOT NULL,
+              topology_name TEXT NOT NULL,
+              topology_version TEXT NOT NULL,
+              vehicle_count INTEGER NOT NULL,
+              algorithms TEXT NOT NULL,
+              input_snapshot TEXT NOT NULL,
+              result_snapshot TEXT NOT NULL,
+              summary_snapshot TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              persisted_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_multi_path_evaluations_created_at
+              ON multi_path_evaluations (created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_multi_path_evaluations_topology_status
+              ON multi_path_evaluations (topology_id, status);
             """
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @contextmanager
-def get_conn() -> Iterator[sqlite3.Connection]:
-    init_db()
-    conn = sqlite3.connect(DB_PATH)
+def get_conn(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn

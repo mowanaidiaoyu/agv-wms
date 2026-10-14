@@ -11,6 +11,8 @@ from .path_demo import PathDemoError
 
 
 ALGORITHMS = ("astar", "dijkstra")
+EVALUATION_SCHEMA_VERSION = "multi-path-evaluation/v1"
+EVALUATION_TYPE = "offline_multi_path_planning"
 
 
 def _sum_conflicts(conflicts: dict[str, int], prefix: str) -> int:
@@ -96,8 +98,19 @@ def evaluate_multi_path_algorithms(
                 }
             )
 
+    successful_results = sum(result["planning_status"] == "success" for result in results)
+    status = (
+        "success"
+        if successful_results == len(results)
+        else "failed"
+        if not successful_results
+        else "partial_failure"
+    )
     return {
         "experiment_id": str(uuid4()),
+        "schema_version": EVALUATION_SCHEMA_VERSION,
+        "experiment_type": EVALUATION_TYPE,
+        "status": status,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "input_snapshot": {
             "topology_id": topology_id,

@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useParams } from 'react-router-dom'
 import { Surface } from '../components/Surface'
 import { HeatmapGrid } from '../components/charts/HeatmapGrid'
 import { TrendChart } from '../components/charts/TrendChart'
+import { MultiPathEvaluationReports } from '../features/path-demo/MultiPathEvaluationReports'
+import '../features/path-demo/MultiPathEvaluationReports.css'
 import { api } from '../lib/api'
 
 export function ReportsPage() {
+  const { experimentId } = useParams<{ experimentId?: string }>()
   const runsQuery = useQuery({ queryKey: ['runs'], queryFn: api.listSimulationRuns, refetchInterval: 4000 })
   const [runId, setRunId] = useState('')
 
@@ -46,6 +50,7 @@ export function ReportsPage() {
 
   return (
     <div className="page-grid reports-grid">
+      <MultiPathEvaluationReports selectedExperimentId={experimentId} />
       <Surface title="回放与报告" subtitle="从事件时间轴、热力图和指标面板复盘一次完整协同调度运行。">
         <div className="editor-toolbar">
           <select value={runId} onChange={(event) => setRunId(event.target.value)}>

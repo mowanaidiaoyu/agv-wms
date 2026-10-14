@@ -18,8 +18,10 @@ export default function App() {
         <Route path="/scenario" element={<ScenarioPage />} />
         <Route path="/simulation" element={<SimulationPage />} />
         <Route path="/lab" element={<LabPage />} />
+        <Route path="/lab/multi-path-result/:experimentId/:algorithm" element={<MultiPathResultPage />} />
         <Route path="/lab/multi-path-result/:algorithm" element={<MultiPathResultPage />} />
         <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/reports/multi-path/:experimentId" element={<ReportsPage />} />
         <Route path="/path-demo" element={<PathDemoPage />} />
       </Routes>
     </NavShell>

@@ -190,6 +190,9 @@ export interface MultiPathEvaluationAlgorithmResult {
 
 export interface MultiPathEvaluation {
   experiment_id: string
+  schema_version: string
+  experiment_type: 'offline_multi_path_planning'
+  status: 'success' | 'partial_failure' | 'failed'
   created_at: string
   input_snapshot: {
     topology_id: string
@@ -202,6 +205,35 @@ export interface MultiPathEvaluation {
     algorithms: PathDemoAlgorithm[]
   }
   results: MultiPathEvaluationAlgorithmResult[]
+}
+
+export interface MultiPathEvaluationSummary {
+  experiment_id: string
+  schema_version: string
+  experiment_type: 'offline_multi_path_planning'
+  status: 'success' | 'partial_failure' | 'failed'
+  topology_id: string
+  topology_name: string
+  topology_version: string
+  vehicle_count: number
+  algorithms: PathDemoAlgorithm[]
+  results: Array<Omit<MultiPathEvaluationAlgorithmResult, 'plan'>>
+  created_at: string
+}
+
+export interface MultiPathEvaluationList {
+  items: MultiPathEvaluationSummary[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface MultiPathEvaluationExport {
+  schema_version: string
+  experiment_type: 'offline_multi_path_planning'
+  disclaimer: string
+  unit_definitions: Record<string, string>
+  evaluation: MultiPathEvaluation
 }
 
 export interface PathDemoVehicleView {

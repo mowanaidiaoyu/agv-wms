@@ -129,7 +129,7 @@ export function LabPage() {
 
   const openTrajectory = (algorithm: 'astar' | 'dijkstra') => {
     setViewedAlgorithm(algorithm)
-    navigate(`/lab/multi-path-result/${algorithm}`)
+    if (multiEvaluation) navigate(`/lab/multi-path-result/${multiEvaluation.experiment_id}/${algorithm}`)
   }
 
   const dispatchCases = evaluation.filter((item) => item.category === 'dispatch')
@@ -221,7 +221,9 @@ export function LabPage() {
         {multiEvaluation ? (
           <>
             <p className="multi-path-snapshot-note">
-              实验快照 {multiEvaluation.experiment_id} · 拓扑版本 {multiEvaluation.input_snapshot.topology_version} · 内存生命周期，刷新页面后失效。
+              已持久化实验 {multiEvaluation.experiment_id} · {new Date(multiEvaluation.created_at).toLocaleString('zh-CN', { hour12: false })}
+              {' · '}拓扑版本 {multiEvaluation.input_snapshot.topology_version}
+              {' · '}<Link to={`/reports/multi-path/${multiEvaluation.experiment_id}`}>查看历史报告</Link>
             </p>
             <div className="table-wrap">
               <table aria-label="多车路径算法对比结果">

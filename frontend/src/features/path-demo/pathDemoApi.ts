@@ -1,6 +1,8 @@
 import type {
   MultiPathDemoScenariosResponse,
   MultiPathEvaluation,
+  MultiPathEvaluationExport,
+  MultiPathEvaluationList,
   MultiPathPlanningConfig,
   MultiPathPlan,
   MultiPathVehicleRequest,
@@ -106,5 +108,27 @@ export const pathDemoApi = {
         planning_config: planningConfig,
       }),
     })
+  },
+  evaluations({
+    limit = 20,
+    offset = 0,
+    topologyId,
+    status,
+  }: {
+    limit?: number
+    offset?: number
+    topologyId?: string
+    status?: MultiPathEvaluation['status']
+  } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+    if (topologyId) params.set('topology_id', topologyId)
+    if (status) params.set('status', status)
+    return request<MultiPathEvaluationList>(`/path-demo/evaluations?${params.toString()}`)
+  },
+  evaluation(experimentId: string) {
+    return request<MultiPathEvaluation>(`/path-demo/evaluations/${encodeURIComponent(experimentId)}`)
+  },
+  evaluationExport(experimentId: string) {
+    return request<MultiPathEvaluationExport>(`/path-demo/evaluations/${encodeURIComponent(experimentId)}/export`)
   },
 }

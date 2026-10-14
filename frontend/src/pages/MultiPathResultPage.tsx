@@ -5,6 +5,7 @@ import { PathPlaybackController } from '../features/path-demo/PathPlaybackContro
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import { buildMultiVehicleViews } from '../features/path-demo/multiPathPlayback'
 import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
+import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import { usePathPlayback } from '../features/path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../features/path-demo/types'
 import { api } from '../lib/api'
@@ -18,9 +19,18 @@ const PathDemo3DScene = lazy(() =>
 const algorithmLabel = { astar: '时空 A*', dijkstra: '时空 Dijkstra' }
 
 export function MultiPathResultPage() {
-  const params = useParams<{ algorithm: string }>()
+  const params = useParams<{ experimentId?: string; algorithm: string }>()
   const algorithm = params.algorithm as PathDemoAlgorithm
-  const evaluation = useMultiPathExperimentStore((state) => state.evaluation)
+  const storedEvaluation = useMultiPathExperimentStore((state) => state.evaluation)
+  const memoryEvaluation = params.experimentId
+    ? storedEvaluation?.experiment_id === params.experimentId ? storedEvaluation : null
+    : storedEvaluation
+  const evaluationQuery = useQuery({
+    queryKey: ['multi-path-evaluation', params.experimentId],
+    queryFn: () => pathDemoApi.evaluation(params.experimentId ?? ''),
+    enabled: Boolean(params.experimentId && !memoryEvaluation),
+  })
+  const evaluation = memoryEvaluation ?? evaluationQuery.data
   const result = evaluation?.results.find((item) => item.algorithm === algorithm)
   const plan = result?.plan ?? null
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies, enabled: Boolean(plan) })
@@ -50,18 +60,52 @@ export function MultiPathResultPage() {
     setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
   }
 
-  if (!evaluation || !result || !plan || !['astar', 'dijkstra'].includes(algorithm)) {
+  if (evaluationQuery.isLoading) {
+    return <section className="multi-path-result-empty"><h2>正在读取持久化实验轨迹…</h2></section>
+  }
+
+  if (evaluationQuery.isError) {
+    return (
+      <section className="multi-path-result-empty">
+        <h2>无法读取持久化实验轨迹</h2>
+        <p>{evaluationQuery.error.message}。系统不会静默重新规划。</p>
+        <Link to="/reports">返回回放与报告</Link>
+      </section>
+    )
+  }
+
+  if (!evaluation || !result || !['astar', 'dijkstra'].includes(algorithm)) {
     return (
       <section className="multi-path-result-empty">
         <h2>实验轨迹快照已失效或不可用</h2>
-        <p>评测结果只保存在当前浏览器内存中。请返回算法实验室重新运行评测；系统不会静默重新规划。</p>
+        <p>旧链接需要当前浏览器内存中的快照；稳定历史链接会从后端读取保存结果。系统不会静默重新规划。</p>
         <Link className="accent-button" to="/lab">返回算法实验室</Link>
       </section>
     )
   }
 
+  if (!plan) {
+    return (
+      <section className="multi-path-result-empty">
+        <h2>{algorithmLabel[algorithm]} 本次规划失败，无可回放轨迹</h2>
+        <p>{result.error_reason ?? '未返回失败原因'}。系统不会以新规划替代历史失败结果。</p>
+        <Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
+      </section>
+    )
+  }
+
   if (topologiesQuery.isError) {
-    return <section className="multi-path-result-empty"><h2>无法加载实验拓扑</h2><Link to="/lab">返回算法实验室</Link></section>
+    return <section className="multi-path-result-empty"><h2>无法加载实验拓扑</h2><p>无法验证历史拓扑版本，已拒绝 3D 回放。</p><Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link></section>
+  }
+
+  if (topologiesQuery.isSuccess && !topologyRecord) {
+    return (
+      <section className="multi-path-result-empty">
+        <h2>历史实验拓扑不存在</h2>
+        <p>本 Gate 未归档完整拓扑快照，不能用其他拓扑替代，已拒绝 3D 回放。</p>
+        <Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
+      </section>
+    )
   }
 
   if (topologyRecord && !topologyVersionMatches) {
@@ -69,7 +113,7 @@ export function MultiPathResultPage() {
       <section className="multi-path-result-empty">
         <h2>拓扑版本与实验快照不一致</h2>
         <p>快照版本为 {plan.topology_version}，当前版本为 {topologyRecord.payload.meta.version}。为避免错误回放，已拒绝播放。</p>
-        <Link to="/lab">返回算法实验室</Link>
+        <Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
       </section>
     )
   }
@@ -82,7 +126,7 @@ export function MultiPathResultPage() {
           <h2>{algorithmLabel[algorithm]} · 多车 3D 轨迹</h2>
           <p>直接回放本次评测返回的时空轨迹，不重新规划；这是离线路径演示，不是完整仓储任务仿真。</p>
         </div>
-        <Link className="ghost-button" to="/lab">返回算法实验室</Link>
+        <Link className="ghost-button" to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
       </header>
       <div className="path-demo-layout">
         <aside className="path-demo-panel">

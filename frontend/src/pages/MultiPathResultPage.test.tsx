@@ -3,12 +3,14 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
+import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import type { MultiPathEvaluation, MultiPathPlan, PathDemoCell, PathDemoVehicleView } from '../features/path-demo/types'
 import { api } from '../lib/api'
 import type { TopologyPayload } from '../types'
 import { MultiPathResultPage } from './MultiPathResultPage'
 
 vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
+vi.mock('../features/path-demo/pathDemoApi', () => ({ pathDemoApi: { evaluation: vi.fn() } }))
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
   PathDemo3DScene: ({ vehicles, selectedVehicleId }: { vehicles: PathDemoVehicleView[]; selectedVehicleId?: string }) => (
     <div data-testid="result-scene" data-vehicles={vehicles.map((vehicle) => vehicle.vehicleId).join(',')} data-selected={selectedVehicleId} />
@@ -55,7 +57,8 @@ function plan(): MultiPathPlan {
 function evaluation(): MultiPathEvaluation {
   const astarPlan = plan()
   return {
-    experiment_id: 'snapshot-1', created_at: '2026-10-13T00:00:00Z',
+    experiment_id: 'snapshot-1', schema_version: 'multi-path-evaluation/v1',
+    experiment_type: 'offline_multi_path_planning', status: 'success', created_at: '2026-10-13T00:00:00Z',
     input_snapshot: {
       topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
       mode: 'preset', scenario_id: 'parallel',
@@ -85,11 +88,14 @@ function evaluation(): MultiPathEvaluation {
   }
 }
 
-function renderPage() {
+function renderPage(path = '/lab/multi-path-result/astar') {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <MemoryRouter initialEntries={['/lab/multi-path-result/astar']}>
-        <Routes><Route path="/lab/multi-path-result/:algorithm" element={<MultiPathResultPage />} /></Routes>
+      <MemoryRouter initialEntries={[path]}>
+        <Routes>
+          <Route path="/lab/multi-path-result/:algorithm" element={<MultiPathResultPage />} />
+          <Route path="/lab/multi-path-result/:experimentId/:algorithm" element={<MultiPathResultPage />} />
+        </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
   )
@@ -98,6 +104,7 @@ function renderPage() {
 beforeEach(() => {
   useMultiPathExperimentStore.setState({ customDraft: null, evaluation: null, viewedAlgorithm: null })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
+  vi.mocked(pathDemoApi.evaluation).mockResolvedValue(evaluation())
 })
 
 describe('MultiPathResultPage', () => {
@@ -120,5 +127,22 @@ describe('MultiPathResultPage', () => {
     expect(screen.getByRole('button', { name: '开始运行' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '暂停' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '仓库全景' })).toBeEnabled()
+  })
+
+  it('reloads a stable historical route from the backend without replanning', async () => {
+    renderPage('/lab/multi-path-result/snapshot-1/astar')
+    expect(await screen.findByText('时空 A* · 多车 3D 轨迹')).toBeInTheDocument()
+    expect(pathDemoApi.evaluation).toHaveBeenCalledWith('snapshot-1')
+  })
+
+  it('refuses replay when the current topology version differs from the snapshot', async () => {
+    vi.mocked(api.listTopologies).mockResolvedValueOnce([{
+      id: topology.id,
+      name: topology.name,
+      payload: { ...topology, meta: { ...topology.meta, version: 'new-version' } },
+    }])
+    renderPage('/lab/multi-path-result/snapshot-1/astar')
+    expect(await screen.findByText('拓扑版本与实验快照不一致')).toBeInTheDocument()
+    expect(screen.queryByTestId('result-scene')).not.toBeInTheDocument()
   })
 })

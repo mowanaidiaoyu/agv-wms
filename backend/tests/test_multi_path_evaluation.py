@@ -162,10 +162,17 @@ def test_evaluation_api_uses_isolated_repository_and_is_deterministic(monkeypatc
     topology = open_grid_topology()
 
     class FakeRepository:
+        def __init__(self):
+            self.evaluations: list[dict] = []
+
         def get_topology(self, topology_id: str):
             if topology_id != topology["id"]:
                 return None
             return {"id": topology["id"], "name": topology["name"], "payload": topology}
+
+        def save_multi_path_evaluation(self, evaluation: dict):
+            self.evaluations.append(deepcopy(evaluation))
+            return evaluation
 
     monkeypatch.setattr(path_demo_api, "repo", FakeRepository())
     app = FastAPI()

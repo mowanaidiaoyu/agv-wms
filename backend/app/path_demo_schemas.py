@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 PathDemoAlgorithm = Literal["astar", "dijkstra"]
+MultiPathEvaluationStatus = Literal["success", "partial_failure", "failed"]
 
 
 class PathDemoPlanRequest(BaseModel):
@@ -210,6 +211,46 @@ class MultiPathEvaluationAlgorithmResult(BaseModel):
 
 class MultiPathEvaluationResponse(BaseModel):
     experiment_id: str
+    schema_version: str
+    experiment_type: Literal["offline_multi_path_planning"]
+    status: MultiPathEvaluationStatus
     created_at: str
     input_snapshot: MultiPathEvaluationInputSnapshot
     results: list[MultiPathEvaluationAlgorithmResult]
+
+
+class MultiPathEvaluationAlgorithmSummary(BaseModel):
+    algorithm: PathDemoAlgorithm
+    planning_status: Literal["success", "failed"]
+    error_reason: str | None
+    planning_time_ms: float
+    metrics: MultiPathEvaluationMetrics | None
+
+
+class MultiPathEvaluationSummary(BaseModel):
+    experiment_id: str
+    schema_version: str
+    experiment_type: Literal["offline_multi_path_planning"]
+    status: MultiPathEvaluationStatus
+    topology_id: str
+    topology_name: str
+    topology_version: str
+    vehicle_count: int
+    algorithms: list[PathDemoAlgorithm]
+    results: list[MultiPathEvaluationAlgorithmSummary]
+    created_at: str
+
+
+class MultiPathEvaluationListResponse(BaseModel):
+    items: list[MultiPathEvaluationSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+class MultiPathEvaluationExport(BaseModel):
+    schema_version: str
+    experiment_type: Literal["offline_multi_path_planning"]
+    disclaimer: str
+    unit_definitions: dict[str, str]
+    evaluation: MultiPathEvaluationResponse
