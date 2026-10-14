@@ -12,8 +12,18 @@ import { MultiPathResultPage } from './MultiPathResultPage'
 vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({ pathDemoApi: { evaluation: vi.fn() } }))
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
-  PathDemo3DScene: ({ vehicles, selectedVehicleId }: { vehicles: PathDemoVehicleView[]; selectedVehicleId?: string }) => (
-    <div data-testid="result-scene" data-vehicles={vehicles.map((vehicle) => vehicle.vehicleId).join(',')} data-selected={selectedVehicleId} />
+  PathDemo3DScene: ({ vehicles, selectedVehicleId, cameraActionRequest }: {
+    vehicles: PathDemoVehicleView[]
+    selectedVehicleId?: string
+    cameraActionRequest?: { type: string } | null
+  }) => (
+    <div
+      data-testid="result-scene"
+      data-vehicles={vehicles.map((vehicle) => vehicle.vehicleId).join(',')}
+      data-selected={selectedVehicleId}
+      data-camera-action={cameraActionRequest?.type ?? ''}
+      data-samples={vehicles.map((vehicle) => `${vehicle.vehicleId}:${vehicle.sample?.row.toFixed(2)},${vehicle.sample?.col.toFixed(2)}`).join('|')}
+    />
   ),
 }))
 
@@ -88,6 +98,38 @@ function evaluation(): MultiPathEvaluation {
   }
 }
 
+function sixVehicleEvaluation(): MultiPathEvaluation {
+  const snapshot = evaluation()
+  const result = snapshot.results[0]
+  const baseVehicle = result.plan!.vehicles[0]
+  const vehicles = Array.from({ length: 6 }, (_, index) => ({
+    ...baseVehicle,
+    vehicle_id: `CTU-0${index + 1}`,
+    priority: index + 1,
+  }))
+  result.plan = { ...result.plan!, vehicles }
+  result.metrics = {
+    ...result.metrics!,
+    total_path_distance: 6,
+    vehicles: vehicles.map((vehicle) => ({
+      vehicle_id: vehicle.vehicle_id,
+      total_distance: vehicle.total_distance,
+      estimated_duration_seconds: vehicle.estimated_duration_seconds,
+      wait_time_seconds: vehicle.wait_time_seconds,
+      avoidance_count: vehicle.avoidance_count,
+      visited_states: vehicle.visited_states,
+    })),
+  }
+  snapshot.input_snapshot.vehicles = vehicles.map((vehicle) => ({
+    vehicle_id: vehicle.vehicle_id,
+    vehicle_type: 'ctu',
+    start_cell_id: vehicle.start.id,
+    goal_cell_id: vehicle.goal.id,
+    priority: vehicle.priority,
+  }))
+  return snapshot
+}
+
 function renderPage(path = '/lab/multi-path-result/astar') {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -102,6 +144,7 @@ function renderPage(path = '/lab/multi-path-result/astar') {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks()
   useMultiPathExperimentStore.setState({ customDraft: null, evaluation: null, viewedAlgorithm: null })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
   vi.mocked(pathDemoApi.evaluation).mockResolvedValue(evaluation())
@@ -144,5 +187,57 @@ describe('MultiPathResultPage', () => {
     renderPage('/lab/multi-path-result/snapshot-1/astar')
     expect(await screen.findByText('拓扑版本与实验快照不一致')).toBeInTheDocument()
     expect(screen.queryByTestId('result-scene')).not.toBeInTheDocument()
+  })
+
+  it('seeks every vehicle on one historical timeline without another backend request', async () => {
+    renderPage('/lab/multi-path-result/snapshot-1/astar')
+    const slider = await screen.findByLabelText('历史轨迹时间轴')
+    const scene = await screen.findByTestId('result-scene')
+    expect(slider).toHaveAttribute('max', '0.25')
+    fireEvent.pointerDown(slider)
+    fireEvent.change(slider, { target: { value: '0.125' } })
+    await waitFor(() => expect(scene).toHaveAttribute(
+      'data-samples',
+      'CTU-01:1.00,1.50|CTU-02:2.00,1.50',
+    ))
+    expect(screen.getByText('0.13 s / 0.25 s')).toBeInTheDocument()
+    expect(pathDemoApi.evaluation).toHaveBeenCalledTimes(1)
+  })
+
+  it('steps to exact saved ticks, clamps the end and exposes synchronized completion state', async () => {
+    renderPage('/lab/multi-path-result/snapshot-1/astar')
+    await screen.findByLabelText('历史轨迹时间轴')
+    fireEvent.click(screen.getByRole('button', { name: '下一个时间片' }))
+    expect(await screen.findByText('0.25 s / 0.25 s')).toBeInTheDocument()
+    expect(screen.getAllByText(/COMPLETED/)).toHaveLength(3)
+    expect(screen.getByRole('button', { name: '下一个时间片' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '上一个时间片' }))
+    expect(await screen.findByText('0.00 s / 0.25 s')).toBeInTheDocument()
+    expect(screen.getAllByText(/MOVING/)).toHaveLength(3)
+  })
+
+  it('reports a missing persisted experiment and never attempts to fabricate a replay', async () => {
+    vi.mocked(pathDemoApi.evaluation).mockRejectedValueOnce(new Error('Multi-path evaluation not found'))
+    renderPage('/lab/multi-path-result/missing/astar')
+    expect(await screen.findByText(/Multi-path evaluation not found/)).toBeInTheDocument()
+    expect(api.listTopologies).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('result-scene')).not.toBeInTheDocument()
+  })
+
+  it('keeps CTU-06 selected while all six saved tracks seek together', async () => {
+    useMultiPathExperimentStore.setState({ evaluation: sixVehicleEvaluation(), viewedAlgorithm: 'astar' })
+    renderPage()
+    const scene = await screen.findByTestId('result-scene')
+    fireEvent.change(screen.getByDisplayValue('CTU-01'), { target: { value: 'CTU-06' } })
+    expect(scene).toHaveAttribute('data-selected', 'CTU-06')
+    const followButton = document.querySelector<HTMLButtonElement>('.path-demo-camera-buttons button:nth-child(2)')
+    expect(followButton).not.toBeNull()
+    fireEvent.click(followButton!)
+    fireEvent.change(screen.getByLabelText('历史轨迹时间轴'), { target: { value: '0.125' } })
+    await waitFor(() => {
+      expect(scene.getAttribute('data-samples')).toContain('CTU-06:1.00,1.50')
+      expect(scene).toHaveAttribute('data-selected', 'CTU-06')
+      expect(scene).toHaveAttribute('data-camera-action', 'switch-follow-target')
+    })
   })
 })

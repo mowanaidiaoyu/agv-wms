@@ -2,6 +2,7 @@ import { floorPlaneY, worldX, worldZ } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { sampleTrajectory } from './pathPlayback'
 import type {
+  HistoricalVehicleSnapshot,
   MultiPathPlan,
   MultiPathVehiclePlan,
   PathDemoCell,
@@ -56,6 +57,13 @@ export function buildMultiVehicleViews(
   topology: TopologyPayload,
   elapsedSeconds: number,
 ): PathDemoVehicleView[] {
+  return sampleMultiVehicleViews(buildMultiVehicleTrajectories(plan, topology), elapsedSeconds)
+}
+
+export function buildMultiVehicleTrajectories(
+  plan: MultiPathPlan,
+  topology: TopologyPayload,
+): PathDemoVehicleView[] {
   return plan.vehicles.map((vehiclePlan) => {
     const color = vehicleDisplayColor(vehiclePlan.vehicle_id, vehiclePlan.display_color)
     const trajectory = buildScheduledTrajectory(vehiclePlan, topology)
@@ -64,7 +72,110 @@ export function buildMultiVehicleViews(
       label: vehiclePlan.vehicle_id,
       color,
       trajectory,
-      sample: sampleTrajectory(trajectory, elapsedSeconds),
+      sample: null,
+    }
+  })
+}
+
+export function sampleMultiVehicleViews(
+  preparedViews: PathDemoVehicleView[],
+  elapsedSeconds: number,
+): PathDemoVehicleView[] {
+  return preparedViews.map((view) => ({
+    ...view,
+    sample: sampleTrajectory(view.trajectory, elapsedSeconds),
+  }))
+}
+
+function segmentDistance(from: MultiPathVehiclePlan['steps'][number], to: MultiPathVehiclePlan['steps'][number]) {
+  if (to.action !== 'move') return 0
+  return Math.hypot(to.cell.row - from.cell.row, to.cell.col - from.cell.col)
+}
+
+export function sampleAllVehiclesAtTime(
+  plan: MultiPathPlan,
+  currentTimeSeconds: number,
+): HistoricalVehicleSnapshot[] {
+  const time = Math.max(0, Math.min(
+    Number.isFinite(currentTimeSeconds) ? currentTimeSeconds : 0,
+    plan.makespan_seconds,
+  ))
+
+  return plan.vehicles.map((vehicle) => {
+    const steps = vehicle.steps
+    if (!steps.length) {
+      return {
+        vehicleId: vehicle.vehicle_id,
+        status: 'NOT_STARTED',
+        logicalPosition: '无轨迹',
+        currentCellId: null,
+        movedDistance: 0,
+        accumulatedWaitSeconds: 0,
+        progress: 0,
+      }
+    }
+
+    const first = steps[0]
+    const final = steps[steps.length - 1]
+    if (time < first.time_seconds) {
+      return {
+        vehicleId: vehicle.vehicle_id,
+        status: 'NOT_STARTED',
+        logicalPosition: first.cell.id,
+        currentCellId: first.cell.id,
+        movedDistance: 0,
+        accumulatedWaitSeconds: 0,
+        progress: 0,
+      }
+    }
+
+    let movedDistance = 0
+    let accumulatedWaitSeconds = 0
+    let activeSegmentIndex = steps.length - 1
+    for (let index = 1; index < steps.length; index += 1) {
+      const previous = steps[index - 1]
+      const next = steps[index]
+      const segmentStart = previous.time_seconds
+      const segmentEnd = next.time_seconds
+      const duration = Math.max(0, segmentEnd - segmentStart)
+      const elapsedInSegment = Math.max(0, Math.min(time, segmentEnd) - segmentStart)
+      const fraction = duration > 0 ? elapsedInSegment / duration : time >= segmentEnd ? 1 : 0
+      const distance = segmentDistance(previous, next)
+      movedDistance += distance * fraction
+      if (next.action === 'wait' || distance === 0) accumulatedWaitSeconds += elapsedInSegment
+      if (time < segmentEnd) {
+        activeSegmentIndex = index
+        break
+      }
+    }
+
+    if (time >= final.time_seconds) {
+      return {
+        vehicleId: vehicle.vehicle_id,
+        status: 'COMPLETED',
+        logicalPosition: final.cell.id,
+        currentCellId: final.cell.id,
+        movedDistance: vehicle.total_distance,
+        accumulatedWaitSeconds: vehicle.wait_time_seconds,
+        progress: 1,
+      }
+    }
+
+    const previous = steps[Math.max(0, activeSegmentIndex - 1)]
+    const next = steps[activeSegmentIndex]
+    const waiting = next.action === 'wait'
+      || (previous.cell.floor === next.cell.floor
+        && previous.cell.row === next.cell.row
+        && previous.cell.col === next.cell.col)
+    const totalDistance = vehicle.total_distance
+    return {
+      vehicleId: vehicle.vehicle_id,
+      status: waiting ? 'WAITING' : 'MOVING',
+      logicalPosition: waiting ? previous.cell.id : `${previous.cell.id} → ${next.cell.id}`,
+      currentCellId: previous.cell.id,
+      movedDistance,
+      accumulatedWaitSeconds,
+      progress: totalDistance > 0 ? Math.max(0, Math.min(movedDistance / totalDistance, 1)) : 0,
     }
   })
 }

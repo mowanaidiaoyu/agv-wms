@@ -158,6 +158,18 @@ export interface MultiPathPlan {
   planning_time_ms: number
 }
 
+export type HistoricalVehicleStatus = 'NOT_STARTED' | 'MOVING' | 'WAITING' | 'COMPLETED'
+
+export interface HistoricalVehicleSnapshot {
+  vehicleId: string
+  status: HistoricalVehicleStatus
+  logicalPosition: string
+  currentCellId: string | null
+  movedDistance: number
+  accumulatedWaitSeconds: number
+  progress: number
+}
+
 export interface MultiPathEvaluationVehicleMetrics {
   vehicle_id: string
   total_distance: number

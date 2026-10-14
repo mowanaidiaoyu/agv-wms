@@ -128,6 +128,39 @@ export function resetPlayback(state: PlaybackState): PlaybackState {
   return { ...state, status: 'idle', elapsedSeconds: 0 }
 }
 
+export function clampPlaybackTime(elapsedSeconds: number, totalDuration: number): number {
+  if (!Number.isFinite(elapsedSeconds) || !Number.isFinite(totalDuration) || totalDuration <= 0) return 0
+  return Math.max(0, Math.min(elapsedSeconds, totalDuration))
+}
+
+export function seekPlayback(
+  state: PlaybackState,
+  elapsedSeconds: number,
+  totalDuration: number,
+): PlaybackState {
+  const nextElapsedSeconds = clampPlaybackTime(elapsedSeconds, totalDuration)
+  return {
+    ...state,
+    elapsedSeconds: nextElapsedSeconds,
+    status: nextElapsedSeconds >= totalDuration && totalDuration > 0 ? 'completed' : 'paused',
+  }
+}
+
+export function stepPlaybackTime(
+  elapsedSeconds: number,
+  direction: -1 | 1,
+  timeStepSeconds: number,
+  totalDuration: number,
+): number {
+  const current = clampPlaybackTime(elapsedSeconds, totalDuration)
+  if (!Number.isFinite(timeStepSeconds) || timeStepSeconds <= 0 || totalDuration <= 0) return current
+  const epsilon = 1e-9
+  const tick = direction > 0
+    ? Math.floor((current + epsilon) / timeStepSeconds) + 1
+    : Math.ceil((current - epsilon) / timeStepSeconds) - 1
+  return clampPlaybackTime(tick * timeStepSeconds, totalDuration)
+}
+
 export function advancePlayback(state: PlaybackState, deltaSeconds: number, totalDuration: number): PlaybackState {
   if (state.status !== 'running' || deltaSeconds <= 0) return state
   const elapsedSeconds = Math.min(totalDuration, state.elapsedSeconds + deltaSeconds * state.rate)
@@ -138,9 +171,13 @@ export function advancePlayback(state: PlaybackState, deltaSeconds: number, tota
   }
 }
 
-export function usePathPlayback(totalDuration: number) {
+export function usePathPlayback(totalDuration: number, timelineKey?: string) {
   const [state, setState] = useState<PlaybackState>(() => initialPlaybackState())
   const frameRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    setState((current) => initialPlaybackState(current.rate))
+  }, [timelineKey])
 
   useEffect(() => {
     if (state.status !== 'running') return undefined
@@ -163,7 +200,16 @@ export function usePathPlayback(totalDuration: number) {
   const pause = useCallback(() => setState(pausePlayback), [])
   const resume = useCallback(() => setState(resumePlayback), [])
   const reset = useCallback(() => setState(resetPlayback), [])
+  const seek = useCallback(
+    (elapsedSeconds: number) => setState((current) => seekPlayback(current, elapsedSeconds, totalDuration)),
+    [totalDuration],
+  )
+  const restart = useCallback(() => {
+    setState((current) => totalDuration > 0
+      ? { ...current, status: 'running', elapsedSeconds: 0 }
+      : resetPlayback(current))
+  }, [totalDuration])
   const setRate = useCallback((rate: 1 | 2 | 4) => setState((current) => ({ ...current, rate })), [])
 
-  return { state, start, pause, resume, reset, setRate }
+  return { state, start, pause, resume, reset, seek, restart, setRate }
 }

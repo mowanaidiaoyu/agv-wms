@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { TopologyPayload } from '../../types'
-import { buildConfiguredVehicleStartSample, buildMultiVehicleViews, buildScheduledTrajectory } from './multiPathPlayback'
+import {
+  buildConfiguredVehicleStartSample,
+  buildMultiVehicleTrajectories,
+  buildMultiVehicleViews,
+  buildScheduledTrajectory,
+  sampleAllVehiclesAtTime,
+  sampleMultiVehicleViews,
+} from './multiPathPlayback'
 import type { MultiPathPlan, MultiPathVehiclePlan } from './types'
 
 const topology: TopologyPayload = {
@@ -91,6 +98,38 @@ describe('multi path playback', () => {
     expect(views).toHaveLength(6)
     expect(new Set(views.map((view) => view.color)).size).toBe(6)
     expect(views[5].color).toBe('#123456')
+  })
+
+  it('prepares trajectory geometry once and resamples every vehicle on one shared time', () => {
+    const prepared = buildMultiVehicleTrajectories(plan, topology)
+    const first = sampleMultiVehicleViews(prepared, 0.25)
+    const second = sampleMultiVehicleViews(prepared, 0.5)
+    expect(second[0].trajectory).toBe(prepared[0].trajectory)
+    expect(first.every((view) => view.sample?.elapsedSeconds === 0.25)).toBe(true)
+    expect(second.every((view) => view.sample?.elapsedSeconds === 0.5)).toBe(true)
+  })
+
+  it('derives moving, waiting and completed states plus real partial metrics from saved steps', () => {
+    const moving = sampleAllVehiclesAtTime(plan, 0.375)[0]
+    expect(moving).toMatchObject({ status: 'MOVING', logicalPosition: 'a → b' })
+    expect(moving.movedDistance).toBeCloseTo(0.5)
+    expect(moving.accumulatedWaitSeconds).toBeCloseTo(0.25)
+
+    const waiting = sampleAllVehiclesAtTime(plan, 0.125)[0]
+    expect(waiting).toMatchObject({ status: 'WAITING', currentCellId: 'a', movedDistance: 0 })
+    expect(waiting.accumulatedWaitSeconds).toBeCloseTo(0.125)
+
+    const completed = sampleAllVehiclesAtTime(plan, 99)[0]
+    expect(completed).toMatchObject({ status: 'COMPLETED', currentCellId: 'c', progress: 1 })
+    expect(completed.movedDistance).toBe(vehiclePlan.total_distance)
+    expect(completed.accumulatedWaitSeconds).toBe(vehiclePlan.wait_time_seconds)
+  })
+
+  it('keeps a waiting vehicle stationary in continuous 3D playback', () => {
+    const views = buildMultiVehicleViews(plan, topology, 0.125)
+    expect(views[0].sample?.row).toBe(1)
+    expect(views[0].sample?.col).toBe(1)
+    expect(views[0].sample?.world).toEqual(buildScheduledTrajectory(vehiclePlan, topology)[0].world)
   })
 
   it('builds an unplanned camera preview from the selected vehicle configured start only', () => {

@@ -9,7 +9,9 @@ import {
   resetPlayback,
   resumePlayback,
   sampleTrajectory,
+  seekPlayback,
   startPlayback,
+  stepPlaybackTime,
   usePathPlayback,
 } from './pathPlayback'
 import type { PathDemoCell } from './types'
@@ -66,6 +68,34 @@ describe('path demo trajectory', () => {
 
   it('returns no vehicle sample when no planned path exists', () => {
     expect(sampleTrajectory([], 1)).toBeNull()
+  })
+
+  it('seeks with clamping and pauses without changing playback rate', () => {
+    const running = { status: 'running', elapsedSeconds: 0.5, rate: 4 } as const
+    expect(seekPlayback(running, 1.25, 2)).toEqual({ status: 'paused', elapsedSeconds: 1.25, rate: 4 })
+    expect(seekPlayback(running, -3, 2).elapsedSeconds).toBe(0)
+    expect(seekPlayback(running, 20, 2)).toEqual({ status: 'completed', elapsedSeconds: 2, rate: 4 })
+  })
+
+  it('steps on integer timeline ticks without floating point drift and clamps boundaries', () => {
+    expect(stepPlaybackTime(0, -1, 0.25, 1)).toBe(0)
+    expect(stepPlaybackTime(0, 1, 0.25, 1)).toBe(0.25)
+    expect(stepPlaybackTime(0.25, 1, 0.25, 1)).toBe(0.5)
+    expect(stepPlaybackTime(0.5, -1, 0.25, 1)).toBe(0.25)
+    expect(stepPlaybackTime(0.99, 1, 0.25, 1)).toBe(1)
+    expect(stepPlaybackTime(1, 1, 0.25, 1)).toBe(1)
+    expect(stepPlaybackTime(0.5, 1, Number.NaN, 1)).toBe(0.5)
+  })
+
+  it('resets elapsed time when the historical timeline identity changes', () => {
+    const { result, rerender } = renderHook(
+      ({ timelineKey }) => usePathPlayback(10, timelineKey),
+      { initialProps: { timelineKey: 'experiment-a:astar' } },
+    )
+    act(() => result.current.seek(4))
+    expect(result.current.state.elapsedSeconds).toBe(4)
+    rerender({ timelineKey: 'experiment-a:dijkstra' })
+    expect(result.current.state).toMatchObject({ status: 'idle', elapsedSeconds: 0 })
   })
 
   it('cancels its animation frame when the playback hook unmounts', () => {

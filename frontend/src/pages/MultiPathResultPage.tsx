@@ -1,9 +1,13 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
+import { HistoricalPlaybackControls } from '../features/path-demo/HistoricalPlaybackControls'
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
-import { buildMultiVehicleViews } from '../features/path-demo/multiPathPlayback'
+import {
+  buildMultiVehicleTrajectories,
+  sampleAllVehiclesAtTime,
+  sampleMultiVehicleViews,
+} from '../features/path-demo/multiPathPlayback'
 import { useMultiPathExperimentStore } from '../features/path-demo/multiPathExperimentStore'
 import { pathDemoApi } from '../features/path-demo/pathDemoApi'
 import { usePathPlayback } from '../features/path-demo/pathPlayback'
@@ -22,13 +26,11 @@ export function MultiPathResultPage() {
   const params = useParams<{ experimentId?: string; algorithm: string }>()
   const algorithm = params.algorithm as PathDemoAlgorithm
   const storedEvaluation = useMultiPathExperimentStore((state) => state.evaluation)
-  const memoryEvaluation = params.experimentId
-    ? storedEvaluation?.experiment_id === params.experimentId ? storedEvaluation : null
-    : storedEvaluation
+  const memoryEvaluation = params.experimentId ? null : storedEvaluation
   const evaluationQuery = useQuery({
     queryKey: ['multi-path-evaluation', params.experimentId],
     queryFn: () => pathDemoApi.evaluation(params.experimentId ?? ''),
-    enabled: Boolean(params.experimentId && !memoryEvaluation),
+    enabled: Boolean(params.experimentId),
   })
   const evaluation = memoryEvaluation ?? evaluationQuery.data
   const result = evaluation?.results.find((item) => item.algorithm === algorithm)
@@ -40,7 +42,9 @@ export function MultiPathResultPage() {
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
   const duration = plan?.makespan_seconds ?? 0
-  const playback = usePathPlayback(duration)
+  const timelineKey = `${evaluation?.experiment_id ?? 'missing'}:${algorithm}`
+  const playback = usePathPlayback(duration, timelineKey)
+  const timeStepSeconds = plan?.time_step_seconds ?? Number.NaN
 
   useEffect(() => {
     if (!plan?.vehicles.length) return
@@ -49,15 +53,28 @@ export function MultiPathResultPage() {
     }
   }, [plan, selectedVehicleId])
 
-  const vehicleViews = useMemo(
+  const preparedVehicleViews = useMemo(
     () => plan && topologyRecord && topologyVersionMatches
-      ? buildMultiVehicleViews(plan, topologyRecord.payload, playback.state.elapsedSeconds)
+      ? buildMultiVehicleTrajectories(plan, topologyRecord.payload)
       : [],
-    [plan, playback.state.elapsedSeconds, topologyRecord, topologyVersionMatches],
+    [plan, topologyRecord, topologyVersionMatches],
   )
+  const vehicleViews = useMemo(
+    () => sampleMultiVehicleViews(preparedVehicleViews, playback.state.elapsedSeconds),
+    [playback.state.elapsedSeconds, preparedVehicleViews],
+  )
+  const vehicleSnapshots = useMemo(
+    () => plan ? sampleAllVehiclesAtTime(plan, playback.state.elapsedSeconds) : [],
+    [plan, playback.state.elapsedSeconds],
+  )
+  const selectedSnapshot = vehicleSnapshots.find((vehicle) => vehicle.vehicleId === selectedVehicleId) ?? null
   const selectedSample = vehicleViews.find((vehicle) => vehicle.vehicleId === selectedVehicleId)?.sample ?? null
   const requestCameraAction = (type: CameraActionRequest['type']) => {
     setCameraActionRequest((current) => ({ type, sequence: (current?.sequence ?? 0) + 1 }))
+  }
+  const seekHistoricalTime = (elapsedSeconds: number) => {
+    playback.seek(elapsedSeconds)
+    if (cameraViewMode === 'follow') requestCameraAction('switch-follow-target')
   }
 
   if (evaluationQuery.isLoading) {
@@ -137,13 +154,16 @@ export function MultiPathResultPage() {
             <div><dt>车辆</dt><dd>{plan.vehicles.length}</dd></div>
             <div><dt>Makespan</dt><dd>{plan.makespan_seconds.toFixed(2)} s</dd></div>
           </dl>
-          <PathPlaybackController
+          <HistoricalPlaybackControls
             state={playback.state}
-            canPlay={duration > 0}
+            totalDuration={duration}
+            timeStepSeconds={timeStepSeconds}
             onStart={playback.start}
             onPause={playback.pause}
             onResume={playback.resume}
             onReset={playback.reset}
+            onSeek={seekHistoricalTime}
+            onRestart={playback.restart}
             onRateChange={playback.setRate}
           />
           <section className="path-demo-camera-controls" aria-label="实验轨迹视角控制">
@@ -178,6 +198,34 @@ export function MultiPathResultPage() {
               </div>
             ))}
           </div>
+          <section className="historical-vehicle-status" aria-label="历史车辆状态">
+            <strong>车辆实时状态</strong>
+            {vehicleSnapshots.map((vehicle) => (
+              <button
+                type="button"
+                key={vehicle.vehicleId}
+                className={`historical-vehicle-row${vehicle.vehicleId === selectedVehicleId ? ' is-selected' : ''}`}
+                onClick={() => {
+                  setSelectedVehicleId(vehicle.vehicleId)
+                  requestCameraAction(cameraViewMode === 'follow' ? 'switch-follow-target' : 'locate')
+                }}
+              >
+                <strong>{vehicle.vehicleId}</strong>
+                <small>已移动 {vehicle.movedDistance.toFixed(2)} 格 · 等待 {vehicle.accumulatedWaitSeconds.toFixed(2)} s</small>
+                <span className={`historical-status-badge is-${vehicle.status.toLowerCase().replace('_', '-')}`}>{vehicle.status}</span>
+                <span className="historical-position">位置：{vehicle.logicalPosition}</span>
+                <progress aria-label={`${vehicle.vehicleId} 路径进度`} max={1} value={vehicle.progress} />
+              </button>
+            ))}
+            {selectedSnapshot ? (
+              <div className="historical-selected-detail" aria-label="当前选中车辆详情">
+                <strong>当前车辆：{selectedSnapshot.vehicleId}</strong>
+                <span>状态：{selectedSnapshot.status}</span>
+                <span>逻辑位置：{selectedSnapshot.logicalPosition}</span>
+                <span>路径进度：{(selectedSnapshot.progress * 100).toFixed(1)}%</span>
+              </div>
+            ) : null}
+          </section>
         </aside>
         <div className="path-demo-viewport" aria-label="算法实验多车 3D 轨迹">
           {topologyRecord && topologyVersionMatches ? (
