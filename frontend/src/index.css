@@ -312,6 +312,25 @@ thead th {
   font-weight: 500;
 }
 
+/* 任务「源格」列里逐行展开的商品（skuName + 规格/等级/表面处理），已取行打 ✓ */
+.task-lines {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.task-lines li {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  white-space: normal;
+}
+.task-lines li.task-line-picked {
+  color: #22c55e;
+}
+
 .topology-grid,
 .scenario-grid,
 .simulation-grid,
@@ -1816,6 +1835,21 @@ select {
     height: auto;
   }
 
+  .nav-links {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .nav-link {
+    padding: 10px 14px;
+    border-radius: 14px;
+  }
+
+  .brand-card {
+    margin-bottom: 12px;
+  }
+
   .topology-grid,
   .scenario-grid,
   .simulation-grid,
@@ -1918,7 +1952,7 @@ select {
   gap: 14px;
   align-items: stretch;
   height: calc(100vh - 320px);
-  min-height: 540px;
+  min-height: 460px;
 }
 
 .topo-center-column {
@@ -1943,6 +1977,30 @@ select {
 .topology-editor-canvas canvas {
   display: block;
   outline: none;
+}
+
+/* 仿真工作台「场景棋盘」的实时 3D 视图 */
+.simulation-3d-viewport {
+  position: relative;
+  height: 62vh;
+  min-height: 420px;
+  border-radius: 20px;
+  overflow: hidden;
+  background: #0f1620;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
+}
+.simulation-3d-viewport canvas {
+  display: block;
+  outline: none;
+}
+.simulation-3d-loading {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--muted);
 }
 
 /* 框选/拖动预览矩形 */
@@ -2540,6 +2598,49 @@ select {
 @keyframes topo-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 1920px) {
+  .app-shell {
+    grid-template-columns: 224px 1fr;
+  }
+
+  .sidebar {
+    padding: 16px 14px;
+  }
+
+  .content-area {
+    padding: 18px;
+  }
+
+  .topo-workspace {
+    grid-template-columns: 168px minmax(0, 1fr) 300px;
+  }
+
+  .topo-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .topo-toolbar-status {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .topo-name-field input {
+    width: 180px;
+  }
+
+  .topo-record-field select {
+    width: 210px;
+  }
+}
+
+@media (max-width: 1440px) {
+  .hero-strip,
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

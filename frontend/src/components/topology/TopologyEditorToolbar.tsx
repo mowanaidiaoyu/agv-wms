@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Save, Trash2, FilePlus2, CheckCircle2, AlertTriangle } from 'lucide-react'
+import { Loader2, Save, Trash2, FilePlus2 } from 'lucide-react'
 import { api } from '../../lib/api'
 import { usePlatformStore } from '../../store/usePlatformStore'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
@@ -18,16 +18,12 @@ export function TopologyEditorToolbar() {
   const dirty = useTopologyEditorStore((state) => state.dirty)
   const loadedId = useTopologyEditorStore((state) => state.loadedId)
   const notice = useTopologyEditorStore((state) => state.notice)
-  const validation = useTopologyEditorStore((state) => state.validation)
-  const validating = useTopologyEditorStore((state) => state.validating)
   const renameDraft = useTopologyEditorStore((state) => state.renameDraft)
   const beginNew = useTopologyEditorStore((state) => state.beginNew)
   const setLoaded = useTopologyEditorStore((state) => state.setLoaded)
   const setSaved = useTopologyEditorStore((state) => state.setSaved)
   const setLoading = useTopologyEditorStore((state) => state.setLoading)
   const setNotice = useTopologyEditorStore((state) => state.setNotice)
-  const setValidation = useTopologyEditorStore((state) => state.setValidation)
-  const setValidating = useTopologyEditorStore((state) => state.setValidating)
   const setSelectedTopologyId = usePlatformStore((state) => state.setSelectedTopologyId)
 
   const saveMutation = useMutation({
@@ -65,27 +61,7 @@ export function TopologyEditorToolbar() {
     }
   }
 
-  async function handleValidate() {
-    setValidating(true)
-    setNotice(null)
-    try {
-      const result = await api.validateTopology(draft)
-      setValidation(result)
-      const count = result.errors.length
-      setNotice(
-        count
-          ? { kind: 'warn', text: `校验完成：发现 ${count} 个错误。` }
-          : { kind: 'info', text: '校验通过，拓扑具备运行条件。' },
-      )
-    } catch (error) {
-      setValidation(null)
-      setNotice({ kind: 'error', text: `校验失败：${String(error)}` })
-    } finally {
-      setValidating(false)
-    }
-  }
-
-  const busy = saveMutation.isPending || deleteMutation.isPending || validating || useTopologyEditorStore.getState().loading
+  const busy = saveMutation.isPending || deleteMutation.isPending || useTopologyEditorStore.getState().loading
   const currentRecord = records.find((record) => record.id === loadedId)
 
   return (
@@ -152,21 +128,11 @@ export function TopologyEditorToolbar() {
           <Trash2 size={15} />
           删除
         </button>
-        <button className="ghost-button" type="button" disabled={busy} onClick={() => void handleValidate()}>
-          {validating ? <Loader2 className="spin" size={15} /> : <CheckCircle2 size={15} />}
-          校验
-        </button>
       </div>
 
       <div className="topo-toolbar-status">
         {dirty ? <span className="topo-badge topo-badge-dirty">未保存修改</span> : null}
         {!loadedId ? <span className="topo-badge topo-badge-new">新建中</span> : null}
-        {validation ? (
-          <span className={`topo-badge ${validation.valid ? 'topo-badge-ok' : 'topo-badge-error'}`}>
-            {validation.valid ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
-            {validation.errors.length ? `${validation.errors.length} 错误` : '校验通过'}
-          </span>
-        ) : null}
         {notice ? (
           <span className={`topo-notice topo-notice-${notice.kind}`} role="status">
             {notice.text}

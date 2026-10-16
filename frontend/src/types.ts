@@ -49,6 +49,8 @@ export interface Zone {
   slotAisles?: Record<string, number>
   /** 四向车库被删除的 2×2 槽位（`"行,列"` 列表）：该位置不再渲染货架/巷道，视为空位 */
   removedSlots?: string[]
+  /** 四向车库「升降通道（电梯）」2×2 槽位（`"行,列"` 列表）：四向车跨层必须经过该竖井 */
+  slotLifts?: string[]
 }
 
 export interface GridConfig {
@@ -70,6 +72,8 @@ export interface TopologyCell {
   walkable: boolean
   conveyorDirection?: ConveyorDirection | null
   levels?: number
+  /** 所属 2×2 输送带块的左上锚点（奇数起点支持）。缺失时回退到 floor-到-偶。 */
+  conveyorAnchor?: { row: number; col: number } | null
 }
 
 export interface TopologyNode {
@@ -107,12 +111,6 @@ export interface TopologyPayload {
   cells: TopologyCell[]
   nodes: TopologyNode[]
   resources: Resource[]
-}
-
-export interface TopologyValidationResult {
-  valid: boolean
-  errors: string[]
-  warnings: string[]
 }
 
 export interface RobotConfig {
@@ -193,12 +191,28 @@ export interface SimulationRobot {
   waitTicks: number
   failed: boolean
   phaseLabel: string
+  load: number
+  capacity: number
 }
 
 export interface SimulationTaskHistory {
   tick: number
   phase: string
   status: string
+}
+
+export interface SimulationTaskLine {
+  nodeId: string
+  cellId: string
+  layer: number
+  skuId?: string
+  skuName?: string
+  largeCategory?: string
+  subclass?: string
+  spec?: string
+  grade?: string
+  material?: string
+  surfaceTreatment?: string
 }
 
 export interface SimulationTask {
@@ -220,6 +234,9 @@ export interface SimulationTask {
   entryCellId: string
   handoffCellId: string | null
   conveyorExitCellId: string | null
+  lines: SimulationTaskLine[]
+  currentLineIndex: number
+  picked: number
   stationResourceId: string | null
   priority: number
   etaTicks: number
@@ -259,6 +276,48 @@ export interface SimulationQueues {
   buffer: string[]
 }
 
+export interface GoodsSku {
+  skuId?: string
+  name?: string
+  brand?: string
+  thousandWeight?: number | string
+  unit?: string
+  colorType?: string
+  standard?: string
+  spec?: string
+  grade?: string
+  surfaceTreatment?: string
+  material?: string
+  strength?: number | string
+  largeCategory?: string
+  subclass?: string
+}
+
+export interface GoodsCatalog {
+  version: number
+  skus: GoodsSku[]
+}
+
+export interface GoodsSlot {
+  nodeId: string
+  cellId: string
+  layer: number
+  skuId?: string | null
+  skuName?: string | null
+  largeCategory?: string | null
+  subclass?: string | null
+  spec?: string | null
+  grade?: string | null
+  material?: string | null
+  surfaceTreatment?: string | null
+  qty?: number
+}
+
+export interface GoodsInventory {
+  topologyId: string
+  slots: GoodsSlot[]
+}
+
 export interface SimulationState {
   id: string
   status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed'
@@ -267,6 +326,7 @@ export interface SimulationState {
   scenarioId: string
   robots: SimulationRobot[]
   tasks: SimulationTask[]
+  inventory?: GoodsSlot[]
   resources: SimulationResourceState[]
   alerts: SimulationAlert[]
   queues: SimulationQueues

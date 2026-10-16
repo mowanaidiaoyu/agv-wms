@@ -1,5 +1,7 @@
 import type {
   AlgorithmEvaluationResult,
+  GoodsCatalog,
+  GoodsInventory,
   ScenarioPayload,
   SimulationEvent,
   SimulationMetrics,
@@ -7,7 +9,6 @@ import type {
   SimulationState,
   StoredRecord,
   TopologyPayload,
-  TopologyValidationResult,
 } from '../types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -70,12 +71,6 @@ export const api = {
       method: 'DELETE',
     })
   },
-  validateTopology(payload: TopologyPayload) {
-    return request<TopologyValidationResult>('/topologies/validate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    })
-  },
   listScenarios() {
     return request<Array<StoredRecord<ScenarioPayload>>>('/scenarios')
   },
@@ -120,5 +115,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ topologyId, scenarioId }),
     })
+  },
+  getGoodsCatalog() {
+    return request<GoodsCatalog>('/goods/catalog')
+  },
+  getGoodsInventory(topologyId: string) {
+    return request<GoodsInventory>(`/goods/inventory/${topologyId}`)
   },
 }

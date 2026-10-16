@@ -68,6 +68,15 @@ def build_walkable_lookup(topology: dict[str, Any]) -> dict[tuple[str, int, int]
     return lookup
 
 
+def build_occupied_lookup(topology: dict[str, Any]) -> set[tuple[str, int, int]]:
+    """放了物品的格子（库位 storage / 缓存位 buffer 所在格），CTU 不能穿行，只能作为取货终点进入。"""
+    occupied: set[tuple[str, int, int]] = set()
+    for node in topology.get("nodes", []):
+        if node.get("type") in {"storage", "buffer"}:
+            occupied.add(node_position(node))
+    return occupied
+
+
 def build_node_lookup(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {node["id"]: node for node in topology.get("nodes", [])}
 
@@ -122,18 +131,35 @@ def lift_neighbors(topology: dict[str, Any], walkable: dict[tuple[str, int, int]
     return result
 
 
-def shortest_path(topology: dict[str, Any], start_cell: str, goal_cell: str, policy: str = "astar") -> list[dict[str, Any]]:
+def shortest_path(
+    topology: dict[str, Any],
+    start_cell: str,
+    goal_cell: str,
+    policy: str = "astar",
+    avoid_storage: bool = False,
+) -> list[dict[str, Any]]:
     if start_cell == goal_cell:
         start = cell_from_id(topology, start_cell)
         return [start] if start else []
 
     walkable = build_walkable_lookup(topology)
+    if avoid_storage:
+        # CTU 规则：没有被放置任何物品的格子才可以通行；库位/缓存位不能穿行。
+        occupied = build_occupied_lookup(topology)
+        walkable = {pos: cell for pos, cell in walkable.items() if pos not in occupied}
     vertical_edges = lift_neighbors(topology, walkable)
     try:
         start = parse_cell_id(start_cell)
         goal = parse_cell_id(goal_cell)
     except ValueError:
         return []
+
+    if avoid_storage:
+        # 出发格 / 目标格允许落在库位上（机器人停靠位 / 要进去取货的终点），其余中间格必须为空。
+        for key, cell_key in ((start, start_cell), (goal, goal_cell)):
+            cell = cell_from_id(topology, cell_key)
+            if cell is not None:
+                walkable[key] = cell
 
     if start not in walkable or goal not in walkable:
         return []

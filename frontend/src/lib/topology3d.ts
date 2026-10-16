@@ -1,7 +1,8 @@
-import { GROUND_FLOOR, floorsOf, nodeFootprint } from './topology'
+import { GROUND_FLOOR, conveyorAnchorOf, floorsOf, nodeFootprint } from './topology'
 import type {
   CellType,
   ConveyorDirection,
+  GoodsSlot,
   NodeType,
   TopologyCell,
   TopologyNode,
@@ -35,6 +36,33 @@ export const ZONE_LEVEL_HEIGHT: Record<ZoneType, number> = {
   conveyor: 0.5,
   mixed: 0.5,
 }
+
+/** CTU 车载货层数：一次最多装 5 箱（与后端 ROBOT_CARRY_CAPACITY["ctu"] 一致）。 */
+export const CTU_ROBOT_LEVELS = 5
+
+/** 商品大类 → 库内货箱颜色（18 类真实 SKU 大类；未知大类回退灰色）。 */
+export const GOODS_CATEGORY_COLORS: Record<string, string> = {
+  螺母: '#ef4444',
+  螺栓: '#f97316',
+  垫圈: '#f59e0b',
+  螺钉: '#84cc16',
+  自攻螺钉: '#22c55e',
+  螺柱: '#10b981',
+  膨胀件: '#14b8a6',
+  组合件: '#06b6d4',
+  销键: '#0ea5e9',
+  铆钉: '#3b82f6',
+  索具: '#6366f1',
+  其它: '#8b5cf6',
+  挡圈: '#a855f7',
+  焊接: '#d946ef',
+  电力配件: '#ec4899',
+  原材料: '#f43f5e',
+  建筑配件: '#94a3b8',
+  木螺钉: '#78716c',
+}
+
+export const GOODS_DEFAULT_COLOR = '#94a3b8'
 
 export type SceneColor = string
 
@@ -162,6 +190,19 @@ export function worldZ(row: number, rows: number): number {
   return rows / 2 - (row + 0.5)
 }
 
+/** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */
+export function robotWorldPosition(
+  floor: string,
+  row: number,
+  col: number,
+  floors: string[],
+  cols: number,
+  rows: number,
+): [number, number, number] {
+  const floorIndex = Math.max(0, floors.indexOf(floor))
+  return [worldX(col, cols), floorIndex * FLOOR_HEIGHT, worldZ(row, rows)]
+}
+
 /** 四向车库槽位实体 id 编码：`zoneId@row,col`。 */
 export function shuttleSlotEntityId(zoneId: string, row: number, col: number): string {
   return `${zoneId}@${row},${col}`
@@ -197,7 +238,7 @@ function zoneFloorMembership(zone: Zone, cells: TopologyCell[], nodes: TopologyN
   return [...floors]
 }
 
-export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
+export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): SceneSpec {
   const floors = floorsOf(topology)
   const { rows, cols } = topology.grid
   const width = cols * CELL
@@ -208,6 +249,7 @@ export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
     conveyor: '#2f6f9f',
   }
   const aisleColor = '#3a4f6e' // 四向车库内巷道（通行路），与普通路面色区分
+  const shuttleLiftColor = '#22c55e' // 四向车库升降通道（电梯）竖井，绿色区别于货架橙/巷道蓝
   const zonePadColor: Record<ZoneType, string> = {
     ctu: '#0e7490',
     shuttle: '#b45309',
@@ -282,8 +324,9 @@ export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
         entity,
       })
     } else {
-      // conveyor：2×2 占位，只画块锚点（偶偶）格，一块 2×2 传送带；其余 3 格被覆盖跳过
-      if (cell.row % 2 !== 0 || cell.col % 2 !== 0) continue
+      // conveyor：2×2 占位，只画块锚点格（任意奇偶），一块 2×2 传送带；其余 3 格被覆盖跳过
+      const anchor = conveyorAnchorOf(cell)
+      if (cell.row !== anchor.row || cell.col !== anchor.col) continue
       const levels = Math.max(1, cell.levels ?? 1)
       const dir = DIRECTION_VEC3[cell.conveyorDirection ?? 'right']
       const beltW = CELL * 2 * 0.98 // 相邻块贴合，消除块间间隔，视觉上连续
@@ -410,6 +453,23 @@ export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
                 size: [2 * CELL - 0.14, 0.02, 2 * CELL - 0.14],
                 color: '#94a3b8',
                 wire: true,
+                floor,
+                entity: { kind: 'shuttle-slot', id: shuttleSlotEntityId(zone.id, r, c), floor },
+                slotRow: r,
+                slotCol: c,
+              })
+              continue
+            }
+            // 升降通道（电梯）槽位：渲染一根贯穿 4 层的绿色竖井，标识四向车跨层必经的固定上下位
+            if (zone.slotLifts?.includes(`${r},${c}`)) {
+              const liftHeight = ZONE_LEVELS.shuttle * ZONE_LEVEL_HEIGHT.shuttle
+              items.push({
+                kind: 'box',
+                key: `zone-${zone.id}-${floor}-slot-${r}-${c}-lift`,
+                position: [worldX(c, cols) + CELL / 2, y + liftHeight / 2, worldZ(r, rows) - CELL / 2],
+                size: [2 * CELL - 0.14, liftHeight, 2 * CELL - 0.14],
+                color: shuttleLiftColor,
+                emissive: '#15803d',
                 floor,
                 entity: { kind: 'shuttle-slot', id: shuttleSlotEntityId(zone.id, r, c), floor },
                 slotRow: r,
@@ -607,6 +667,68 @@ export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
       })
       continue
     }
+    if (node.type === 'ctu_robot') {
+      // CTU 车：5 层载货位，每层高度与 CTU 库货架层一致（ZONE_LEVEL_HEIGHT.ctu = 0.5），
+      // 做成 4 根立柱 + 5 块搁板的小货架，5 层共 2.5 高
+      const levelHeight = ZONE_LEVEL_HEIGHT.ctu
+      const w = CELL * 0.7
+      const d = CELL * 0.7
+      const halfW = w / 2
+      const halfD = d / 2
+      const baseH = 0.12
+      const baseY = y + 0.08
+      const shelfH = 0.08
+      const baseTop = baseY + baseH / 2
+      const rackHeight = CTU_ROBOT_LEVELS * levelHeight
+
+      // 底座（车辆底盘）
+      items.push({
+        kind: 'box',
+        key: node.id,
+        position: [x, baseY, z],
+        size: [w, baseH, d],
+        color,
+        emissive: '#0e7490',
+        floor,
+        entity,
+      })
+
+      // 4 根立柱（底座顶 → 5 层顶）
+      const postCenterY = baseTop + rackHeight / 2
+      const postOffsets: [number, number][] = [
+        [-halfW + 0.08, -halfD + 0.08],
+        [halfW - 0.08, -halfD + 0.08],
+        [-halfW + 0.08, halfD - 0.08],
+        [halfW - 0.08, halfD - 0.08],
+      ]
+      postOffsets.forEach(([px, pz], i) => {
+        items.push({
+          kind: 'box',
+          key: `${node.id}-post-${i}`,
+          position: [x + px, postCenterY, z + pz],
+          size: [0.07, rackHeight, 0.07],
+          color,
+          emissive: '#0e7490',
+          floor,
+          entity,
+        })
+      })
+
+      // 5 块搁板：每层底部一块，层距 = CTU 库货架层高
+      for (let i = 0; i < CTU_ROBOT_LEVELS; i += 1) {
+        items.push({
+          kind: 'box',
+          key: `${node.id}-level-${i}`,
+          position: [x, baseTop + i * levelHeight + shelfH / 2, z],
+          size: [w, shelfH, d],
+          color,
+          emissive: '#0e7490',
+          floor,
+          entity,
+        })
+      }
+      continue
+    }
     if (
       node.type === 'conveyor_gate' ||
       node.type === 'buffer' ||
@@ -671,10 +793,33 @@ export function buildSceneSpec(topology: TopologyPayload): SceneSpec {
       position: [x, y + sizes[node.type][1] / 2 + 0.1, z],
       size: sizes[node.type],
       color,
-      emissive: node.type === 'ctu_robot' ? '#0e7490' : undefined,
+      emissive: undefined,
       floor,
       entity,
     })
+  }
+
+  // 库存商品箱：按「商品 + 属性」在 CTU 库内逐槽落位（layer → 层高），纯展示、不可选中。
+  if (goods && goods.length) {
+    const nodeById = new Map(topology.nodes.map((node) => [node.id, node]))
+    const levelHeight = ZONE_LEVEL_HEIGHT.ctu
+    for (const slot of goods) {
+      const node = nodeById.get(slot.nodeId)
+      if (!node) continue
+      const floor = itemFloor(node)
+      const y = floorIndexOf(floor) * FLOOR_HEIGHT + (Math.max(1, slot.layer || 1) - 0.5) * levelHeight
+      const color = GOODS_CATEGORY_COLORS[slot.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+      items.push({
+        kind: 'box',
+        key: `goods-${slot.nodeId}-${slot.layer}`,
+        position: [worldX(node.col, cols), y, worldZ(node.row, rows)],
+        size: [CELL * 0.6, levelHeight * 0.7, CELL * 0.6],
+        color,
+        emissive: color,
+        opacity: 0.9,
+        floor,
+      })
+    }
   }
 
   // 资源传送带段标记（沿 cellIds 起点打一个小标签块，点击归属首格）

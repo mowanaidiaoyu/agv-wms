@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 ZoneType = Literal["ctu", "shuttle", "conveyor", "buffer", "station", "mixed"]
@@ -27,6 +27,7 @@ class Zone(BaseModel):
     height: int
     slotAisles: dict[str, int] | None = None
     removedSlots: list[str] | None = None
+    slotLifts: list[str] | None = None
 
 
 class GridConfig(BaseModel):
@@ -48,6 +49,7 @@ class TopologyCell(BaseModel):
     walkable: bool = True
     conveyorDirection: ConveyorDirection | None = None
     levels: int = 1
+    conveyorAnchor: dict[str, int] | None = None
 
 
 class TopologyNode(BaseModel):
@@ -87,39 +89,6 @@ class TopologyPayload(BaseModel):
     cells: list[TopologyCell] = Field(default_factory=list)
     nodes: list[TopologyNode] = Field(default_factory=list)
     resources: list[Resource] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_references(self) -> "TopologyPayload":
-        zone_ids = {zone.id for zone in self.zones}
-        cell_ids: set[str] = set()
-        node_ids: set[str] = set()
-
-        for cell in self.cells:
-            if cell.id in cell_ids:
-                raise ValueError(f"Duplicate cell id {cell.id}")
-            cell_ids.add(cell.id)
-            if cell.row < 0 or cell.row >= self.grid.rows or cell.col < 0 or cell.col >= self.grid.cols:
-                raise ValueError(f"Cell {cell.id} is outside grid bounds")
-            if cell.zoneId and cell.zoneId not in zone_ids:
-                raise ValueError(f"Cell {cell.id} references missing zone {cell.zoneId}")
-
-        for node in self.nodes:
-            if node.id in node_ids:
-                raise ValueError(f"Duplicate node id {node.id}")
-            node_ids.add(node.id)
-            if node.row < 0 or node.row >= self.grid.rows or node.col < 0 or node.col >= self.grid.cols:
-                raise ValueError(f"Node {node.id} is outside grid bounds")
-            if node.zoneId and node.zoneId not in zone_ids:
-                raise ValueError(f"Node {node.id} references missing zone {node.zoneId}")
-
-        for resource in self.resources:
-            for cell_id in resource.cellIds:
-                if cell_id not in cell_ids:
-                    raise ValueError(f"Resource {resource.id} references missing cell {cell_id}")
-            for node_id in resource.nodeIds:
-                if node_id not in node_ids:
-                    raise ValueError(f"Resource {resource.id} references missing node {node_id}")
-        return self
 
 
 class RobotConfig(BaseModel):
@@ -217,9 +186,3 @@ class AlgorithmEvaluationResponse(BaseModel):
     topologyId: str
     scenarioId: str
     results: list[dict[str, Any]]
-
-
-class TopologyValidationResult(BaseModel):
-    valid: bool
-    errors: list[str]
-    warnings: list[str]

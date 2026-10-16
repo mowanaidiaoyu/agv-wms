@@ -20,7 +20,7 @@ def task_cost(robot: dict[str, Any], task: dict[str, Any], topology: dict[str, A
         source_cell = node_to_cell_id(topology, task["sourceNode"])
     except KeyError:
         return 9999.0
-    path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy)
+    path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy, avoid_storage=robot.get("type") == "ctu")
     if not path:
         return 9999.0
     battery_penalty = max(0.0, 50.0 - robot["battery"]) * 0.05
