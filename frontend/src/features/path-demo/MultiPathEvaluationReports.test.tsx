@@ -11,8 +11,10 @@ import { MultiPathEvaluationReports } from './MultiPathEvaluationReports'
 vi.mock('../../components/charts/MultiPathComparisonChart', () => ({ MultiPathComparisonChart: () => <div data-testid="history-chart" /> }))
 vi.mock('../../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
 vi.mock('./pathDemoApi', () => ({
-  pathDemoApi: { evaluations: vi.fn(), evaluation: vi.fn(), evaluationExport: vi.fn() },
+  pathDemoApi: { options: vi.fn(), evaluations: vi.fn(), evaluation: vi.fn(), evaluationExport: vi.fn() },
 }))
+
+const topologyFingerprint = 'test-topology-fingerprint'
 
 const topology: TopologyPayload = {
   id: 'topology-666', name: '666',
@@ -55,6 +57,7 @@ function evaluation(): MultiPathEvaluation {
     experiment_type: 'offline_multi_path_planning', status: 'partial_failure', created_at: '2026-10-14T00:00:00Z',
     input_snapshot: {
       topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
+      topology_content_sha256: topologyFingerprint,
       mode: 'preset', scenario_id: 'parallel', algorithms: ['astar', 'dijkstra'],
       vehicles: [{ vehicle_id: 'CTU-01', vehicle_type: 'ctu', start_cell_id: cells[0].id, goal_cell_id: cells[1].id, priority: 1 }],
       planning_config: {
@@ -103,6 +106,12 @@ beforeEach(() => {
     schema_version: detail.schema_version, experiment_type: detail.experiment_type,
     disclaimer: 'offline experiment', unit_definitions: { makespan_seconds: 'seconds' }, evaluation: detail,
   })
+  vi.mocked(pathDemoApi.options).mockResolvedValue({
+    topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
+    topology_content_sha256: topologyFingerprint,
+    components: [], largest_component_id: 'road-1', traversable_cells: cells,
+    default_start: cells[0], default_goal: cells[1],
+  })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
   Object.defineProperty(URL, 'createObjectURL', { value: vi.fn(() => 'blob:report'), configurable: true })
   Object.defineProperty(URL, 'revokeObjectURL', { value: vi.fn(), configurable: true })
@@ -131,10 +140,12 @@ describe('MultiPathEvaluationReports', () => {
   })
 
   it('keeps metrics readable but refuses replay on topology version mismatch', async () => {
-    vi.mocked(api.listTopologies).mockResolvedValueOnce([{
-      id: topology.id, name: topology.name,
-      payload: { ...topology, meta: { ...topology.meta, version: '3.0.0' } },
-    }])
+    vi.mocked(pathDemoApi.options).mockResolvedValueOnce({
+      topology_id: topology.id, topology_name: topology.name, topology_version: '3.0.0',
+      topology_content_sha256: 'changed-topology-fingerprint',
+      components: [], largest_component_id: 'road-1', traversable_cells: cells,
+      default_start: cells[0], default_goal: cells[1],
+    })
     renderReports()
     expect(await screen.findByRole('table', { name: '持久化多车算法指标' })).toBeInTheDocument()
     expect(await screen.findByText(/已拒绝 3D 回放/)).toBeInTheDocument()

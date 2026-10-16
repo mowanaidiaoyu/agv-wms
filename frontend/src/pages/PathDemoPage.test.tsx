@@ -103,6 +103,7 @@ const options = {
   topology_id: topology.id,
   topology_name: topology.name,
   topology_version: '2.0.0',
+  topology_content_sha256: 'test-topology-fingerprint',
   components: [{ id: 'component-1', floor: '1F', cell_count: 3 }],
   largest_component_id: 'component-1',
   traversable_cells: cells,

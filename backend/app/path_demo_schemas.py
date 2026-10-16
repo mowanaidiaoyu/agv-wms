@@ -35,6 +35,7 @@ class PathDemoTopologyOptions(BaseModel):
     topology_id: str
     topology_name: str
     topology_version: str
+    topology_content_sha256: str
     components: list[PathDemoComponent]
     largest_component_id: str
     traversable_cells: list[PathDemoCell]
@@ -195,6 +196,7 @@ class MultiPathEvaluationInputSnapshot(BaseModel):
     topology_id: str
     topology_name: str
     topology_version: str
+    topology_content_sha256: str | None = None
     mode: Literal["preset", "custom"]
     scenario_id: Literal["parallel", "node-conflict", "edge-swap"] | None = None
     vehicles: list[MultiPathVehicleRequest]

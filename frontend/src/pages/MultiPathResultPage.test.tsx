@@ -10,7 +10,7 @@ import type { TopologyPayload } from '../types'
 import { MultiPathResultPage } from './MultiPathResultPage'
 
 vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
-vi.mock('../features/path-demo/pathDemoApi', () => ({ pathDemoApi: { evaluation: vi.fn() } }))
+vi.mock('../features/path-demo/pathDemoApi', () => ({ pathDemoApi: { options: vi.fn(), evaluation: vi.fn() } }))
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
   PathDemo3DScene: ({ vehicles, selectedVehicleId, cameraActionRequest }: {
     vehicles: PathDemoVehicleView[]
@@ -33,6 +33,7 @@ const topology: TopologyPayload = {
   grid: { rows: 4, cols: 4, cellSize: 32, originX: 0, originY: 0 },
   zones: [], cells: [], nodes: [], resources: [],
 }
+const topologyFingerprint = 'test-topology-fingerprint'
 const cells: PathDemoCell[] = [
   { id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, type: 'road', component_id: 'road-component-1' },
   { id: 'cell-r1-c2', floor: '1F', row: 1, col: 2, type: 'road', component_id: 'road-component-1' },
@@ -71,6 +72,7 @@ function evaluation(): MultiPathEvaluation {
     experiment_type: 'offline_multi_path_planning', status: 'success', created_at: '2026-10-13T00:00:00Z',
     input_snapshot: {
       topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
+      topology_content_sha256: topologyFingerprint,
       mode: 'preset', scenario_id: 'parallel',
       vehicles: astarPlan.vehicles.map((vehicle) => ({
         vehicle_id: vehicle.vehicle_id, vehicle_type: 'ctu', start_cell_id: vehicle.start.id,
@@ -147,6 +149,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   useMultiPathExperimentStore.setState({ customDraft: null, evaluation: null, viewedAlgorithm: null })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
+  vi.mocked(pathDemoApi.options).mockResolvedValue({
+    topology_id: topology.id, topology_name: topology.name, topology_version: topology.meta.version,
+    topology_content_sha256: topologyFingerprint,
+    components: [], largest_component_id: 'road-component-1', traversable_cells: cells,
+    default_start: cells[0], default_goal: cells[1],
+  })
   vi.mocked(pathDemoApi.evaluation).mockResolvedValue(evaluation())
 })
 
@@ -185,7 +193,7 @@ describe('MultiPathResultPage', () => {
       payload: { ...topology, meta: { ...topology.meta, version: 'new-version' } },
     }])
     renderPage('/lab/multi-path-result/snapshot-1/astar')
-    expect(await screen.findByText('拓扑版本与实验快照不一致')).toBeInTheDocument()
+    expect(await screen.findByText('拓扑版本或内容与实验快照不一致')).toBeInTheDocument()
     expect(screen.queryByTestId('result-scene')).not.toBeInTheDocument()
   })
 

@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Pause, Play, Square, Zap } from 'lucide-react'
-import { GridBoard } from '../components/GridBoard'
+import { Loader2, Pause, Play, Square, Zap } from 'lucide-react'
 import { KpiGrid } from '../components/KpiGrid'
 import { Surface } from '../components/Surface'
 import { useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationAlert, SimulationResourceState, TopologyNode } from '../types'
+import type { SimulationAlert, SimulationResourceState } from '../types'
+
+const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
 const resourceLabels: Record<SimulationResourceState['type'], string> = {
   conveyor_segment: '输送线',
@@ -17,7 +18,7 @@ const resourceLabels: Record<SimulationResourceState['type'], string> = {
 }
 
 const taskModeLabels = {
-  direct: 'CTU 直送',
+  direct: 'CTU 多箱取货',
   cross_zone: '跨区协同',
 }
 
@@ -30,10 +31,6 @@ function alertClassName(level: SimulationAlert['level']) {
   if (level === 'error') return 'alert-card alert-error'
   if (level === 'warning') return 'alert-card alert-warning'
   return 'alert-card alert-info'
-}
-
-function isRobotTopologyNode(node: TopologyNode) {
-  return node.type === 'ctu_robot' || node.type === 'shuttle_robot'
 }
 
 export function SimulationPage() {
@@ -149,29 +146,6 @@ export function SimulationPage() {
     return leftWeight - rightWeight || left.priority - right.priority
   })
 
-  const boardRobots = useMemo(
-    () =>
-      (currentState?.robots ?? []).map((robot) => ({
-        id: robot.id,
-        type: robot.type,
-        floor: robot.currentFloor ?? '1F',
-        row: robot.currentRow,
-        col: robot.currentCol,
-        status: robot.status,
-        failed: robot.failed,
-        currentTaskId: robot.currentTaskId,
-        phaseLabel: robot.phaseLabel,
-      })),
-    [currentState?.robots],
-  )
-
-  const boardNodes = useMemo(() => {
-    const topologyNodes = topologyQuery.data?.payload.nodes ?? []
-    if (!currentState?.robots?.length) return topologyNodes
-    const runningRobotIds = new Set(currentState.robots.map((robot) => robot.id))
-    return topologyNodes.filter((node) => !(isRobotTopologyNode(node) && runningRobotIds.has(node.id)))
-  }, [currentState?.robots, topologyQuery.data?.payload.nodes])
-
   return (
     <div className="page-grid simulation-grid">
       <Surface
@@ -246,22 +220,24 @@ export function SimulationPage() {
                 </button>
               ))}
             </div>
-            <GridBoard
-              rows={topologyQuery.data.payload.grid.rows}
-              cols={topologyQuery.data.payload.grid.cols}
-              visualSize={54}
-              cells={topologyQuery.data.payload.cells}
-              nodes={boardNodes}
-              zones={topologyQuery.data.payload.zones}
-              resources={topologyQuery.data.payload.resources}
-              robots={boardRobots}
-              activeFloor={activeFloor}
-              interactiveMode="readonly"
-              initialView="fit"
-              viewportSizing="screen-fill"
-              enableZoom
-              enablePan
-            />
+            <div className="simulation-3d-viewport">
+              <Suspense
+                fallback={
+                  <div className="simulation-3d-loading">
+                    <Loader2 className="spin" size={26} />
+                    <p className="muted-copy">正在装配 3D 场景…</p>
+                  </div>
+                }
+              >
+                <Simulation3DScene
+                  topology={topologyQuery.data.payload}
+                  goods={currentState?.inventory ?? []}
+                  robots={currentState?.robots ?? []}
+                  tasks={currentState?.tasks ?? []}
+                  activeFloor={activeFloor}
+                />
+              </Suspense>
+            </div>
           </>
         ) : (
           <p className="muted-copy">选择拓扑或启动仿真后，这里会显示场景棋盘。</p>
@@ -275,6 +251,7 @@ export function SimulationPage() {
               <tr>
                 <th>设备</th>
                 <th>类型</th>
+                <th>载箱</th>
                 <th>当前位置</th>
                 <th>目标格</th>
                 <th>状态</th>
@@ -288,6 +265,7 @@ export function SimulationPage() {
                 <tr key={robot.id}>
                   <td>{robot.id}</td>
                   <td>{robotTypeLabels[robot.type]}</td>
+                  <td>{robot.load} / {robot.capacity}</td>
                   <td>
                     {robot.currentCellId}
                     <br />
@@ -331,7 +309,25 @@ export function SimulationPage() {
                   <td>{taskModeLabels[task.mode]}</td>
                   <td>{task.status}</td>
                   <td>{task.phaseLabel}</td>
-                  <td>{task.sourceCellId}</td>
+                  <td>
+                    {task.sourceCellId}
+                    <br />
+                    <span className="muted-copy">
+                      {task.lines?.length ?? 1} 项 · 已取 {task.picked ?? 0}
+                    </span>
+                    <ul className="task-lines">
+                      {(task.lines ?? []).map((line, index) => {
+                        const picked = index < (task.picked ?? 0)
+                        const attr = [line.spec, line.grade, line.surfaceTreatment].filter(Boolean).join(' · ')
+                        const label = line.skuName ? `${line.skuName}${attr ? `（${attr}）` : ''}` : line.nodeId
+                        return (
+                          <li key={`${line.nodeId}-${line.layer}-${index}`} className={picked ? 'task-line-picked' : ''}>
+                            {picked ? '✓ ' : ''}{label}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  </td>
                   <td>{task.targetCellId}</td>
                   <td>{task.assignedRobotId ?? '-'}</td>
                   <td>{task.priority}</td>

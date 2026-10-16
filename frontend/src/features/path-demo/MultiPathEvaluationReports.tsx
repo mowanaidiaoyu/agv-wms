@@ -3,7 +3,6 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { MultiPathComparisonChart } from '../../components/charts/MultiPathComparisonChart'
 import { Surface } from '../../components/Surface'
-import { api } from '../../lib/api'
 import { pathDemoApi } from './pathDemoApi'
 
 const PAGE_SIZE = 10
@@ -28,21 +27,24 @@ export function MultiPathEvaluationReports({ selectedExperimentId }: { selectedE
     queryFn: () => pathDemoApi.evaluation(detailId),
     enabled: Boolean(detailId),
   })
-  const topologiesQuery = useQuery({
-    queryKey: ['topologies'],
-    queryFn: api.listTopologies,
+  const evaluation = detailQuery.data
+  const topologyOptionsQuery = useQuery({
+    queryKey: ['path-demo-options', evaluation?.input_snapshot.topology_id],
+    queryFn: () => pathDemoApi.options(evaluation?.input_snapshot.topology_id ?? ''),
     enabled: Boolean(detailQuery.data),
   })
 
-  const evaluation = detailQuery.data
-  const currentTopology = topologiesQuery.data?.find((item) => item.id === evaluation?.input_snapshot.topology_id)
+  const savedFingerprint = evaluation?.input_snapshot.topology_content_sha256
   const canReplay = Boolean(
     evaluation
-      && currentTopology
-      && currentTopology.payload.meta.version === evaluation.input_snapshot.topology_version,
+      && savedFingerprint
+      && topologyOptionsQuery.data
+      && topologyOptionsQuery.data.topology_version === evaluation.input_snapshot.topology_version
+      && topologyOptionsQuery.data.topology_content_sha256 === savedFingerprint,
   )
-  const topologyMismatch = Boolean(evaluation && topologiesQuery.isSuccess && !canReplay)
-  const topologyLookupFailed = Boolean(evaluation && topologiesQuery.isError)
+  const missingFingerprint = Boolean(evaluation && !savedFingerprint)
+  const topologyMismatch = Boolean(evaluation && !missingFingerprint && topologyOptionsQuery.isSuccess && !canReplay)
+  const topologyLookupFailed = Boolean(evaluation && topologyOptionsQuery.isError)
 
   const exportSnapshot = async () => {
     if (!detailId) return
@@ -120,14 +122,19 @@ export function MultiPathEvaluationReports({ selectedExperimentId }: { selectedE
                 <div><dt>实验状态</dt><dd>{statusLabel[evaluation.status]}</dd></div>
               </dl>
               <p className="multi-path-report-disclaimer">离线多车路径规划实验，不代表真实设备运行，也不代表完整仓储任务仿真。</p>
+              {missingFingerprint ? (
+                <p className="multi-path-report-warning" role="alert">
+                  该历史记录没有拓扑内容指纹。指标和导出仍可使用，但系统已按安全策略拒绝 3D 回放。
+                </p>
+              ) : null}
               {topologyMismatch ? (
                 <p className="multi-path-report-warning" role="alert">
-                  当前系统不存在该拓扑版本（快照版本：{evaluation.input_snapshot.topology_version}）。指标仍可查看，但因本 Gate 未归档完整拓扑，已拒绝 3D 回放。
+                  当前拓扑的版本或内容指纹与实验快照不一致（快照版本：{evaluation.input_snapshot.topology_version}）。指标仍可查看，但已拒绝 3D 回放。
                 </p>
               ) : null}
               {topologyLookupFailed ? (
                 <p className="multi-path-report-warning" role="alert">
-                  无法验证当前拓扑版本：{topologiesQuery.error?.message}。指标仍可查看，但已拒绝 3D 回放。
+                  无法验证当前拓扑内容：{topologyOptionsQuery.error?.message}。指标仍可查看，但已拒绝 3D 回放。
                 </p>
               ) : null}
               <div className="table-wrap">

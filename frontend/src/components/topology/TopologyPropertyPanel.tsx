@@ -7,16 +7,18 @@ import {
   OBJECT_LABELS,
   ZONE_LABELS,
   boxToRect,
+  conveyorAnchorOf,
   floorsOf,
   isPointInBox,
   nodeFootprint,
   shuttleSlotAisleMask,
+  shuttleSlotLift,
   shuttleSlotRemoved,
   slotNumberFor,
 } from '../../lib/topology'
 import type { EditorObjectType } from '../../types'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
-import type { CellType, ConveyorDirection, NodeType, TopologyPayload, ZoneType } from '../../types'
+import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyPayload, ZoneType } from '../../types'
 
 const CELL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
 const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'conveyor', 'station', 'buffer', 'mixed']
@@ -97,6 +99,7 @@ export function TopologyPropertyPanel() {
   const updateConveyorLevels = useTopologyEditorStore((state) => state.updateConveyorLevels)
   const applyShuttleAisle = useTopologyEditorStore((state) => state.applyShuttleAisle)
   const applyShuttleSlotRemove = useTopologyEditorStore((state) => state.applyShuttleSlotRemove)
+  const applyShuttleLift = useTopologyEditorStore((state) => state.applyShuttleLift)
   const activeShuttleLevel = useTopologyEditorStore((state) => state.activeShuttleLevel)
   const setActiveShuttleLevel = useTopologyEditorStore((state) => state.setActiveShuttleLevel)
 
@@ -122,6 +125,7 @@ export function TopologyPropertyPanel() {
         selection={selection}
         onApply={applyShuttleAisle}
         onRemove={applyShuttleSlotRemove}
+        onLift={applyShuttleLift}
         activeShuttleLevel={activeShuttleLevel}
         onLevelChange={setActiveShuttleLevel}
       />
@@ -135,8 +139,22 @@ export function TopologyPropertyPanel() {
         draft={draft}
         onApply={applyShuttleAisle}
         onRemove={applyShuttleSlotRemove}
+        onLift={applyShuttleLift}
         activeShuttleLevel={activeShuttleLevel}
         onLevelChange={setActiveShuttleLevel}
+      />
+    )
+  }
+
+  if (selection?.kind === 'conveyor-run') {
+    return (
+      <ConveyorRunEditor
+        selection={selection}
+        draft={draft}
+        onUpdateCell={updateCell}
+        onSetLevels={updateConveyorLevels}
+        onBind={bindConveyorSegment}
+        onUnbind={unbindConveyorSegment}
       />
     )
   }
@@ -546,6 +564,96 @@ function ConveyorBatchEditor({
   )
 }
 
+function ConveyorRunEditor({
+  selection,
+  draft,
+  onUpdateCell,
+  onSetLevels,
+  onBind,
+  onUnbind,
+}: {
+  selection: { kind: 'conveyor-run'; cellId: string; ids: string[]; floor: string }
+  draft: TopologyPayload
+  onUpdateCell: (id: string, patch: Partial<TopologyCell>) => void
+  onSetLevels: (ids: string[], levels: number) => void
+  onBind: (cellId: string) => void
+  onUnbind: (cellId: string) => void
+}) {
+  const runCells = draft.cells.filter((cell) => selection.ids.includes(cell.id))
+
+  // 按 2×2 块锚点去重，得到逐块方向编辑项（保持逐块方向可改，不回归单格编辑能力）
+  const blocks: { row: number; col: number; cellId: string; direction: ConveyorDirection }[] = []
+  const seen = new Set<string>()
+  for (const cell of runCells) {
+    const a = conveyorAnchorOf(cell)
+    const key = `${a.row}:${a.col}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const anchorCell = runCells.find((item) => item.row === a.row && item.col === a.col)
+    blocks.push({
+      row: a.row,
+      col: a.col,
+      cellId: anchorCell?.id ?? cell.id,
+      direction: (anchorCell?.conveyorDirection ?? cell.conveyorDirection ?? 'right') as ConveyorDirection,
+    })
+  }
+
+  const segmentResource = draft.resources.find(
+    (resource) => resource.type === 'conveyor_segment' && resource.cellIds.includes(selection.cellId),
+  )
+  const level = runCells[0]?.levels ?? 1
+
+  return (
+    <div className="topo-property-body">
+      <div className="topo-property-hero">
+        <Layers size={26} />
+        <div className="topo-property-hero-text">
+          <p className="topology-property-eyebrow">输送线</p>
+          <h3>整条连通输送线 · {runCells.length} 格</h3>
+        </div>
+      </div>
+      <ReadonlyRow label="规模" value={`${blocks.length} 个 2×2 块 · ${selection.floor}`} />
+      <div className="topo-property-note">
+        <strong>拖动可移动整条输送线</strong>
+        <p>在画布按住该输送带拖动，即可整体平移到新位置（保持 2×2 块对齐）。</p>
+      </div>
+      <label className="topo-property-field">
+        <span>整线层数</span>
+        <select value={level} onChange={(event) => onSetLevels(selection.ids, Number(event.target.value))}>
+          <option value={1}>单层</option>
+          <option value={2}>双层</option>
+        </select>
+      </label>
+      {blocks.map((block) => (
+        <label className="topo-property-field" key={`${block.row}-${block.col}`}>
+          <span>块 ({block.row}, {block.col}) 方向</span>
+          <select
+            value={block.direction}
+            onChange={(event) => onUpdateCell(block.cellId, { conveyorDirection: event.target.value as ConveyorDirection })}
+          >
+            {DIRECTIONS.map((direction) => (
+              <option key={direction} value={direction}>
+                {DIRECTION_LABELS[direction]}
+              </option>
+            ))}
+          </select>
+        </label>
+      ))}
+      {segmentResource ? (
+        <button className="ghost-button topo-property-danger" type="button" onClick={() => onUnbind(selection.cellId)}>
+          <Trash2 size={14} />
+          取消输送线识别（{segmentResource.label}）
+        </button>
+      ) : (
+        <button className="ghost-button topo-property-bind" type="button" onClick={() => onBind(selection.cellId)}>
+          <Plus size={14} />
+          识别为输送线资源
+        </button>
+      )}
+    </div>
+  )
+}
+
 function ShuttleLevelChips({ active, onChange }: { active: number; onChange: (level: number) => void }) {
   return (
     <div className="topology-floor-switcher">
@@ -567,12 +675,14 @@ function ShuttleBatchEditor({
   selection,
   onApply,
   onRemove,
+  onLift,
   activeShuttleLevel,
   onLevelChange,
 }: {
   selection: { kind: 'shuttle-batch'; slots: { row: number; col: number }[]; box: { row0: number; col0: number; row1: number; col1: number } }
   onApply: (slots: { row: number; col: number }[], aisle: boolean) => void
   onRemove: (slots: { row: number; col: number }[], removed: boolean) => void
+  onLift: (slots: { row: number; col: number }[], lift: boolean) => void
   activeShuttleLevel: number
   onLevelChange: (level: number) => void
 }) {
@@ -602,6 +712,12 @@ function ShuttleBatchEditor({
       <button className="ghost-button" type="button" onClick={() => onApply(selection.slots, false)}>
         第 {activeShuttleLevel} 层恢复货架（橙色存储）
       </button>
+      <button className="accent-button" type="button" onClick={() => onLift(selection.slots, true)}>
+        设为升降通道（绿色竖井，跨层必经）
+      </button>
+      <button className="ghost-button" type="button" onClick={() => onLift(selection.slots, false)}>
+        恢复货架（取消升降通道）
+      </button>
       <button className="ghost-button topo-property-danger" type="button" onClick={() => onRemove(selection.slots, true)}>
         <Trash2 size={14} />
         删除选中槽位（挖空为空位）
@@ -618,6 +734,7 @@ function ShuttleSlotEditor({
   draft,
   onApply,
   onRemove,
+  onLift,
   activeShuttleLevel,
   onLevelChange,
 }: {
@@ -625,12 +742,14 @@ function ShuttleSlotEditor({
   draft: TopologyPayload
   onApply: (slots: { row: number; col: number }[], aisle: boolean, floor?: string) => void
   onRemove: (slots: { row: number; col: number }[], removed: boolean, floor?: string) => void
+  onLift: (slots: { row: number; col: number }[], lift: boolean, floor?: string) => void
   activeShuttleLevel: number
   onLevelChange: (level: number) => void
 }) {
   const { zoneId, row, col, floor } = selection
   const floorKey = floor ?? '1F'
   const removed = shuttleSlotRemoved(draft, zoneId, row, col)
+  const isLift = shuttleSlotLift(draft, zoneId, row, col)
   const mask = shuttleSlotAisleMask(draft, zoneId, row, col, floorKey)
   const isAisle = Boolean(mask & (1 << (activeShuttleLevel - 1)))
 
@@ -640,7 +759,7 @@ function ShuttleSlotEditor({
         <MapPin size={26} />
         <div className="topo-property-hero-text">
           <p className="topology-property-eyebrow">四向车库库位</p>
-          <h3>{removed ? '已删除（空位）' : `第 ${activeShuttleLevel} 层 · ${isAisle ? '巷道（通行）' : '货架（存储）'}`}</h3>
+          <h3>{removed ? '已删除（空位）' : isLift ? '升降通道（跨层竖井）' : `第 ${activeShuttleLevel} 层 · ${isAisle ? '巷道（通行）' : '货架（存储）'}`}</h3>
         </div>
       </div>
       <ReadonlyRow label="槽位" value={`(${row}, ${col}) 2×2 · ${floorKey}`} />
@@ -650,25 +769,41 @@ function ShuttleSlotEditor({
         </button>
       ) : (
         <>
-          <label className="topo-property-field">
-            <span>货架层</span>
-            <ShuttleLevelChips active={activeShuttleLevel} onChange={onLevelChange} />
-          </label>
-          <div className="topo-property-zone-metrics">
-            {[1, 2, 3, 4].map((level) => (
-              <span key={level}>
-                第 {level} 层 {mask & (1 << (level - 1)) ? '巷道' : '货架'}
-              </span>
-            ))}
-          </div>
-          {isAisle ? (
-            <button className="ghost-button" type="button" onClick={() => onApply([{ row, col }], false, floor)}>
-              第 {activeShuttleLevel} 层恢复货架（橙色存储）
-            </button>
+          {isLift ? (
+            <>
+              <div className="topo-property-zone-metrics">
+                <span>贯穿 4 层货架的升降竖井，四向车跨层必经</span>
+              </div>
+              <button className="ghost-button" type="button" onClick={() => onLift([{ row, col }], false, floor)}>
+                恢复货架（取消升降通道）
+              </button>
+            </>
           ) : (
-            <button className="accent-button" type="button" onClick={() => onApply([{ row, col }], true, floor)}>
-              第 {activeShuttleLevel} 层设为巷道（蓝色，供四向车通行）
-            </button>
+            <>
+              <label className="topo-property-field">
+                <span>货架层</span>
+                <ShuttleLevelChips active={activeShuttleLevel} onChange={onLevelChange} />
+              </label>
+              <div className="topo-property-zone-metrics">
+                {[1, 2, 3, 4].map((level) => (
+                  <span key={level}>
+                    第 {level} 层 {mask & (1 << (level - 1)) ? '巷道' : '货架'}
+                  </span>
+                ))}
+              </div>
+              {isAisle ? (
+                <button className="ghost-button" type="button" onClick={() => onApply([{ row, col }], false, floor)}>
+                  第 {activeShuttleLevel} 层恢复货架（橙色存储）
+                </button>
+              ) : (
+                <button className="accent-button" type="button" onClick={() => onApply([{ row, col }], true, floor)}>
+                  第 {activeShuttleLevel} 层设为巷道（蓝色，供四向车通行）
+                </button>
+              )}
+              <button className="accent-button" type="button" onClick={() => onLift([{ row, col }], true, floor)}>
+                设为升降通道（绿色竖井，跨层必经）
+              </button>
+            </>
           )}
           <button className="ghost-button topo-property-danger" type="button" onClick={() => onRemove([{ row, col }], true, floor)}>
             <Trash2 size={14} />

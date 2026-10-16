@@ -26,6 +26,7 @@ from ..path_demo_schemas import (
 from ..services.multi_path_evaluation import evaluate_multi_path_algorithms
 from ..services.multi_path_demo import analyze_multi_road_topology, build_multi_demo_scenarios, plan_multi_paths
 from ..services.path_demo import PathDemoError, analyze_path_demo_topology, plan_path_demo
+from ..services.topology_fingerprint import topology_content_sha256
 
 
 router = APIRouter(prefix="/path-demo", tags=["path-demo"])
@@ -65,6 +66,7 @@ def get_path_demo_options(topology_id: str):
         "topology_id": topology_id,
         "topology_name": record["name"],
         "topology_version": str(record["payload"].get("meta", {}).get("version", "unknown")),
+        "topology_content_sha256": topology_content_sha256(record["payload"]),
         **analysis,
     }
 @router.post("/plan", response_model=PathDemoPlanResponse)

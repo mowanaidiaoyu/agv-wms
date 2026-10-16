@@ -37,7 +37,17 @@ export function MultiPathResultPage() {
   const plan = result?.plan ?? null
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies, enabled: Boolean(plan) })
   const topologyRecord = topologiesQuery.data?.find((item) => item.id === plan?.topology_id)
-  const topologyVersionMatches = topologyRecord?.payload.meta.version === plan?.topology_version
+  const topologyOptionsQuery = useQuery({
+    queryKey: ['path-demo-options', plan?.topology_id],
+    queryFn: () => pathDemoApi.options(plan?.topology_id ?? ''),
+    enabled: Boolean(plan),
+  })
+  const savedFingerprint = evaluation?.input_snapshot.topology_content_sha256
+  const topologyFingerprintMatches = Boolean(
+    savedFingerprint
+      && topologyRecord?.payload.meta.version === plan?.topology_version
+      && topologyOptionsQuery.data?.topology_content_sha256 === savedFingerprint,
+  )
   const [selectedVehicleId, setSelectedVehicleId] = useState(plan?.vehicles[0]?.vehicle_id ?? '')
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
@@ -54,10 +64,10 @@ export function MultiPathResultPage() {
   }, [plan, selectedVehicleId])
 
   const preparedVehicleViews = useMemo(
-    () => plan && topologyRecord && topologyVersionMatches
+    () => plan && topologyRecord && topologyFingerprintMatches
       ? buildMultiVehicleTrajectories(plan, topologyRecord.payload)
       : [],
-    [plan, topologyRecord, topologyVersionMatches],
+    [plan, topologyRecord, topologyFingerprintMatches],
   )
   const vehicleViews = useMemo(
     () => sampleMultiVehicleViews(preparedVehicleViews, playback.state.elapsedSeconds),
@@ -111,8 +121,8 @@ export function MultiPathResultPage() {
     )
   }
 
-  if (topologiesQuery.isError) {
-    return <section className="multi-path-result-empty"><h2>无法加载实验拓扑</h2><p>无法验证历史拓扑版本，已拒绝 3D 回放。</p><Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link></section>
+  if (topologiesQuery.isError || topologyOptionsQuery.isError) {
+    return <section className="multi-path-result-empty"><h2>无法加载实验拓扑</h2><p>无法验证历史拓扑版本和内容指纹，已拒绝 3D 回放。</p><Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link></section>
   }
 
   if (topologiesQuery.isSuccess && !topologyRecord) {
@@ -125,11 +135,21 @@ export function MultiPathResultPage() {
     )
   }
 
-  if (topologyRecord && !topologyVersionMatches) {
+  if (!savedFingerprint) {
     return (
       <section className="multi-path-result-empty">
-        <h2>拓扑版本与实验快照不一致</h2>
-        <p>快照版本为 {plan.topology_version}，当前版本为 {topologyRecord.payload.meta.version}。为避免错误回放，已拒绝播放。</p>
+        <h2>历史实验缺少拓扑内容指纹</h2>
+        <p>旧记录的指标仍可查看和导出，但无法安全证明当前拓扑与规划时一致，已拒绝 3D 回放。</p>
+        <Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
+      </section>
+    )
+  }
+
+  if (topologyRecord && topologyOptionsQuery.isSuccess && !topologyFingerprintMatches) {
+    return (
+      <section className="multi-path-result-empty">
+        <h2>拓扑版本或内容与实验快照不一致</h2>
+        <p>快照版本为 {plan.topology_version}，当前版本为 {topologyRecord.payload.meta.version}。内容指纹校验未通过，已拒绝播放。</p>
         <Link to={`/reports/multi-path/${evaluation.experiment_id}`}>返回实验报告</Link>
       </section>
     )
@@ -228,7 +248,7 @@ export function MultiPathResultPage() {
           </section>
         </aside>
         <div className="path-demo-viewport" aria-label="算法实验多车 3D 轨迹">
-          {topologyRecord && topologyVersionMatches ? (
+          {topologyRecord && topologyFingerprintMatches ? (
             <Suspense fallback={<div className="path-demo-empty">正在加载 3D 场景…</div>}>
               <PathDemo3DScene
                 topology={topologyRecord.payload}

@@ -290,19 +290,23 @@ export function nodeFootprint(
 /** 输送带 2×2 占位：一个块 = 2×2 四格，锚点向下取偶（与四向车库位 nodeFootprint 同口径）。 */
 export const CONVEYOR_FOOTPRINT = 2
 
-/** 输送带块锚点（row/col 向下取偶，同一块的 4 格共享此锚点）。 */
+/** 输送带块锚点（row/col 向下取偶）——旧数据的回退口径：无显式 anchor 时按此推导。 */
 export function conveyorBlockAnchor(row: number, col: number): GridPoint {
   return { row: row - (row % 2), col: col - (col % 2) }
 }
 
-/** 某格所属输送带块的 4 格坐标（左上起，row 向下 / col 向右）。 */
-export function conveyorBlockCells(row: number, col: number): GridPoint[] {
-  const a = conveyorBlockAnchor(row, col)
+/** 某输送带格所属块的锚点：优先用格子上存的 anchor，旧数据回退到向下取偶。 */
+export function conveyorAnchorOf(cell: Pick<TopologyCell, 'row' | 'col' | 'conveyorAnchor'>): GridPoint {
+  return cell.conveyorAnchor ?? conveyorBlockAnchor(cell.row, cell.col)
+}
+
+/** 锚点处的 2×2 块 4 格坐标（左上起，row 向下 / col 向右）。 */
+export function conveyorBlockCellsAt(anchor: GridPoint): GridPoint[] {
   return [
-    { row: a.row, col: a.col },
-    { row: a.row, col: a.col + 1 },
-    { row: a.row + 1, col: a.col },
-    { row: a.row + 1, col: a.col + 1 },
+    { row: anchor.row, col: anchor.col },
+    { row: anchor.row, col: anchor.col + 1 },
+    { row: anchor.row + 1, col: anchor.col },
+    { row: anchor.row + 1, col: anchor.col + 1 },
   ]
 }
 
@@ -314,7 +318,8 @@ export function conveyorBlockCellIds(
   const cell = topology.cells.find((item) => item.id === cellId)
   if (!cell || cell.type !== 'conveyor') return [cellId]
   const floor = floorOf(cell)
-  const ids = conveyorBlockCells(cell.row, cell.col).map((point) => buildCellId(point.row, point.col, floor))
+  const anchor = conveyorAnchorOf(cell)
+  const ids = conveyorBlockCellsAt(anchor).map((point) => buildCellId(point.row, point.col, floor))
   return ids.filter((id) => topology.cells.some((item) => item.id === id))
 }
 
@@ -538,8 +543,12 @@ function cloneTopology(topology: TopologyPayload): TopologyPayload {
       ...zone,
       ...(zone.slotAisles ? { slotAisles: { ...zone.slotAisles } } : {}),
       ...(zone.removedSlots ? { removedSlots: [...zone.removedSlots] } : {}),
+      ...(zone.slotLifts ? { slotLifts: [...zone.slotLifts] } : {}),
     })),
-    cells: topology.cells.map((cell) => ({ ...cell })),
+    cells: topology.cells.map((cell) => ({
+      ...cell,
+      ...(cell.conveyorAnchor ? { conveyorAnchor: { ...cell.conveyorAnchor } } : {}),
+    })),
     nodes: topology.nodes.map((node) => ({ ...node })),
     resources: topology.resources.map((resource) => ({
       ...resource,
@@ -571,7 +580,7 @@ export function paintCell(
   if (type === 'conveyor') {
     return paintConveyorBlock(topology, row, col, floor, directionFrom, options)
   }
-  return paintSingleCell(topology, type, row, col, floor, null, options)
+  return paintSingleCell(topology, type, row, col, floor, null, null, options)
 }
 
 function paintSingleCell(
@@ -581,6 +590,7 @@ function paintSingleCell(
   col: number,
   floor: string,
   direction: ConveyorDirection | null,
+  anchor: GridPoint | null = null,
   options?: { skipOccupied?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) return { topology, painted: false }
@@ -611,6 +621,7 @@ function paintSingleCell(
       cost: existing.cost,
       walkable: walkableForType(type),
       conveyorDirection: type === 'conveyor' ? (direction ?? existing.conveyorDirection ?? 'right') : null,
+      conveyorAnchor: type === 'conveyor' ? (anchor ?? { row, col }) : null,
       ...(type === 'conveyor' ? { levels: existing.levels ?? 1 } : {}),
     }
   } else {
@@ -618,13 +629,14 @@ function paintSingleCell(
     cell.zoneId = zoneId
     if (type === 'conveyor') {
       cell.conveyorDirection = direction ?? 'right'
+      cell.conveyorAnchor = anchor ?? { row, col }
     }
     next.cells.push(cell)
   }
   return { topology: finalizeTopology(next), painted: true }
 }
 
-/** 铺一个 2×2 输送带块：锚点取偶，4 格同向。 */
+/** 铺一个 2×2 输送带块：锚点 = 所点格子（支持奇数起点），4 格同向；目标格已属于别的块则整块拒绝。 */
 function paintConveyorBlock(
   topology: TopologyPayload,
   row: number,
@@ -633,15 +645,23 @@ function paintConveyorBlock(
   directionFrom: GridPoint | null | undefined,
   options?: { skipOccupied?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
-  const anchor = conveyorBlockAnchor(row, col)
+  const anchor = { row, col }
   if (anchor.row < 0 || anchor.row + 1 >= topology.grid.rows || anchor.col < 0 || anchor.col + 1 >= topology.grid.cols) {
     return { topology, painted: false }
+  }
+  // 重叠保护：4 格中任一格已是属于「其它块」的输送带，则整块拒绝，避免半块/块重叠
+  for (const point of conveyorBlockCellsAt(anchor)) {
+    const existing = findCell(topology, point.row, point.col, floor)
+    if (existing && existing.type === 'conveyor') {
+      const a = conveyorAnchorOf(existing)
+      if (a.row !== anchor.row || a.col !== anchor.col) return { topology, painted: false }
+    }
   }
   const direction = directionFrom ? directionFromCells(directionFrom, anchor) ?? 'right' : 'right'
   let next = topology
   let painted = false
-  for (const point of conveyorBlockCells(anchor.row, anchor.col)) {
-    const result = paintSingleCell(next, 'conveyor', point.row, point.col, floor, direction, options)
+  for (const point of conveyorBlockCellsAt(anchor)) {
+    const result = paintSingleCell(next, 'conveyor', point.row, point.col, floor, direction, anchor, options)
     next = result.topology
     painted = painted || result.painted
   }
@@ -667,16 +687,15 @@ export function paintStroke(
   return current
 }
 
-/** 把连续刷点归并到输送带块锚点（去重保序），使拖拽刷出一串 2×2 块。 */
+/** 把连续刷点按格子本身去重保序（锚点即所刷格子）。重叠保护在 paintConveyorBlock 里拦下相邻错位块，连刷自然以每 2 格一块铺出。 */
 function snapConveyorAnchors(cells: GridPoint[]): GridPoint[] {
   const seen = new Set<string>()
   const result: GridPoint[] = []
   for (const point of cells) {
-    const anchor = conveyorBlockAnchor(point.row, point.col)
-    const key = `${anchor.row}:${anchor.col}`
+    const key = `${point.row}:${point.col}`
     if (seen.has(key)) continue
     seen.add(key)
-    result.push(anchor)
+    result.push(point)
   }
   return result
 }
@@ -695,11 +714,11 @@ export function placeNode(
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
   }
-  // 输送带上的设备（闸口/缓存位/移载机）吸附到 2×2 块锚点，与输送带块同格对齐
+  // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(type)) {
     const hit = findCell(topology, row, col, floor)
     if (hit?.type === 'conveyor') {
-      const anchor = conveyorBlockAnchor(row, col)
+      const anchor = conveyorAnchorOf(hit)
       row = anchor.row
       col = anchor.col
     }
@@ -795,11 +814,11 @@ export function moveNode(
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
   }
-  // 输送带上的设备（闸口/缓存位/移载机）吸附到 2×2 块锚点，与输送带块同格对齐
+  // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(node.type)) {
     const hit = findCell(topology, row, col, floor)
     if (hit?.type === 'conveyor') {
-      const anchor = conveyorBlockAnchor(row, col)
+      const anchor = conveyorAnchorOf(hit)
       row = anchor.row
       col = anchor.col
     }
@@ -879,6 +898,122 @@ export function moveZone(
   const y = Math.max(0, Math.min(topology.grid.rows - zone.height, zone.y + dRow))
   if (x === zone.x && y === zone.y) return topology
   return updateZoneGeometry(topology, zoneId, { x, y })
+}
+
+/**
+ * 平移整条输送线（4 邻接连通段）：把 run 内所有 conveyor 格整体平移 dRow/dCol，
+ * 保持 2×2 块对齐、方向/层数不变；conveyor_segment 等资源的 cellIds 随之重映射，
+ * 落在带上的设备节点（闸口/缓存位/移载机）跟着走。目标被占用或越界时返回 message 拒绝。
+ */
+export function moveConveyorRun(
+  topology: TopologyPayload,
+  startCellId: string,
+  dRow: number,
+  dCol: number,
+  floor = GROUND_FLOOR,
+): { topology: TopologyPayload; message?: string } {
+  const dr = Math.round(dRow)
+  const dc = Math.round(dCol)
+  if (dr === 0 && dc === 0) return { topology }
+
+  const run = conveyorRunFromCell(topology, startCellId, floor)
+  if (!run.length) return { topology, message: '不是输送带，无法移动。' }
+
+  const runIdSet = new Set(run.map((cell) => cell.id))
+  const runCoordSet = new Set(run.map((cell) => `${cell.row}:${cell.col}`))
+
+  // 落在带上的设备节点（同层），随线平移
+  const mountedNodes = topology.nodes.filter(
+    (node) =>
+      CONVEYOR_MOUNTED_NODE_TYPES.has(node.type) &&
+      floorOf(node) === floor &&
+      runCoordSet.has(`${node.row}:${node.col}`),
+  )
+  const mountedIds = new Set(mountedNodes.map((node) => node.id))
+
+  // 校验：越界 / 目标被非本 run 的格或节点占据（road 允许覆盖）
+  for (const cell of run) {
+    const nr = cell.row + dr
+    const nc = cell.col + dc
+    if (nr < 0 || nr >= topology.grid.rows || nc < 0 || nc >= topology.grid.cols) {
+      return { topology, message: '目标超出网格范围。' }
+    }
+    const existing = findCell(topology, nr, nc, floor)
+    if (existing && !runIdSet.has(existing.id) && existing.type !== 'road') {
+      return { topology, message: '目标位置已被其它格子占用。' }
+    }
+    const node = findNodeAt(topology, nr, nc, floor)
+    if (node && !mountedIds.has(node.id)) {
+      return { topology, message: '目标位置已有节点占用。' }
+    }
+  }
+  for (const node of mountedNodes) {
+    const nr = node.row + dr
+    const nc = node.col + dc
+    if (nr < 0 || nr >= topology.grid.rows || nc < 0 || nc >= topology.grid.cols) {
+      return { topology, message: '设备节点目标超出网格范围。' }
+    }
+    const other = findNodeAt(topology, nr, nc, floor)
+    if (other && !mountedIds.has(other.id)) {
+      return { topology, message: '设备节点目标已被其它节点占用。' }
+    }
+  }
+
+  let next = cloneTopology(topology)
+
+  // 目标处被覆盖的 road 格要清掉（腾给 conveyor）
+  const overwriteIds = new Set<string>()
+  for (const cell of run) {
+    const existing = findCell(next, cell.row + dr, cell.col + dc, floor)
+    if (existing && !runIdSet.has(existing.id) && existing.type === 'road') {
+      overwriteIds.add(existing.id)
+    }
+  }
+
+  // 旧格 id → 新格 id（用于资源 cellIds 重映射）
+  const oldToNew = new Map<string, string>()
+  for (const cell of run) {
+    oldToNew.set(cell.id, buildCellId(cell.row + dr, cell.col + dc, floor))
+  }
+
+  // 删除旧 run 格与目标处被覆盖的 road 格
+  const removeIds = new Set([...runIdSet, ...overwriteIds])
+  next.cells = next.cells.filter((cell) => !removeIds.has(cell.id))
+
+  // 新增平移后的 conveyor 格（拷贝方向/层数/成本，重算 zoneId，锚点随动）
+  for (const cell of run) {
+    const nr = cell.row + dr
+    const nc = cell.col + dc
+    const a = conveyorAnchorOf(cell)
+    next.cells.push({
+      ...cell,
+      id: buildCellId(nr, nc, floor),
+      row: nr,
+      col: nc,
+      floor,
+      zoneId: referenceZoneForCell(next, nr, nc),
+      conveyorAnchor: { row: a.row + dr, col: a.col + dc },
+    })
+  }
+
+  // 设备节点随动
+  next.nodes = next.nodes.map((node) => {
+    if (!mountedIds.has(node.id)) return node
+    return {
+      ...node,
+      row: node.row + dr,
+      col: node.col + dc,
+      zoneId: zoneRefForNodeType(next, node.type, node.row + dr, node.col + dc),
+    }
+  })
+
+  // 资源 cellIds 重映射（conveyor_segment / 落在带上的 buffer_slot）
+  next.resources = next.resources.map((resource) => ({
+    ...resource,
+    cellIds: resource.cellIds.map((id) => oldToNew.get(id) ?? id),
+  }))
+
+  return { topology: finalizeTopology(next) }
 }
 
 /** 擦除一个对象：优先节点，其次格子；同时清理资源引用。 */
@@ -965,6 +1100,18 @@ export function shuttleSlotRemoved(
   const zone = findZoneById(topology, zoneId)
   if (!zone) return false
   return zone.removedSlots?.includes(`${row},${col}`) ?? false
+}
+
+/** 四向车库 2×2 槽位是否为「升降通道（电梯）」竖井。 */
+export function shuttleSlotLift(
+  topology: Pick<TopologyPayload, 'zones'>,
+  zoneId: string,
+  row: number,
+  col: number,
+): boolean {
+  const zone = findZoneById(topology, zoneId)
+  if (!zone) return false
+  return zone.slotLifts?.includes(`${row},${col}`) ?? false
 }
 
 /**
@@ -1082,6 +1229,83 @@ export function setShuttleSlotRemoved(
   return finalizeTopology(next)
 }
 
+/**
+ * 把一组 2×2 槽位设为「升降通道（电梯）」/ 恢复货架。升降通道是贯穿 4 层货架的整根竖井，
+ * 记录在所在 shuttle 区域的 `slotLifts`（与 removedSlots / slotAisles 三态互斥）：设为通道时从
+ * removedSlots 移除、清掉逐层巷道位掩码、移除落位 storage 库位节点，并把槽位 4 格铺成 road
+ * （四向车可到达升降位）；恢复时仅移除标记并清掉这 4 格 road（回到默认货架）。
+ */
+export function setShuttleSlotLift(
+  topology: TopologyPayload,
+  slots: { row: number; col: number }[],
+  lift: boolean,
+  floor = GROUND_FLOOR,
+): TopologyPayload {
+  let next = cloneTopology(topology)
+
+  for (const slot of slots) {
+    const zone = zoneAtRectPoint(next, slot.row, slot.col)
+    if (!zone || zone.type !== 'shuttle') continue
+    const key = `${slot.row},${slot.col}`
+    const liftSet = new Set(zone.slotLifts ?? [])
+    if (lift) liftSet.add(key)
+    else liftSet.delete(key)
+
+    // 三态互斥：设为升降通道时，清掉「删除」与「逐层巷道」状态
+    const removedSet = new Set(zone.removedSlots ?? [])
+    const slotAisles = { ...(zone.slotAisles ?? {}) }
+    if (lift) {
+      removedSet.delete(key)
+      delete slotAisles[key]
+    }
+
+    next = {
+      ...next,
+      zones: next.zones.map((z) =>
+        z.id === zone.id
+          ? {
+              ...z,
+              slotLifts: liftSet.size ? [...liftSet] : undefined,
+              removedSlots: removedSet.size ? [...removedSet] : undefined,
+              slotAisles: Object.keys(slotAisles).length ? slotAisles : undefined,
+            }
+          : z,
+      ),
+    }
+  }
+
+  // 通行性同步：升降通道的槽位 4 格铺 road（供四向车到达）；恢复时清掉这 4 格 road。
+  for (const slot of slots) {
+    const zone = zoneAtRectPoint(next, slot.row, slot.col)
+    if (!zone || zone.type !== 'shuttle') continue
+    const isLift = zone.slotLifts?.includes(`${slot.row},${slot.col}`) ?? false
+    if (isLift) {
+      for (let dr = 0; dr < 2; dr += 1) {
+        for (let dc = 0; dc < 2; dc += 1) {
+          next = paintCell(next, 'road', slot.row + dr, slot.col + dc, floor).topology
+        }
+      }
+      // 移除落位在此 2×2 槽位的 storage 库位节点（含 1×1/2×2 占地）
+      next.nodes = next.nodes.filter((node) => {
+        if (node.type !== 'storage') return true
+        if (floorOf(node) !== floor) return true
+        return !(node.row >= slot.row && node.row < slot.row + 2 && node.col >= slot.col && node.col < slot.col + 2)
+      })
+    } else {
+      const roadIds = new Set<string>()
+      for (let dr = 0; dr < 2; dr += 1) {
+        for (let dc = 0; dc < 2; dc += 1) {
+          const cell = findCell(next, slot.row + dr, slot.col + dc, floor)
+          if (cell && cell.type === 'road') roadIds.add(cell.id)
+        }
+      }
+      if (roadIds.size) next.cells = next.cells.filter((cell) => !roadIds.has(cell.id))
+    }
+  }
+
+  return finalizeTopology(next)
+}
+
 export function zoneAtId(topology: TopologyPayload, zoneId: string): Zone | undefined {
   return topology.zones.find((zone) => zone.id === zoneId)
 }
@@ -1179,11 +1403,12 @@ export function updateZoneGeometry(
     ...patch,
     width: Math.max(1, patch.width ?? zone.width),
     height: Math.max(1, patch.height ?? zone.height),
-    // 槽位级数据（slotAisles / removedSlots）的键为绝对 "行,列"，区域平移时同步平移键
+    // 槽位级数据（slotAisles / removedSlots / slotLifts）的键为绝对 "行,列"，区域平移时同步平移键
     ...(dRow !== 0 || dCol !== 0
       ? {
           slotAisles: translateSlotAisleKeys(zone.slotAisles, dRow, dCol),
           removedSlots: translateRemovedSlotKeys(zone.removedSlots, dRow, dCol),
+          slotLifts: translateSlotLiftKeys(zone.slotLifts, dRow, dCol),
         }
       : {}),
   }
@@ -1213,6 +1438,19 @@ function translateRemovedSlotKeys(
 ): string[] | undefined {
   if (!removedSlots || removedSlots.length === 0) return undefined
   return removedSlots.map((key) => {
+    const [row, col] = key.split(',').map(Number)
+    return `${row + dRow},${col + dCol}`
+  })
+}
+
+/** 区域平移时，把升降通道槽位列表（绝对 "行,列"）整体平移。 */
+function translateSlotLiftKeys(
+  slotLifts: string[] | undefined,
+  dRow: number,
+  dCol: number,
+): string[] | undefined {
+  if (!slotLifts || slotLifts.length === 0) return undefined
+  return slotLifts.map((key) => {
     const [row, col] = key.split(',').map(Number)
     return `${row + dRow},${col + dCol}`
   })

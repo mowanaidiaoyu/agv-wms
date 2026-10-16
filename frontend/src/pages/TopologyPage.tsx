@@ -5,7 +5,6 @@ import { Surface } from '../components/Surface'
 import { ObjectPalette } from '../components/topology/ObjectPalette'
 import { TopologyEditorToolbar } from '../components/topology/TopologyEditorToolbar'
 import { TopologyPropertyPanel } from '../components/topology/TopologyPropertyPanel'
-import { TopologyValidationPanel } from '../components/topology/TopologyValidationPanel'
 import { api } from '../lib/api'
 import { BATCH_PLACE_TYPES, floorsOf, OBJECT_LABELS } from '../lib/topology'
 import { usePlatformStore } from '../store/usePlatformStore'
@@ -161,7 +160,13 @@ export function TopologyPage() {
   const records = useMemo(() => topologiesQuery.data ?? [], [topologiesQuery.data])
   const initializedRef = useRef(false)
 
-  const [inspectorTab, setInspectorTab] = useState<'property' | 'validate'>('property')
+  // 库内商品（按拓扑派生的合成库存）：CTU 库货架逐槽显示「商品 + 属性」彩色货箱。
+  const goodsQuery = useQuery({
+    queryKey: ['goods', 'inventory', draft.id],
+    queryFn: () => api.getGoodsInventory(draft.id),
+    enabled: Boolean(draft.id),
+  })
+  const goods = useMemo(() => goodsQuery.data?.slots ?? [], [goodsQuery.data])
 
   useEffect(() => {
     if (topologiesQuery.isLoading || initializedRef.current) return
@@ -227,6 +232,7 @@ export function TopologyPage() {
                 >
                   <Topology3DScene
                     topology={draft}
+                    goods={goods}
                     activeFloor={activeFloor}
                     activeTool={activeTool}
                     marquee={marquee}
@@ -242,52 +248,12 @@ export function TopologyPage() {
           </div>
 
           <aside className="topo-inspector">
-            <div className="topo-inspector-tabs" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={inspectorTab === 'property'}
-                className={inspectorTab === 'property' ? 'topo-inspector-tab active' : 'topo-inspector-tab'}
-                onClick={() => setInspectorTab('property')}
-              >
-                属性
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={inspectorTab === 'validate'}
-                className={inspectorTab === 'validate' ? 'topo-inspector-tab active' : 'topo-inspector-tab'}
-                onClick={() => setInspectorTab('validate')}
-              >
-                校验
-              </button>
-            </div>
             <div className="topo-inspector-body">
-              {inspectorTab === 'property' ? <TopologyPropertyPanel /> : <TopologyValidationPanel onValidate={runValidate} />}
+              <TopologyPropertyPanel />
             </div>
           </aside>
         </div>
       </Surface>
     </div>
   )
-
-  function runValidate() {
-    const store = useTopologyEditorStore.getState()
-    store.setValidating(true)
-    api
-      .validateTopology(store.draft)
-      .then((result) => {
-        store.setValidation(result)
-        store.setNotice(
-          result.errors.length
-            ? { kind: 'warn', text: `校验完成：发现 ${result.errors.length} 个错误。` }
-            : { kind: 'info', text: '校验通过，拓扑具备运行条件。' },
-        )
-      })
-      .catch((error) => {
-        store.setValidation(null)
-        store.setNotice({ kind: 'error', text: `校验失败：${String(error)}` })
-      })
-      .finally(() => store.setValidating(false))
-  }
 }

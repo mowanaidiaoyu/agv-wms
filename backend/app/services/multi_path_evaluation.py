@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .multi_path_demo import plan_multi_paths
 from .path_demo import PathDemoError
+from .topology_fingerprint import topology_content_sha256
 
 
 ALGORITHMS = ("astar", "dijkstra")
@@ -59,6 +60,7 @@ def evaluate_multi_path_algorithms(
     frozen_topology = deepcopy(topology)
     frozen_vehicles = deepcopy(vehicles)
     frozen_config = deepcopy(planning_config)
+    topology_fingerprint = topology_content_sha256(frozen_topology)
     results: list[dict[str, Any]] = []
 
     for algorithm in ALGORITHMS:
@@ -116,6 +118,7 @@ def evaluate_multi_path_algorithms(
             "topology_id": topology_id,
             "topology_name": topology_name,
             "topology_version": topology_version,
+            "topology_content_sha256": topology_fingerprint,
             "mode": mode,
             "scenario_id": scenario_id,
             "vehicles": frozen_vehicles,

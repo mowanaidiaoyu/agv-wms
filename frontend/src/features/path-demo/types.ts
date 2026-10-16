@@ -17,6 +17,7 @@ export interface PathDemoTopologyOptions {
   topology_id: string
   topology_name: string
   topology_version: string
+  topology_content_sha256: string
   components: PathDemoComponentInfo[]
   largest_component_id: string
   traversable_cells: PathDemoCell[]
@@ -235,6 +236,7 @@ export interface MultiPathEvaluation {
     topology_id: string
     topology_name: string
     topology_version: string
+    topology_content_sha256?: string | null
     mode: 'preset' | 'custom'
     scenario_id: MultiPathDemoScenario['id'] | null
     vehicles: MultiPathVehicleRequest[]

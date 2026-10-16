@@ -11,7 +11,6 @@ vi.mock('../../lib/api', () => ({
     }),
     saveTopology: vi.fn(async () => ({})),
     deleteTopology: vi.fn(async () => ({})),
-    validateTopology: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
   },
 }))
 
@@ -39,9 +38,6 @@ describe('TopologyPage', () => {
     expect(screen.getByLabelText('拓扑名称')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /保存拓扑/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /新建/ })).toBeInTheDocument()
-    // 右侧检查器选项卡
-    expect(screen.getByRole('tab', { name: '属性' })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: '校验' })).toBeInTheDocument()
 
     // 左侧对象调色板分组标题
     expect(screen.getByText('节点')).toBeInTheDocument()
