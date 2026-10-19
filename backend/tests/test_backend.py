@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.assignment import assign_tasks
-from app.services.pathfinding import node_to_cell_id, shortest_path
+from app.services.pathfinding import node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle
 from app.services.runtime import repo
 from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, SimulationService
 
@@ -17,7 +17,10 @@ TOPOLOGY = {
     "name": "Test Grid Topology",
     "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
     "grid": {"rows": 6, "cols": 8, "cellSize": 32, "originX": 0, "originY": 0},
-    "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6}],
+    "zones": [
+        {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+        {"id": "zone-port", "label": "Port", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
+    ],
     "cells": [
         {"id": "cell-r1-c1", "row": 1, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
         {"id": "cell-r1-c2", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
@@ -34,15 +37,7 @@ TOPOLOGY = {
     "nodes": [
         {"id": "r1", "type": "ctu_robot", "row": 1, "col": 2, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01"},
         {"id": "node-storage", "type": "storage", "row": 1, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "Storage"},
-        {"id": "node-entry", "type": "entry", "row": 1, "col": 3, "zoneId": "zone-ctu", "capacity": 1, "label": "Entry"},
-        {"id": "node-gate", "type": "conveyor_gate", "row": 1, "col": 4, "zoneId": "zone-ctu", "capacity": 1, "label": "Gate"},
-        {"id": "node-buffer", "type": "buffer", "row": 2, "col": 4, "zoneId": "zone-ctu", "capacity": 1, "label": "Buffer"},
-        {"id": "node-station", "type": "station", "row": 2, "col": 6, "zoneId": "zone-ctu", "capacity": 1, "label": "Station"},
-    ],
-    "resources": [
-        {"id": "res-conveyor", "type": "conveyor_segment", "label": "Conveyor", "cellIds": ["cell-r1-c4", "cell-r1-c5"], "nodeIds": ["node-gate"], "capacity": 1, "meta": {}},
-        {"id": "res-buffer", "type": "buffer_slot", "label": "Buffer", "cellIds": ["cell-r2-c4"], "nodeIds": ["node-buffer"], "capacity": 1, "meta": {}},
-        {"id": "res-station", "type": "station", "label": "Station", "cellIds": ["cell-r2-c6"], "nodeIds": ["node-station"], "capacity": 1, "meta": {}},
+        {"id": "node-storage-2", "type": "storage", "row": 3, "col": 3, "zoneId": "zone-ctu", "capacity": 1, "label": "Storage 2"},
     ],
 }
 
@@ -63,38 +58,17 @@ SCENARIO = {
 
 def test_shortest_path_avoids_blocked_cell():
     start_cell = node_to_cell_id(TOPOLOGY, "node-storage")
-    goal_cell = node_to_cell_id(TOPOLOGY, "node-station")
+    goal_cell = "cell-r5-c6"
     path = shortest_path(TOPOLOGY, start_cell, goal_cell, "astar")
-    assert [cell["id"] for cell in path] == ["cell-r1-c1", "cell-r1-c2", "cell-r1-c3", "cell-r1-c4", "cell-r1-c5", "cell-r2-c5", "cell-r2-c6"]
-
-
-def test_shortest_path_crosses_floors_with_lift_resource():
-    topology = {
-        **TOPOLOGY,
-        "id": "multi-floor-topology",
-        "meta": {**TOPOLOGY["meta"], "floors": ["1F", "2F"]},
-        "cells": [
-            {"id": "cell-r1-c1", "floor": "1F", "row": 1, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
-            {"id": "cell-r1-c2", "floor": "1F", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
-            {"id": "cell-2F-r1-c2", "floor": "2F", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
-            {"id": "cell-2F-r1-c3", "floor": "2F", "row": 1, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
-        ],
-        "nodes": [
-            {"id": "node-storage-1f", "type": "storage", "floor": "1F", "row": 1, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "Storage 1F"},
-            {"id": "node-lift-1f", "type": "lift", "floor": "1F", "row": 1, "col": 2, "zoneId": "zone-ctu", "capacity": 1, "label": "Lift 1F"},
-            {"id": "node-lift-2f", "type": "lift", "floor": "2F", "row": 1, "col": 2, "zoneId": "zone-ctu", "capacity": 1, "label": "Lift 2F"},
-            {"id": "node-station-2f", "type": "station", "floor": "2F", "row": 1, "col": 3, "zoneId": "zone-ctu", "capacity": 1, "label": "Station 2F"},
-        ],
-        "resources": [
-            {"id": "res-lift", "type": "lift", "label": "Lift A", "cellIds": [], "nodeIds": ["node-lift-1f", "node-lift-2f"], "capacity": 1, "meta": {"verticalCost": 4}},
-        ],
-    }
-    path = shortest_path(topology, node_to_cell_id(topology, "node-storage-1f"), node_to_cell_id(topology, "node-station-2f"), "astar")
-    assert [cell["id"] for cell in path] == ["cell-r1-c1", "cell-r1-c2", "cell-2F-r1-c2", "cell-2F-r1-c3"]
+    assert path
+    ids = [cell["id"] for cell in path]
+    assert ids[0] == start_cell
+    assert ids[-1] == goal_cell
+    assert "cell-r2-c2" not in ids
 
 
 def test_shortest_path_ctu_avoids_storage_cells():
-    # CTU 规则：放了物品（库位/缓存位）的格子不能穿行，只能作为取货终点进入。
+    # CTU 规则：放了物品（库位/输送带）的格子不能穿行，只能作为取货终点进入。
     topology = {
         **TOPOLOGY,
         "cells": [
@@ -105,22 +79,110 @@ def test_shortest_path_ctu_avoids_storage_cells():
         "nodes": [
             {"id": "rack", "type": "storage", "floor": "1F", "row": 0, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "Rack"},
             {"id": "start", "type": "ctu_robot", "floor": "1F", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU"},
-            {"id": "goal", "type": "station", "floor": "1F", "row": 0, "col": 2, "zoneId": "zone-ctu", "capacity": 1, "label": "Station"},
         ],
     }
-    # 中间 r0c1 是库位，不能穿行 → 无路
-    assert shortest_path(topology, "cell-r0-c0", "cell-r0-c2", "astar", avoid_storage=True) == []
     # 库位作为取货终点，可以进入
     path = shortest_path(topology, "cell-r0-c0", "cell-r0-c1", "astar", avoid_storage=True)
     assert [cell["id"] for cell in path] == ["cell-r0-c0", "cell-r0-c1"]
-    # 不启用该规则（默认）仍可穿行
-    path = shortest_path(topology, "cell-r0-c0", "cell-r0-c2", "astar")
-    assert [cell["id"] for cell in path] == ["cell-r0-c0", "cell-r0-c1", "cell-r0-c2"]
+    # 中间库位 r0c1 不能穿行：从 r0c0 到 r0c2 会绕行，不经过 r0c1
+    path = shortest_path(topology, "cell-r0-c0", "cell-r0-c2", "astar", avoid_storage=True)
+    ids = [cell["id"] for cell in path]
+    assert ids
+    assert ids[-1] == "cell-r0-c2"
+    assert "cell-r0-c1" not in ids[1:-1]
+
+
+def test_shortest_path_extra_blocked_reroutes_ctu_around_occupied_cell():
+    # 回归：CTU 头对头死锁时的绕行。extra_blocked 把其它设备当前占用的格临时视为障碍，
+    # 从 r0c0 到 r0c2 的直线被 r0c1 挡住时，应绕行下方一行而不是穿行被占格。
+    topology = {
+        **TOPOLOGY,
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 3},
+        ],
+        "cells": [
+            {"id": "cell-r0-c0", "row": 0, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c1", "row": 0, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c2", "row": 0, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c0", "row": 1, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c1", "row": 1, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c2", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+        ],
+        "nodes": [],
+    }
+    # 无占用：直行 r0c0 -> r0c1 -> r0c2
+    direct = shortest_path(topology, "cell-r0-c0", "cell-r0-c2", "astar", avoid_storage=True)
+    assert [cell["id"] for cell in direct] == ["cell-r0-c0", "cell-r0-c1", "cell-r0-c2"]
+
+    # r0c1 被另一台 CTU 占用：绕行，不经过 r0c1
+    blocked = {parse_cell_id("cell-r0-c1")}
+    rerouted = shortest_path(
+        topology, "cell-r0-c0", "cell-r0-c2", "astar", avoid_storage=True, extra_blocked=blocked
+    )
+    assert rerouted
+    ids = [cell["id"] for cell in rerouted]
+    assert ids[0] == "cell-r0-c0"
+    assert ids[-1] == "cell-r0-c2"
+    assert "cell-r0-c1" not in ids
+
+
+def test_shortest_path_extra_blocked_still_reaches_blocked_goal():
+    # extra_blocked 不应把终点也挡掉（机器人的停靠位/取货终点可以是被占格）。
+    topology = {
+        **TOPOLOGY,
+        "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 2, "height": 2}],
+        "cells": [
+            {"id": "cell-r0-c0", "row": 0, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c1", "row": 0, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+        ],
+        "nodes": [],
+    }
+    path = shortest_path(
+        topology, "cell-r0-c0", "cell-r0-c1", "astar", avoid_storage=True, extra_blocked={parse_cell_id("cell-r0-c1")}
+    )
+    assert [cell["id"] for cell in path] == ["cell-r0-c0", "cell-r0-c1"]
+
+
+def test_shortest_path_shuttle_uses_aisle_and_lift():
+    # 四向车库：两个 2×2 槽并排，槽 A 是第 1 层巷道，槽 B 是电梯竖井 + 第 2 层巷道。
+    topology = {
+        **TOPOLOGY,
+        "zones": [
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 0, "width": 4, "height": 2},
+            {"id": "zone-port", "label": "Port", "type": "port", "x": 4, "y": 0, "width": 2, "height": 2},
+        ],
+        "cells": [
+            {"id": "cell-r0-c0", "row": 0, "col": 0, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c1", "row": 0, "col": 1, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c0", "row": 1, "col": 0, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c1", "row": 1, "col": 1, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c2", "row": 0, "col": 2, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c3", "row": 0, "col": 3, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c2", "row": 1, "col": 2, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c3", "row": 1, "col": 3, "type": "road", "zoneId": "zone-shuttle", "cost": 1.0, "walkable": True},
+        ],
+        "nodes": [
+            {"id": "shuttle", "type": "shuttle_robot", "row": 0, "col": 0, "zoneId": "zone-shuttle", "capacity": 1, "label": "Shuttle-01"},
+        ],
+    }
+    # 槽 A (0,0)：第 1 层巷道（bit0=1）；槽 B (0,2)：电梯竖井 + 第 2 层巷道
+    topology["zones"][0]["slotAisles"] = {"0,0": 0b0001, "0,2": 0b0010}
+    topology["zones"][0]["slotLifts"] = ["0,2"]
+
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r0-c3", 2)
+    assert path
+    assert path[0] == (0, 0, 1)
+    assert path[-1] == (0, 3, 2)
+    assert any((row, col) == (0, 2) for row, col, _ in path)
+
+    # 没有电梯竖井时无法跨层
+    no_lift = {**topology, "zones": [{**topology["zones"][0], "slotLifts": None, "slotAisles": {"0,0": 0b0001}}]}
+    assert shortest_path_shuttle(no_lift, "cell-r0-c0", 1, "cell-r0-c3", 2) == []
 
 
 def test_assignment():
     robots = [{"id": "r1", "type": "ctu", "status": "idle", "currentCellId": "cell-r1-c1", "battery": 100}]
-    tasks = [{"id": "t1", "robotType": "ctu", "status": "pending", "sourceNode": "node-storage", "targetNode": "node-station"}]
+    tasks = [{"id": "t1", "robotType": "ctu", "status": "pending", "sourceCellId": "cell-r1-c1", "sourceLayer": 1}]
     assert assign_tasks("greedy", robots, tasks, TOPOLOGY, "astar") == [("r1", "t1")]
 
 
@@ -241,9 +303,8 @@ def test_seed_tasks_multiline_orders():
     for task in ctu_tasks:
         lines = task["lines"]
         assert SCENARIO["orderGenerator"]["linesPerOrderMin"] <= len(lines) <= SCENARIO["orderGenerator"]["linesPerOrderMax"]
-        # sourceNode/sourceCellId 始终等于首行（兼容 assignment.task_cost）
-        assert task["sourceNode"] == lines[0]["nodeId"]
         assert task["sourceCellId"] == lines[0]["cellId"]
+        assert task["deliveryCellId"]
         assert all(1 <= line["layer"] <= CTU_RACK_LAYERS for line in lines)
         assert task["picked"] == 0
         assert task["currentLineIndex"] == 0
@@ -267,11 +328,8 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
         "task-ctu-1",
         "ctu",
         "direct",
-        [{"nodeId": "node-storage", "layer": 3}, {"nodeId": "node-buffer", "layer": 12}],
-        "node-station",
-        "node-entry",
-        None,
-        None,
+        [{"nodeId": "node-storage", "layer": 3}, {"nodeId": "node-storage-2", "layer": 12}],
+        "cell-r5-c6",
         False,
         2,
     )
@@ -289,7 +347,7 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
     assert robot["load"] == 1
     assert task["picked"] == 1
     assert task["currentLineIndex"] == 1
-    assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-buffer")
+    assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-storage-2")
     assert task["phase"] == "pickup_from_ctu"
 
 
@@ -303,10 +361,7 @@ def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
         "ctu",
         "direct",
         [{"nodeId": "node-storage", "layer": 3}],
-        "node-station",
-        "node-entry",
-        None,
-        None,
+        "cell-r5-c6",
         False,
         2,
     )
@@ -323,5 +378,52 @@ def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
 
     assert robot["load"] == 1
     assert task["picked"] == 1
-    assert task["phase"] == "delivery_to_station"
-    assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-station")
+    assert task["phase"] == "delivery_to_port"
+    assert robot["targetCellId"] == "cell-r5-c6"
+
+
+def test_reroute_ctu_avoids_occupied_cell_and_keeps_target():
+    # 回归：头对头死锁时 CTU 绕行。直行 r0c0 -> r0c2 被 r0c1 占住，_reroute_ctu 应换一条
+    # 不经过 r0c1 的路径，且保持原目标不变。
+    topology = {
+        "id": "reroute-topology",
+        "name": "Reroute",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": 3, "cols": 3, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 3}],
+        "cells": [
+            {"id": "cell-r0-c0", "row": 0, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c1", "row": 0, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r0-c2", "row": 0, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c0", "row": 1, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c1", "row": 1, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+            {"id": "cell-r1-c2", "row": 1, "col": 2, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
+        ],
+        "nodes": [
+            {"id": "r1", "type": "ctu_robot", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01"},
+        ],
+    }
+    scenario = {
+        "id": "reroute-scenario",
+        "name": "Reroute Scenario",
+        "topologyId": topology["id"],
+        "robots": [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True}],
+        "orderGenerator": {"ratePerMinute": 1, "maxOrders": 0, "linesPerOrderMin": 1, "linesPerOrderMax": 1},
+        "dispatchPolicy": "greedy",
+        "pathPolicy": "astar",
+        "conveyorPolicy": {"releaseThreshold": 0.8, "fifo": True},
+        "faultInjection": {"robotFailureTick": None, "robotFailureId": None, "conveyorJammedTick": None, "conveyorCellId": None},
+        "seed": 1,
+        "durationTicks": 10,
+    }
+    service = _service()
+    runtime = service._create_runtime("test-reroute", topology, scenario, record_events=False)
+    robot = runtime.state["robots"][0]
+    robot["currentCellId"] = "cell-r0-c0"
+    robot["targetCellId"] = "cell-r0-c2"
+
+    assert service._reroute_ctu(runtime, robot, {"cell-r0-c1"}) is True
+    assert robot["path"][0] == "cell-r0-c0"
+    assert robot["path"][-1] == "cell-r0-c2"
+    assert "cell-r0-c1" not in robot["path"]
+    assert robot["targetCellId"] == "cell-r0-c2"

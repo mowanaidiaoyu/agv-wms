@@ -19,7 +19,6 @@ export const emptyTopology = (): TopologyPayload => ({
   zones: [],
   cells: [],
   nodes: [],
-  resources: [],
 })
 
 export const emptyScenario = (topologyId = ''): ScenarioPayload => ({

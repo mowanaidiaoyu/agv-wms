@@ -1,8 +1,8 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useThree } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
-import { Plane, Raycaster, Vector2, Vector3 } from 'three'
-import type { ColorRepresentation } from 'three'
+import { Color, Object3D, Plane, Raycaster, Vector2, Vector3 } from 'three'
+import type { ColorRepresentation, InstancedMesh } from 'three'
 import {
   worldToCell,
   type SceneBox,
@@ -215,6 +215,45 @@ export function BoxView({
       <boxGeometry args={box.size} />
       {material}
     </mesh>
+  )
+}
+
+/**
+ * 商品箱批量渲染：一个库位槽一个实例，全部塞进单个 InstancedMesh，
+ * 避免 666 拓扑全量库位（2.5k 列 × 17 层 ≈ 4.2 万箱）逐槽 <mesh> 拖垮场景。
+ * 纯展示不可选中，取货高亮通过 highlightKeys 把对应实例染成高亮色。
+ */
+export function GoodsBoxes({
+  boxes,
+  highlightKeys,
+}: {
+  boxes: SceneBox[]
+  highlightKeys?: ReadonlySet<string>
+}) {
+  const meshRef = useRef<InstancedMesh>(null)
+
+  useEffect(() => {
+    const mesh = meshRef.current
+    if (!mesh) return
+    const dummy = new Object3D()
+    const highlight = new Color(HIGHLIGHT)
+    const color = new Color()
+    boxes.forEach((box, i) => {
+      dummy.position.set(box.position[0], box.position[1], box.position[2])
+      dummy.scale.set(box.size[0], box.size[1], box.size[2])
+      dummy.updateMatrix()
+      mesh.setMatrixAt(i, dummy.matrix)
+      mesh.setColorAt(i, highlightKeys?.has(box.key) ? highlight : color.set(box.color))
+    })
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+  }, [boxes, highlightKeys])
+
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, boxes.length]} frustumCulled={false}>
+      <boxGeometry args={[1, 1, 1]} />
+      <meshStandardMaterial roughness={0.7} metalness={0.15} />
+    </instancedMesh>
   )
 }
 

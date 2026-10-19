@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Minus, Plus, Scan, Scaling } from 'lucide-react'
 import { useGridViewport } from '../hooks/useGridViewport'
 import { TopologyGlyph } from './TopologyGlyph'
-import type { ConveyorDirection, EditorObjectType, Resource, TopologyCell, TopologyNode, Zone } from '../types'
+import type { ConveyorDirection, EditorObjectType, NodeType, TopologyCell, TopologyNode, Zone } from '../types'
 
 type BoardRobot = {
   id: string
@@ -30,7 +30,6 @@ type GridBoardProps = {
   cells?: TopologyCell[]
   nodes?: TopologyNode[]
   zones?: Zone[]
-  resources?: Pick<Resource, 'id' | 'type' | 'label' | 'cellIds'>[]
   robots?: BoardRobot[]
   activeFloor?: string
   selectedCellId?: string
@@ -52,21 +51,15 @@ type GridBoardProps = {
   onCellClick?: (row: number, col: number) => void
 }
 
-const nodeTypeToObjectType: Record<TopologyNode['type'], EditorObjectType> = {
+const nodeTypeToObjectType: Record<NodeType, NodeType> = {
   storage: 'storage',
-  station: 'station',
-  buffer: 'buffer',
-  entry: 'entry',
-  conveyor_gate: 'conveyor_gate',
-  intersection: 'intersection',
-  lift: 'lift',
   ctu_robot: 'ctu_robot',
   shuttle_robot: 'shuttle_robot',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
 }
 
-const objectLabels: Record<EditorObjectType, string> = {
+const objectLabels: Record<EditorObjectType | NodeType, string> = {
   select: '选择',
   batch: '批量选择',
   erase: '删除',
@@ -74,12 +67,6 @@ const objectLabels: Record<EditorObjectType, string> = {
   blocked: '障碍物',
   conveyor: '输送带',
   storage: '库位',
-  station: '站台',
-  buffer: '缓存位',
-  entry: '入口',
-  conveyor_gate: '输送带闸口',
-  intersection: '交叉点',
-  lift: '提升机',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
@@ -124,7 +111,6 @@ export function GridBoard({
   cells = [],
   nodes = [],
   zones = [],
-  resources = [],
   robots = [],
   activeFloor = '1F',
   selectedCellId,
@@ -183,7 +169,6 @@ export function GridBoard({
   const cellLookup = new Map(visibleCells.map((cell) => [cell.id, cell]))
   const cellIdByPosition = new Map(visibleCells.map((cell) => [`${cell.row}:${cell.col}`, cell.id]))
   const nodesByCell = new Map<string, TopologyNode[]>()
-  const resourcesByCell = new Map<string, string[]>()
   const robotsByCell = new Map<string, BoardRobot[]>()
 
   for (const node of visibleNodes) {
@@ -191,15 +176,6 @@ export function GridBoard({
     const bucket = nodesByCell.get(cellId) ?? []
     bucket.push(node)
     nodesByCell.set(cellId, bucket)
-  }
-
-  for (const resource of resources) {
-    for (const cellId of resource.cellIds) {
-      if (!cellLookup.has(cellId)) continue
-      const bucket = resourcesByCell.get(cellId) ?? []
-      bucket.push(resource.label)
-      resourcesByCell.set(cellId, bucket)
-    }
   }
 
   for (const robot of visibleRobots) {
@@ -232,7 +208,6 @@ export function GridBoard({
     const id = cellIdByPosition.get(`${row}:${col}`) ?? canonicalId
     const cell = cellLookup.get(id) ?? (activeFloor === '1F' ? cellLookup.get(legacyCellId(row, col)) : undefined)
     const tileNodes = nodesByCell.get(id) ?? []
-    const tileResources = resourcesByCell.get(id) ?? []
     const tileRobots = robotsByCell.get(id) ?? []
     const primaryNode = tileNodes[0] ?? null
     const currentCellObject = cellObjectType(cell)
@@ -245,7 +220,6 @@ export function GridBoard({
       cell ? `介质: ${objectLabels[currentCellObject ?? 'road']}` : '介质: 未铺设',
       cell?.type === 'conveyor' && cell.conveyorDirection ? `方向: ${cell.conveyorDirection}` : '',
       primaryNode ? `节点: ${primaryNode.label}` : '',
-      tileResources.length ? `资源: ${tileResources.join('，')}` : '',
       ...tileRobots.map((robot) =>
         [
           `设备 ${robot.id}`,
@@ -287,8 +261,6 @@ export function GridBoard({
             />
           </div>
         ) : null}
-
-        {tileResources.length ? <span className="grid-scene-resource-mark">{Math.min(tileResources.length, 9)}</span> : null}
 
         {tileRobots.length ? (
           <div className="grid-scene-runtime-robot-layer">

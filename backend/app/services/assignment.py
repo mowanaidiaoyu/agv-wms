@@ -5,7 +5,7 @@ from typing import Any
 
 from munkres import Munkres
 
-from .pathfinding import node_to_cell_id, shortest_path
+from .pathfinding import shortest_path, shortest_path_shuttle
 
 
 @dataclass
@@ -16,11 +16,20 @@ class AssignmentInput:
 
 
 def task_cost(robot: dict[str, Any], task: dict[str, Any], topology: dict[str, Any], path_policy: str) -> float:
-    try:
-        source_cell = node_to_cell_id(topology, task["sourceNode"])
-    except KeyError:
+    source_cell = task.get("sourceCellId")
+    if not source_cell:
         return 9999.0
-    path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy, avoid_storage=robot.get("type") == "ctu")
+    if robot["type"] == "shuttle":
+        path = shortest_path_shuttle(
+            topology,
+            robot["currentCellId"],
+            robot.get("currentLayer", 1),
+            source_cell,
+            task.get("sourceLayer", 1),
+            path_policy,
+        )
+    else:
+        path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy, avoid_storage=True)
     if not path:
         return 9999.0
     battery_penalty = max(0.0, 50.0 - robot["battery"]) * 0.05

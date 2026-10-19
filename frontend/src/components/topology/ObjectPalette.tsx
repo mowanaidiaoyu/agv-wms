@@ -11,13 +11,6 @@ const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
   road: '拖拽铺设通行路',
   blocked: '拖拽铺设障碍物（不可通行）',
   conveyor: '拖拽铺设输送带，方向自动按走向',
-  storage: '点击放单个；拖拽矩形批量铺设库位（自动铺路）',
-  station: '点击放单个；拖拽矩形批量放置站台',
-  buffer: '点击放单个；拖拽矩形批量放置缓存位（可在输送带格上）',
-  entry: '点击放单个；拖拽矩形批量放置入口',
-  conveyor_gate: '点击放单个；拖拽矩形批量放置闸口（可在输送带格上）',
-  intersection: '点击放单个；拖拽矩形批量放置交叉点',
-  lift: '点击放单个；拖拽矩形批量放置提升机（需绑定两个楼层）',
   ctu_robot: '点击放单个；拖拽矩形批量放置 CTU 设备',
   shuttle_robot: '点击放单个；拖拽矩形批量放置四向车设备',
   lift_transfer: '点击放单个；拖拽矩形批量放置升降移载机（可落在输送带格上）',
@@ -25,28 +18,13 @@ const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
 }
 
 const ZONE_HINTS: Record<ZoneType, string> = {
-  ctu: '拖拽拉出 CTU 高架库矩形',
+  ctu: '拖拽拉出 CTU 高架库矩形（自动生成 17 层库位）',
   shuttle: '拖拽拉出四向车平库矩形',
-  conveyor: '拖拽拉出输送区矩形',
-  buffer: '拖拽拉出缓存区矩形',
-  station: '拖拽拉出站台区矩形',
-  mixed: '拖拽拉出混合通道矩形',
+  port: '拖拽拉出输送线出入口矩形（下方入、上方出）',
 }
 
 const CELL_TOOL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
-const NODE_TOOL_TYPES: EditorObjectType[] = [
-  'storage',
-  'station',
-  'buffer',
-  'entry',
-  'conveyor_gate',
-  'intersection',
-  'lift',
-  'ctu_robot',
-  'shuttle_robot',
-  'lift_transfer',
-  'turn_transfer',
-]
+const NODE_TOOL_TYPES: EditorObjectType[] = ['ctu_robot', 'shuttle_robot', 'lift_transfer', 'turn_transfer']
 
 function ToolButton({
   tool,

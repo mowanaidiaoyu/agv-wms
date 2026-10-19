@@ -5,6 +5,7 @@ import { OrbitControls } from '@react-three/drei'
 import { MOUSE } from 'three'
 import {
   BoxView,
+  GoodsBoxes,
   HOVER,
   RackView,
   SlabView,
@@ -20,6 +21,7 @@ import {
   worldToCell,
   worldX,
   worldZ,
+  type SceneBox,
   type SceneEntity,
   type SceneEntityKind,
   type SceneSpec,
@@ -107,6 +109,12 @@ function SceneContent({
   const activeFloorY = floorPlaneY(activeFloorIndex)
   const gridPositions = useMemo(() => buildGridPositions(spec.cols, spec.rows), [spec.cols, spec.rows])
 
+  // 商品箱单独走 InstancedMesh 批量绘制，不参与逐件交互/高亮。
+  const goodsBoxes = useMemo(
+    () => spec.items.filter((item): item is SceneBox => item.kind === 'box' && item.key.startsWith('goods-')),
+    [spec],
+  )
+
   const highlightIds = useMemo(() => {
     const ids = new Set<string>()
     if (!selection) return ids
@@ -182,6 +190,7 @@ function SceneContent({
       <directionalLight position={[0, 30, -4]} intensity={0.4} color="#e2e8f0" />
 
       {spec.items.map((item) => {
+        if (item.kind === 'box' && item.key.startsWith('goods-')) return null
         switch (item.kind) {
           case 'slab':
             return (
@@ -228,6 +237,8 @@ function SceneContent({
             )
         }
       })}
+
+      <GoodsBoxes boxes={goodsBoxes} />
 
       {/* 活动层网格线（落位辅助） */}
       <lineSegments position={[0, activeFloorY + 0.24, 0]}>

@@ -5,7 +5,7 @@ import random
 from pathlib import Path
 from typing import Any
 
-from .pathfinding import node_to_cell_id
+from .pathfinding import cell_id, cell_position, node_position
 
 # 固定库存 seed：3D 编辑器预览的「货」与仿真里 CTU 取到的「货」保持一致，
 # 与场景 seed（每次运行不同）解耦。
@@ -41,6 +41,20 @@ def load_catalog() -> dict[str, Any]:
     return {"version": 1, "skus": []}
 
 
+def ctu_zone_ids(topology: dict[str, Any]) -> set[str]:
+    """收集拓扑里所有 `type == "ctu"` 的 zone id。
+
+    真实 666 拓扑的 CTU 库被拆成多个 1 宽列区：`zone-ctu`、`zone-ctu-2` …
+    `zone-ctu-147`。只用精确 id `zone-ctu` 只能拿到其中一列（24 个库位），
+    必须按 zone 类型把全部列区都纳入，才能覆盖完整库位数据。
+    """
+    ids = {zone["id"] for zone in topology.get("zones", []) if zone.get("type") == "ctu"}
+    if ids:
+        return ids
+    # 没有 zone 类型信息的老拓扑回退到约定 id。
+    return {"zone-ctu"}
+
+
 def build_inventory(
     topology: dict[str, Any],
     catalog: dict[str, Any] | None = None,
@@ -58,9 +72,10 @@ def build_inventory(
         return []
 
     nodes = topology.get("nodes", [])
-    ctu_sources = [node for node in nodes if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-ctu"]
+    ctu_zones = ctu_zone_ids(topology)
+    ctu_sources = [node for node in nodes if node["type"] == "storage" and node.get("zoneId") in ctu_zones]
     if not ctu_sources:
-        ctu_sources = [node for node in nodes if node["type"] in {"storage", "buffer"}]
+        ctu_sources = [node for node in nodes if node["type"] == "storage"]
     if not ctu_sources:
         return []
 
@@ -68,13 +83,19 @@ def build_inventory(
     rng = random.Random(seed)
     rng.shuffle(slots)
 
+    # 一次性建立 位置 -> cellId 映射，避免每个槽都重扫 nodes/cells（666 拓扑有 42432 个槽）。
+    pos_to_cell = {cell_position(cell): cell["id"] for cell in topology.get("cells", [])}
+
+    def cell_id_for(node: dict[str, Any]) -> str:
+        return pos_to_cell.get(node_position(node), cell_id(node["row"], node["col"], node.get("floor")))
+
     inventory: list[dict[str, Any]] = []
     for index, (node, layer) in enumerate(slots):
         sku = skus[index % len(skus)]
         inventory.append(
             {
                 "nodeId": node["id"],
-                "cellId": node_to_cell_id(topology, node["id"]),
+                "cellId": cell_id_for(node),
                 "layer": layer,
                 "skuId": sku.get("skuId"),
                 "skuName": sku.get("name"),

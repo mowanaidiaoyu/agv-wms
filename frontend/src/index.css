@@ -1592,20 +1592,8 @@ select {
   background: rgba(88, 28, 135, 0.12);
 }
 
-.grid-zone-conveyor {
-  background: rgba(30, 64, 175, 0.06);
-}
-
-.grid-zone-station {
-  background: rgba(127, 29, 29, 0.12);
-}
-
-.grid-zone-buffer {
-  background: rgba(120, 53, 15, 0.1);
-}
-
-.grid-zone-mixed {
-  background: rgba(71, 85, 105, 0.1);
+.grid-zone-port {
+  background: rgba(13, 148, 136, 0.14);
 }
 
 .grid-scene-cell {
@@ -2318,10 +2306,7 @@ select {
 
 .topo-zone-swatch-ctu { background: #0e7490; }
 .topo-zone-swatch-shuttle { background: #b45309; }
-.topo-zone-swatch-conveyor { background: #2563eb; }
-.topo-zone-swatch-station { background: #7c3aed; }
-.topo-zone-swatch-buffer { background: #16a34a; }
-.topo-zone-swatch-mixed { background: #64748b; }
+.topo-zone-swatch-port { background: #0d9488; }
 
 .topo-palette-hint {
   margin: 2px 0 0;

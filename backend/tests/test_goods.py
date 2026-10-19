@@ -17,16 +17,18 @@ TOPOLOGY = {
     "name": "Goods Topology",
     "meta": {"version": "2.0.0"},
     "grid": {"rows": 2, "cols": 2, "cellSize": 32, "originX": 0, "originY": 0},
-    "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 2, "height": 2}],
+    "zones": [
+        {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 2, "height": 2},
+        {"id": "zone-port", "label": "Port", "type": "port", "x": 1, "y": 0, "width": 1, "height": 1},
+    ],
     "cells": [
         {"id": "cell-r0-c0", "row": 0, "col": 0, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
         {"id": "cell-r0-c1", "row": 0, "col": 1, "type": "road", "zoneId": "zone-ctu", "cost": 1.0, "walkable": True},
     ],
     "nodes": [
         {"id": "ctu-a", "type": "storage", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "A"},
-        {"id": "ctu-b", "type": "buffer", "row": 0, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "B"},
+        {"id": "ctu-b", "type": "storage", "row": 0, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "B"},
     ],
-    "resources": [],
 }
 
 SCENARIO = {
@@ -77,10 +79,30 @@ def test_build_inventory_empty_catalog():
     assert build_inventory(TOPOLOGY, {"version": 1, "skus": []}) == []
 
 
+def test_build_inventory_covers_all_ctu_zones():
+    # 666 拓扑把 CTU 库拆成多个列区（zone-ctu、zone-ctu-2 …），
+    # 精确匹配 zone-ctu 会漏掉其余列区，必须按 zone 类型全部纳入。
+    topology = {
+        **TOPOLOGY,
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 1, "height": 1},
+            {"id": "zone-ctu-2", "label": "CTU", "type": "ctu", "x": 1, "y": 0, "width": 1, "height": 1},
+        ],
+        "nodes": [
+            {"id": "ctu-a", "type": "storage", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "A"},
+            {"id": "ctu-c", "type": "storage", "row": 0, "col": 1, "zoneId": "zone-ctu-2", "capacity": 1, "label": "C"},
+        ],
+    }
+    inventory = build_inventory(topology, CATALOG)
+    node_ids = {slot["nodeId"] for slot in inventory}
+    assert node_ids == {"ctu-a", "ctu-c"}
+    assert len(inventory) == 2 * 17
+
+
 def test_build_inventory_no_ctu_nodes_empty():
     topology = {
         **TOPOLOGY,
-        "nodes": [{"id": "station", "type": "station", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "S"}],
+        "nodes": [{"id": "robot", "type": "ctu_robot", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "S"}],
     }
     assert build_inventory(topology, CATALOG) == []
 
@@ -113,10 +135,7 @@ def test_build_task_legacy_line_keeps_three_fields():
         "ctu",
         "direct",
         [{"nodeId": "ctu-a", "layer": 3}],
-        "ctu-b",
-        "ctu-b",
-        None,
-        None,
+        "cell-r0-c0",
         False,
         2,
     )

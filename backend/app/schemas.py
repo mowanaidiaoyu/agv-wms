@@ -6,11 +6,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-ZoneType = Literal["ctu", "shuttle", "conveyor", "buffer", "station", "mixed"]
+ZoneType = Literal["ctu", "shuttle", "port"]
 CellType = Literal["road", "blocked", "conveyor"]
 ConveyorDirection = Literal["right", "left", "up", "down"]
-NodeType = Literal["intersection", "storage", "buffer", "station", "lift", "entry", "conveyor_gate", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer"]
-ResourceType = Literal["conveyor_segment", "buffer_slot", "lift", "station"]
+NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer"]
 RobotType = Literal["ctu", "shuttle"]
 DispatchPolicy = Literal["greedy", "hungarian"]
 PathPolicy = Literal["astar", "dijkstra"]
@@ -63,16 +62,6 @@ class TopologyNode(BaseModel):
     label: str
 
 
-class Resource(BaseModel):
-    id: str
-    type: ResourceType
-    label: str
-    cellIds: list[str] = Field(default_factory=list)
-    nodeIds: list[str] = Field(default_factory=list)
-    capacity: int = 1
-    meta: dict[str, Any] = Field(default_factory=dict)
-
-
 class TopologyMeta(BaseModel):
     version: str = "2.0.0"
     viewport: dict[str, float] = Field(default_factory=lambda: {"x": 0, "y": 0, "zoom": 1})
@@ -88,7 +77,6 @@ class TopologyPayload(BaseModel):
     zones: list[Zone] = Field(default_factory=list)
     cells: list[TopologyCell] = Field(default_factory=list)
     nodes: list[TopologyNode] = Field(default_factory=list)
-    resources: list[Resource] = Field(default_factory=list)
 
 
 class RobotConfig(BaseModel):
@@ -147,7 +135,6 @@ class RunState(BaseModel):
     scenarioId: str
     robots: list[dict[str, Any]]
     tasks: list[dict[str, Any]]
-    resources: list[dict[str, Any]]
     alerts: list[dict[str, Any]]
     queues: dict[str, list[str]]
     createdAt: datetime

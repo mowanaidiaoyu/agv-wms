@@ -4,7 +4,6 @@ import {
   CELL_BRUSH_TOOLS,
   CELL_LABELS,
   cellsInBox,
-  conveyorAnchorOf,
   conveyorBlockCellIds,
   conveyorRunFromCell,
   createZone,
@@ -41,8 +40,6 @@ import type {
   ConveyorDirection,
   EditorObjectType,
   NodeType,
-  Resource,
-  ResourceType,
   TopologyCell,
   TopologyNode,
   TopologyPayload,
@@ -73,13 +70,6 @@ export interface EditorNotice {
 }
 
 const NODE_TOOL_OF: Partial<Record<EditorObjectType, NodeType>> = {
-  storage: 'storage',
-  station: 'station',
-  buffer: 'buffer',
-  entry: 'entry',
-  conveyor_gate: 'conveyor_gate',
-  intersection: 'intersection',
-  lift: 'lift',
   ctu_robot: 'ctu_robot',
   shuttle_robot: 'shuttle_robot',
   lift_transfer: 'lift_transfer',
@@ -201,16 +191,9 @@ interface TopologyEditorStore {
   deleteSelectedNode: () => void
   deleteSelectedCell: () => void
 
-  // 楼层 / 资源
+  // 楼层
   addFloor: () => void
   removeCurrentFloor: () => void
-  bindBufferResource: (nodeId: string) => void
-  bindStationResource: (nodeId: string) => void
-  bindLiftResource: (nodeIds: string[]) => void
-  bindConveyorSegment: (cellId: string) => void
-  unbindConveyorSegment: (cellId: string) => void
-  updateResource: (resourceId: string, patch: Partial<Resource>) => void
-  removeResource: (resourceId: string) => void
 }
 
 export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => {
@@ -303,7 +286,7 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
     activeTool: 'select',
     activeZoneType: null,
     batchAction: 'select',
-    batchPlaceType: 'storage',
+    batchPlaceType: 'road',
     batchOrigin: null,
     panModifierActive: false,
     selection: null,
@@ -887,165 +870,8 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       set({ draft: next, dirty: composeDirty(state.savedSnapshot, next), activeFloor, notice: { kind: 'info', text: `已删除楼层 ${removed} 及其上的格子与节点。` } })
     },
 
-    bindBufferResource: (nodeId) => {
-      const state = get()
-      const node = state.draft.nodes.find((item) => item.id === nodeId)
-      if (!node || node.type !== 'buffer') return
-      if (state.draft.resources.some((r) => r.type === 'buffer_slot' && r.nodeIds.includes(nodeId))) {
-        set({ notice: { kind: 'warn', text: `节点 ${node.label} 已绑定缓存资源。` } })
-        return
-      }
-      const cell = findCell(state.draft, node.row, node.col, node.floor ?? state.activeFloor)
-      const id = nextResourceId(state.draft.resources, 'buffer_slot')
-      const resource: Resource = {
-        id,
-        type: 'buffer_slot',
-        label: `缓存 ${node.label}`,
-        cellIds: cell ? [cell.id] : [],
-        nodeIds: [node.id],
-        capacity: node.capacity || 1,
-        meta: {},
-      }
-      withSelection((draft) => ({ ...draft, resources: [...draft.resources, resource] }))
-    },
-
-    bindStationResource: (nodeId) => {
-      const state = get()
-      const node = state.draft.nodes.find((item) => item.id === nodeId)
-      if (!node || node.type !== 'station') return
-      if (state.draft.resources.some((r) => r.type === 'station' && r.nodeIds.includes(nodeId))) {
-        set({ notice: { kind: 'warn', text: `节点 ${node.label} 已绑定站台资源。` } })
-        return
-      }
-      const cell = findCell(state.draft, node.row, node.col, node.floor ?? state.activeFloor)
-      const id = nextResourceId(state.draft.resources, 'station')
-      const resource: Resource = {
-        id,
-        type: 'station',
-        label: `站台 ${node.label}`,
-        cellIds: cell ? [cell.id] : [],
-        nodeIds: [node.id],
-        capacity: node.capacity || 1,
-        meta: {},
-      }
-      withSelection((draft) => ({ ...draft, resources: [...draft.resources, resource] }))
-    },
-
-    bindLiftResource: (nodeIds) => {
-      const state = get()
-      const nodes = nodeIds
-        .map((id) => state.draft.nodes.find((item) => item.id === id))
-        .filter((node): node is TopologyNode => Boolean(node && node.type === 'lift'))
-      if (nodes.length < 2) {
-        set({ notice: { kind: 'error', text: '提升机资源需要至少两个提升机节点。' } })
-        return
-      }
-      const distinctFloors = new Set(nodes.map((node) => node.floor ?? GROUND_FLOOR))
-      if (distinctFloors.size < 2) {
-        set({ notice: { kind: 'error', text: '提升机资源需要绑定到两个不同楼层的提升机节点。' } })
-        return
-      }
-      if (state.draft.resources.some((r) => r.type === 'lift' && nodeIds.every((id) => r.nodeIds.includes(id)))) {
-        set({ notice: { kind: 'warn', text: '这些提升机节点已绑定资源。' } })
-        return
-      }
-      const id = nextResourceId(state.draft.resources, 'lift')
-      const resource: Resource = {
-        id,
-        type: 'lift',
-        label: `提升机 ${nodes.map((node) => node.label).join(' / ')}`,
-        cellIds: [],
-        nodeIds: nodes.map((node) => node.id),
-        capacity: 1,
-        meta: {},
-      }
-      withSelection((draft) => ({ ...draft, resources: [...draft.resources, resource] }))
-    },
-
-    bindConveyorSegment: (cellId) => {
-      const state = get()
-      const cell = state.draft.cells.find((item) => item.id === cellId)
-      if (!cell || cell.type !== 'conveyor') {
-        set({ notice: { kind: 'warn', text: '请选择输送带格子再识别。' } })
-        return
-      }
-      const run = conveyorRunFromCell(state.draft, cellId, cell.floor ?? state.activeFloor)
-      if (!run.length) {
-        set({ notice: { kind: 'warn', text: '该格不是输送带。' } })
-        return
-      }
-      const runIds = new Set(run.map((item) => item.id))
-      const existing = state.draft.resources.find(
-        (resource) => resource.type === 'conveyor_segment' && resource.cellIds.some((id) => runIds.has(id)),
-      )
-      if (existing) {
-        set({ notice: { kind: 'warn', text: `该输送线已归属资源「${existing.label}」。` } })
-        return
-      }
-      const id = nextResourceId(state.draft.resources, 'conveyor_segment')
-      const blockCount = new Set(
-        run.map((item) => {
-          const a = conveyorAnchorOf(item)
-          return `${a.row}:${a.col}`
-        }),
-      ).size
-      const resource: Resource = {
-        id,
-        type: 'conveyor_segment',
-        label: `输送线 ${id.split('-').slice(-1)[0]}`,
-        cellIds: run.map((item) => item.id),
-        nodeIds: [],
-        capacity: blockCount,
-        meta: {},
-      }
-      withSelection((draft) => ({ ...draft, resources: [...draft.resources, resource] }))
-      set({ notice: { kind: 'info', text: `已识别为输送线资源「${resource.label}」（${run.length} 格）。` } })
-    },
-
-    unbindConveyorSegment: (cellId) => {
-      const state = get()
-      const resource = state.draft.resources.find(
-        (item) => item.type === 'conveyor_segment' && item.cellIds.includes(cellId),
-      )
-      if (!resource) {
-        set({ notice: { kind: 'warn', text: '该格不在任何输送线资源中。' } })
-        return
-      }
-      withSelection((draft) => ({
-        ...draft,
-        resources: draft.resources.filter((item) => item.id !== resource.id),
-      }))
-      set({ notice: { kind: 'info', text: `已取消输送线资源「${resource.label}」。` } })
-    },
-
-    updateResource: (resourceId, patch) =>
-      withSelection((draft) => {
-        const resource = draft.resources.find((item) => item.id === resourceId)
-        if (!resource) return draft
-        const index = draft.resources.findIndex((item) => item.id === resourceId)
-        const resources = draft.resources.slice()
-        resources[index] = { ...resource, ...patch }
-        return { ...draft, resources }
-      }),
-
-    removeResource: (resourceId) =>
-      withSelection((draft) => ({
-        ...draft,
-        resources: draft.resources.filter((item) => item.id !== resourceId),
-      })),
   }
 })
-
-function nextResourceId(resources: Resource[], type: ResourceType): string {
-  const prefix = `res-${type}`
-  const existing = new Set(resources.map((resource) => resource.id))
-  let index = 1
-  for (;;) {
-    const candidate = `${prefix}-${String(index).padStart(2, '0')}`
-    if (!existing.has(candidate)) return candidate
-    index += 1
-  }
-}
 
 // 选择导出
 export function selectionCellId(selection: TopologySelection): string | null {

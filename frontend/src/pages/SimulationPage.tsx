@@ -6,16 +6,9 @@ import { Surface } from '../components/Surface'
 import { useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationAlert, SimulationResourceState } from '../types'
+import type { SimulationAlert } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
-
-const resourceLabels: Record<SimulationResourceState['type'], string> = {
-  conveyor_segment: '输送线',
-  buffer_slot: '缓存位',
-  station: '站台',
-  lift: '提升机',
-}
 
 const taskModeLabels = {
   direct: 'CTU 多箱取货',
@@ -339,33 +332,7 @@ export function SimulationPage() {
         </div>
       </Surface>
 
-      <Surface title="资源占用" subtitle="单独观察输送线、缓存位、站台队列以及全局等待情况。">
-        <div className="resource-grid">
-          {(currentState?.resources ?? []).map((resource) => (
-            <article key={resource.id} className="resource-card">
-              <div className="resource-card-head">
-                <strong>{resourceLabels[resource.type]}</strong>
-                <span>{resource.label}</span>
-              </div>
-              <p>占用: {resource.occupiedBy.length} / {resource.capacity}</p>
-              <p>排队: {resource.queue.length}</p>
-              <p>绑定格子: {resource.cellIds.join(', ') || '-'}</p>
-              <p>占用对象: {resource.occupiedBy.join(', ') || '空闲'}</p>
-            </article>
-          ))}
-          <article className="resource-card">
-            <div className="resource-card-head">
-              <strong>全局队列</strong>
-              <span>实时概览</span>
-            </div>
-            <p>输送线队列: {currentState?.queues.conveyor.length ?? 0}</p>
-            <p>缓存等待: {currentState?.queues.buffer.length ?? 0}</p>
-            <p>站台排队: {currentState?.queues.station.length ?? 0}</p>
-          </article>
-        </div>
-      </Surface>
-
-      <Surface title="告警与解释" subtitle="把死锁、站台阻塞和输送线拥堵展示成可追溯、可解释的事件。">
+      <Surface title="告警与解释" subtitle="把死锁和拥堵展示成可追溯、可解释的事件。">
         <div className="alert-stack">
           {(currentState?.alerts ?? []).length ? (
             (currentState?.alerts ?? []).map((alert, index) => (

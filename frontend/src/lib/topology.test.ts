@@ -39,8 +39,8 @@ describe('slotNumberFor', () => {
   })
 
   it('非库位或无区域返回 null', () => {
-    const station = placeNode(base(), 'station', 1, 1)!
-    expect(slotNumberFor(station.topology, station.topology.nodes[0])).toBeNull()
+    const robot = placeNode(base(), 'ctu_robot', 1, 1)!
+    expect(slotNumberFor(robot.topology, robot.topology.nodes[0])).toBeNull()
     const storage = placeNode(base(), 'storage', 2, 2)!
     expect(slotNumberFor(storage.topology, storage.topology.nodes[0])).toBeNull()
   })
@@ -209,21 +209,5 @@ describe('moveConveyorRun（拖动平移输送线）', () => {
     const result = moveConveyorRun(t, startIdOf(t), 4, 4)
     expect(result.message).toBeTruthy()
     expect(result.topology.cells.filter((c) => c.type === 'conveyor')).toHaveLength(12)
-  })
-
-  it('conveyor_segment 资源的 cellIds 随线重映射', () => {
-    let t = conveyorL()
-    const runIds = t.cells.filter((c) => c.type === 'conveyor').map((c) => c.id)
-    t = {
-      ...t,
-      resources: [
-        ...t.resources,
-        { id: 'res-seg-1', type: 'conveyor_segment' as const, label: '输送线 1', cellIds: runIds, nodeIds: [], capacity: 3, meta: {} },
-      ],
-    }
-    const moved = moveConveyorRun(t, startIdOf(t), 2, 0).topology
-    const seg = moved.resources.find((r) => r.id === 'res-seg-1')!
-    expect(seg.cellIds).toHaveLength(runIds.length)
-    expect(seg.cellIds.every((id) => moved.cells.find((c) => c.id === id)?.type === 'conveyor')).toBe(true)
   })
 })

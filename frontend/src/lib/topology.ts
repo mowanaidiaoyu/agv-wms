@@ -3,7 +3,6 @@ import type {
   ConveyorDirection,
   EditorObjectType,
   NodeType,
-  Resource,
   TopologyCell,
   TopologyNode,
   TopologyPayload,
@@ -21,13 +20,6 @@ export const OBJECT_LABELS: Record<EditorObjectType, string> = {
   road: '通行路',
   blocked: '障碍物',
   conveyor: '输送带',
-  storage: '库位',
-  station: '站台',
-  buffer: '缓存位',
-  entry: '入口',
-  conveyor_gate: '输送带闸口',
-  intersection: '交叉点',
-  lift: '提升机',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
@@ -42,12 +34,6 @@ export const CELL_LABELS: Record<CellType, string> = {
 
 export const NODE_LABELS: Record<NodeType, string> = {
   storage: '库位',
-  station: '站台',
-  buffer: '缓存位',
-  entry: '入口',
-  conveyor_gate: '输送带闸口',
-  intersection: '交叉点',
-  lift: '提升机',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
@@ -57,10 +43,7 @@ export const NODE_LABELS: Record<NodeType, string> = {
 export const ZONE_LABELS: Record<ZoneType, string> = {
   ctu: 'CTU 高架库',
   shuttle: '四向车平库',
-  conveyor: '输送区',
-  buffer: '缓存区',
-  station: '站台区',
-  mixed: '混合通道',
+  port: '输送线出入口',
 }
 
 export const DIRECTION_LABELS: Record<ConveyorDirection, string> = {
@@ -72,12 +55,6 @@ export const DIRECTION_LABELS: Record<ConveyorDirection, string> = {
 
 export const NODE_PREFIX: Record<NodeType, string> = {
   storage: 'storage',
-  station: 'station',
-  buffer: 'buffer',
-  entry: 'entry',
-  conveyor_gate: 'conveyor_gate',
-  intersection: 'intersection',
-  lift: 'lift',
   ctu_robot: 'ctu',
   shuttle_robot: 'shuttle',
   lift_transfer: 'lift_transfer',
@@ -85,37 +62,25 @@ export const NODE_PREFIX: Record<NodeType, string> = {
 }
 
 /** 只读展示型（节点需要“贴地”，通常在通行路格上承载）。 */
-export const BUSINESS_NODE_TYPES: ReadonlySet<NodeType> = new Set(['storage', 'station', 'buffer'])
+export const BUSINESS_NODE_TYPES: ReadonlySet<NodeType> = new Set(['storage'])
 
 export const DEVICE_NODE_TYPES: ReadonlySet<NodeType> = new Set(['ctu_robot', 'shuttle_robot'])
 
-/** 可落在输送带格上的节点（闸口 / 缓存位 / 升降移载机 / 转向移载机）。 */
-export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set([
-  'conveyor_gate',
-  'buffer',
-  'lift_transfer',
-  'turn_transfer',
-])
+/** 可落在输送带格上的节点（升降移载机 / 转向移载机）。 */
+export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer'])
 
-export const NODE_TOOL: Record<NodeType, EditorObjectType> = {
-  storage: 'storage',
-  station: 'station',
-  buffer: 'buffer',
-  entry: 'entry',
-  conveyor_gate: 'conveyor_gate',
-  intersection: 'intersection',
-  lift: 'lift',
+export const NODE_TOOL: Partial<Record<NodeType, EditorObjectType>> = {
   ctu_robot: 'ctu_robot',
   shuttle_robot: 'shuttle_robot',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
 }
 
-export function isNodeTool(tool: EditorObjectType): tool is NodeType {
+export function isNodeTool(tool: EditorObjectType): boolean {
   return (NODE_TOOL as Record<string, EditorObjectType>)[tool] === tool && (NODE_PREFIX as Record<string, NodeType>)[tool] !== undefined
 }
 
-export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'conveyor', 'station', 'buffer', 'mixed']
+export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port']
 
 export const CELL_BRUSH_TOOLS: ReadonlySet<CellType> = new Set(['road', 'blocked', 'conveyor'])
 
@@ -124,13 +89,6 @@ export const BATCH_PLACE_TYPES: EditorObjectType[] = [
   'road',
   'blocked',
   'conveyor',
-  'storage',
-  'station',
-  'buffer',
-  'entry',
-  'conveyor_gate',
-  'intersection',
-  'lift',
   'ctu_robot',
   'shuttle_robot',
   'lift_transfer',
@@ -267,22 +225,13 @@ export function nodeFootprint(
   node: Pick<TopologyNode, 'type' | 'zoneId'>,
 ): number {
   const zoneType = findZoneById(topology, node.zoneId ?? '')?.type
-  // 输送带上的设备（闸口 / 缓存位 / 移载机）固定 2×2，与输送带块同口径
-  if (
-    node.type === 'conveyor_gate' ||
-    node.type === 'buffer' ||
-    node.type === 'lift_transfer' ||
-    node.type === 'turn_transfer'
-  ) {
+  // 输送带上的设备（升降移载机 / 转向移载机）固定 2×2，与输送带块同口径
+  if (node.type === 'lift_transfer' || node.type === 'turn_transfer') {
     return 2
   }
   // 库位 / 四向车：四向车库位(托盘) 2×2，CTU 料箱位 1×1
   if (node.type === 'storage' || node.type === 'shuttle_robot') {
     return zoneType === 'shuttle' ? 2 : 1
-  }
-  // 提升机：CTU 料箱 1×1，托盘(输送 / 四向 / 混合) 2×2
-  if (node.type === 'lift') {
-    return zoneType === 'ctu' ? 1 : 2
   }
   return 1
 }
@@ -357,16 +306,10 @@ export function zoneAtRectPoint(topology: Pick<TopologyPayload, 'zones'>, row: n
 
 const NODE_ZONE_AFFINITY: Record<NodeType, ReadonlySet<ZoneType>> = {
   storage: new Set(['ctu', 'shuttle']),
-  station: new Set(['station']),
-  buffer: new Set(['buffer', 'conveyor', 'mixed']),
-  entry: new Set(['conveyor', 'station', 'mixed']),
-  conveyor_gate: new Set(['conveyor', 'mixed']),
-  intersection: new Set(['mixed', 'shuttle', 'ctu']),
-  lift: new Set(['mixed', 'ctu', 'shuttle']),
   ctu_robot: new Set(['ctu']),
   shuttle_robot: new Set(['shuttle']),
-  lift_transfer: new Set(['conveyor', 'mixed']),
-  turn_transfer: new Set(['conveyor', 'mixed']),
+  lift_transfer: new Set<ZoneType>(),
+  turn_transfer: new Set<ZoneType>(),
 }
 
 export function zoneRefForNodeType(
@@ -550,12 +493,6 @@ function cloneTopology(topology: TopologyPayload): TopologyPayload {
       ...(cell.conveyorAnchor ? { conveyorAnchor: { ...cell.conveyorAnchor } } : {}),
     })),
     nodes: topology.nodes.map((node) => ({ ...node })),
-    resources: topology.resources.map((resource) => ({
-      ...resource,
-      cellIds: [...resource.cellIds],
-      nodeIds: [...resource.nodeIds],
-      meta: { ...resource.meta },
-    })),
   }
 }
 
@@ -873,15 +810,6 @@ export function moveNode(
   }
   next.nodes.push(moved)
 
-  const newCell = findCell(next, row, col, floor)
-  if (newCell) {
-    next.resources = next.resources.map((resource) =>
-      resource.nodeIds.includes(nodeId)
-        ? { ...resource, cellIds: resource.cellIds.length ? [newCell.id] : [] }
-        : resource,
-    )
-  }
-
   return { topology: finalizeTopology(next) }
 }
 
@@ -902,8 +830,7 @@ export function moveZone(
 
 /**
  * 平移整条输送线（4 邻接连通段）：把 run 内所有 conveyor 格整体平移 dRow/dCol，
- * 保持 2×2 块对齐、方向/层数不变；conveyor_segment 等资源的 cellIds 随之重映射，
- * 落在带上的设备节点（闸口/缓存位/移载机）跟着走。目标被占用或越界时返回 message 拒绝。
+ * 保持 2×2 块对齐、方向/层数不变。目标被占用或越界时返回 message 拒绝。
  */
 export function moveConveyorRun(
   topology: TopologyPayload,
@@ -970,12 +897,6 @@ export function moveConveyorRun(
     }
   }
 
-  // 旧格 id → 新格 id（用于资源 cellIds 重映射）
-  const oldToNew = new Map<string, string>()
-  for (const cell of run) {
-    oldToNew.set(cell.id, buildCellId(cell.row + dr, cell.col + dc, floor))
-  }
-
   // 删除旧 run 格与目标处被覆盖的 road 格
   const removeIds = new Set([...runIdSet, ...overwriteIds])
   next.cells = next.cells.filter((cell) => !removeIds.has(cell.id))
@@ -996,7 +917,7 @@ export function moveConveyorRun(
     })
   }
 
-  // 设备节点随动
+  // 设备节点随动（简化模型后无输送带设备，此分支仅保留占位，正常为空）
   next.nodes = next.nodes.map((node) => {
     if (!mountedIds.has(node.id)) return node
     return {
@@ -1006,12 +927,6 @@ export function moveConveyorRun(
       zoneId: zoneRefForNodeType(next, node.type, node.row + dr, node.col + dc),
     }
   })
-
-  // 资源 cellIds 重映射（conveyor_segment / 落在带上的 buffer_slot）
-  next.resources = next.resources.map((resource) => ({
-    ...resource,
-    cellIds: resource.cellIds.map((id) => oldToNew.get(id) ?? id),
-  }))
 
   return { topology: finalizeTopology(next) }
 }
@@ -1349,6 +1264,34 @@ export function createZone(
     height,
   }
   next.zones.push(zone)
+
+  // CTU 高架库：画区域时按「一格一库位」自动补 storage 节点（17 层料箱位），
+  // 与 build_inventory / seed_demo_ctu_storage.py 的口径一致。
+  if (type === 'ctu') {
+    const usedIds = new Set(next.nodes.map((node) => node.id))
+    let index = 1
+    for (let r = y; r < y + height; r += 1) {
+      for (let c = x; c < x + width; c += 1) {
+        let nodeId = ''
+        do {
+          nodeId = `storage-${String(index).padStart(2, '0')}`
+          index += 1
+        } while (usedIds.has(nodeId))
+        usedIds.add(nodeId)
+        next.nodes.push({
+          id: nodeId,
+          type: 'storage',
+          floor: GROUND_FLOOR,
+          row: r,
+          col: c,
+          zoneId: id,
+          capacity: 17,
+          label: `CTU-${zone.label}-${r}-${c}`,
+        })
+      }
+    }
+  }
+
   if (options?.syncMembers !== false) return syncZoneMembership(next, id)
   return next
 }
@@ -1469,52 +1412,10 @@ export function removeZone(topology: TopologyPayload, zoneId: string): TopologyP
 }
 
 /**
- * 资源清理：删除已不存在 / 类型不再匹配的引用；空资源被移除。
- * 每种编辑结束后调用一次，保证与后端校验口径一致。
+ * 编辑结束后的统一收尾。简化模型（无 resources 资源层）后无独立资源需要清理，直接透传。
  */
 export function finalizeTopology(topology: TopologyPayload): TopologyPayload {
-  const cells = topology.cells
-  const nodes = topology.nodes
-  const cellLookup = new Map(cells.map((cell) => [cell.id, cell]))
-  const nodeLookup = new Map(nodes.map((node) => [node.id, node]))
-
-  const keepResource = (resource: Resource): Resource | null => {
-    let cellIds = resource.cellIds
-    let nodeIds = resource.nodeIds
-    if (resource.type === 'conveyor_segment') {
-      cellIds = cellIds.filter((id) => cellLookup.get(id)?.type === 'conveyor')
-    } else {
-      cellIds = cellIds.filter((id) => {
-        const cell = cellLookup.get(id)
-        if (!cell) return false
-        if (resource.type === 'buffer_slot') return cell.type === 'road' || cell.type === 'conveyor'
-        return cell.type !== 'blocked'
-      })
-    }
-    if (resource.type === 'buffer_slot' || resource.type === 'station' || resource.type === 'lift') {
-      nodeIds = nodeIds.filter((id) => {
-        const node = nodeLookup.get(id)
-        if (!node) return false
-        if (resource.type === 'buffer_slot') return node.type === 'buffer'
-        if (resource.type === 'station') return node.type === 'station'
-        if (resource.type === 'lift') return node.type === 'lift'
-        return true
-      })
-    }
-    const next = { ...resource, cellIds, nodeIds }
-    const emptyNode = resource.type === 'station' || resource.type === 'lift' || resource.type === 'buffer_slot'
-    const alive = emptyNode ? next.nodeIds.length > 0 : next.cellIds.length > 0 || next.nodeIds.length > 0
-    if (!alive) return null
-    if (resource.type === 'conveyor_segment' && next.cellIds.length === 0 && next.nodeIds.length === 0) return null
-    return next
-  }
-
-  const resources: Resource[] = []
-  for (const resource of topology.resources) {
-    const kept = keepResource(resource)
-    if (kept) resources.push(kept)
-  }
-  return { ...topology, resources }
+  return topology
 }
 
 export function addFloor(topology: TopologyPayload): TopologyPayload {

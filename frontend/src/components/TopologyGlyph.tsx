@@ -1,7 +1,7 @@
-import type { ConveyorDirection, EditorObjectType } from '../types'
+import type { ConveyorDirection, EditorObjectType, NodeType } from '../types'
 
 type TopologyGlyphProps = {
-  kind: EditorObjectType
+  kind: EditorObjectType | NodeType
   size?: 'card' | 'panel' | 'board'
   direction?: ConveyorDirection
   className?: string
@@ -72,43 +72,6 @@ export function TopologyGlyph({
         </>
       ) : null}
 
-      {kind === 'station' ? (
-        <>
-          <span className="topology-glyph-station-bay" />
-          <span className="topology-glyph-station-deck" />
-        </>
-      ) : null}
-
-      {kind === 'buffer' ? (
-        <>
-          <span className="topology-glyph-buffer-layer topology-glyph-buffer-layer-top" />
-          <span className="topology-glyph-buffer-layer topology-glyph-buffer-layer-bottom" />
-        </>
-      ) : null}
-
-      {kind === 'entry' ? (
-        <>
-          <span className="topology-glyph-entry-frame" />
-          <span className="topology-glyph-entry-arrow" />
-        </>
-      ) : null}
-
-      {kind === 'conveyor_gate' ? (
-        <>
-          <span className="topology-glyph-gate-post topology-glyph-gate-post-left" />
-          <span className="topology-glyph-gate-post topology-glyph-gate-post-right" />
-          <span className="topology-glyph-gate-bar" />
-          <span className="topology-glyph-gate-arrow" />
-        </>
-      ) : null}
-
-      {kind === 'intersection' ? (
-        <>
-          <span className="topology-glyph-intersection-bar topology-glyph-intersection-bar-x" />
-          <span className="topology-glyph-intersection-bar topology-glyph-intersection-bar-y" />
-        </>
-      ) : null}
-
       {kind === 'ctu_robot' ? (
         <>
           <span className="topology-glyph-ctu-body" />
@@ -126,14 +89,6 @@ export function TopologyGlyph({
           <span className="topology-glyph-shuttle-body" />
           <span className="topology-glyph-shuttle-carriage" />
           <span className="topology-glyph-shuttle-indicator" />
-        </>
-      ) : null}
-
-      {kind === 'lift' ? (
-        <>
-          <span className="topology-glyph-lift-shaft" />
-          <span className="topology-glyph-lift-arrow topology-glyph-lift-arrow-up" />
-          <span className="topology-glyph-lift-arrow topology-glyph-lift-arrow-down" />
         </>
       ) : null}
 

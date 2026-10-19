@@ -12,8 +12,17 @@ from fastapi import WebSocket
 
 from ..core.repository import Repository
 from .assignment import assign_tasks
-from .goods import SKU_FIELDS, build_inventory, sample_order_lines
-from .pathfinding import build_node_lookup, cell_id, node_to_cell_id, parse_cell_id, shortest_path
+from .goods import SKU_FIELDS, build_inventory, ctu_zone_ids, sample_order_lines
+from .pathfinding import (
+    build_node_lookup,
+    cell_id,
+    node_to_cell_id,
+    parse_cell_id,
+    port_entry_cell,
+    shortest_path,
+    shortest_path_shuttle,
+    shuttle_rack_slots,
+)
 
 
 def now_dt() -> datetime:
@@ -30,6 +39,8 @@ ROBOT_CARRY_CAPACITY = {"ctu": 5, "shuttle": 1}
 CTU_RACK_LAYERS = 17
 # 每 tick 的推进间隔（秒）。调大=仿真更慢、机器人每步更易看清。
 TICK_INTERVAL_SECONDS = 1.5
+# 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
+REROUTE_AFTER_BLOCK_TICKS = 2
 
 
 @dataclass
@@ -198,15 +209,19 @@ class SimulationService:
                     "currentFloor": start_floor,
                     "currentRow": start_node["row"],
                     "currentCol": start_node["col"],
+                    "currentLayer": 1,
                     "status": "idle",
                     "battery": robot["battery"],
                     "path": [start_cell],
+                    "pathLayers": [1],
                     "targetCellId": start_cell,
+                    "targetLayer": 1,
                     "currentTaskId": None,
                     "waitTicks": 0,
                     "failed": False,
                     "phaseLabel": "待命",
                     "load": 0,
+                    "carrying": [],
                     "capacity": ROBOT_CARRY_CAPACITY.get(robot["type"], 1),
                 }
             )
@@ -222,7 +237,6 @@ class SimulationService:
             "robots": robots,
             "tasks": tasks,
             "inventory": inventory,
-            "resources": self._build_resource_state(topology),
             "alerts": [],
             "queues": {"conveyor": [], "station": [], "buffer": []},
             "createdAt": now_dt().isoformat(),
@@ -253,21 +267,12 @@ class SimulationService:
             record_events=record_events,
         )
 
-    def _build_resource_state(self, topology: dict[str, Any]) -> list[dict[str, Any]]:
-        return [
-            {
-                "id": resource["id"],
-                "label": resource["label"],
-                "type": resource["type"],
-                "capacity": resource.get("capacity", 1),
-                "cellIds": resource.get("cellIds", []),
-                "nodeIds": resource.get("nodeIds", []),
-                "occupiedBy": [],
-                "queue": [],
-                "meta": resource.get("meta", {}),
-            }
-            for resource in topology.get("resources", [])
-        ]
+    def _first_delivery_cell(self, topology: dict[str, Any]) -> str:
+        """输送线出入口（port 区域）入口格；无 port 区域时返回空串。"""
+        for zone in topology.get("zones", []):
+            if zone.get("type") == "port":
+                return port_entry_cell(topology, zone)
+        return ""
 
     def _seed_tasks(self, topology: dict[str, Any], scenario: dict[str, Any], inventory: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if inventory is None:
@@ -276,21 +281,16 @@ class SimulationService:
         order_gen = scenario.get("orderGenerator") or {}
         rng = random.Random(scenario.get("seed", 0))
 
-        ctu_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-ctu"]
-        shuttle_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"} and node.get("zoneId") == "zone-shuttle"]
-        stations = [node["id"] for node in nodes if node["type"] == "station"]
-        entry_nodes = [node["id"] for node in nodes if node["type"] == "entry"]
-        transfer_in = next((node["id"] for node in nodes if node["type"] == "conveyor_gate" and node.get("zoneId") == "zone-conveyor"), stations[0] if stations else "")
-        transfer_out = next((node["id"] for node in reversed(nodes) if node["type"] == "conveyor_gate"), transfer_in)
-
+        ctu_sources = [node["id"] for node in nodes if node["type"] == "storage" and node.get("zoneId") in ctu_zone_ids(topology)]
         if not ctu_sources:
-            ctu_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"}]
-        if not shuttle_sources:
-            shuttle_sources = [node["id"] for node in nodes if node["type"] in {"storage", "buffer"}]
-        if not stations:
-            stations = [node["id"] for node in nodes]
-        if not entry_nodes:
-            entry_nodes = stations
+            ctu_sources = [node["id"] for node in nodes if node["type"] == "storage"]
+        shuttle_sources = shuttle_rack_slots(topology)
+
+        port_zones = [zone for zone in topology["zones"] if zone.get("type") == "port"]
+        delivery_cells = [port_entry_cell(topology, zone) for zone in port_zones]
+        if not delivery_cells:
+            # 没有输送线出入口就无法交付，返回空任务（前端会提示用户先画 port 区域）。
+            return []
 
         max_orders = max(1, int(order_gen.get("maxOrders", 8)))
         lines_min = max(1, int(order_gen.get("linesPerOrderMin", 1)))
@@ -300,27 +300,36 @@ class SimulationService:
 
         tasks: list[dict[str, Any]] = []
         for index in range(max_orders):
-            if not ctu_sources or not stations:
+            if not ctu_sources:
                 break
-            station = stations[index % len(stations)]
-            entry = entry_nodes[index % len(entry_nodes)]
+            delivery = delivery_cells[index % len(delivery_cells)]
             line_count = rng.randint(lines_min, lines_max)
             lines = sample_order_lines(inventory, line_count, rng)
             if not lines:
-                # 无库存（目录缺失/无 CTU 库位）时回退到旧的随机 nodeId/layer 逻辑。
+                # 无库存（目录缺失/无 CTU 库位）时回退到随机 nodeId/layer。
                 lines = [
                     {"nodeId": ctu_sources[rng.randrange(len(ctu_sources))], "layer": rng.randint(1, CTU_RACK_LAYERS)}
                     for _ in range(line_count)
                 ]
-            tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, station, entry, None, None, False, 2))
+            tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, delivery, False, 2))
 
         for index in range(6):
-            if not shuttle_sources or not stations:
+            if not shuttle_sources:
                 break
-            source = shuttle_sources[index % len(shuttle_sources)]
-            station = stations[index % len(stations)]
-            entry = entry_nodes[index % len(entry_nodes)]
-            tasks.append(self._build_task(topology, f"task-shuttle-{index + 1}", "shuttle", "cross_zone", [{"nodeId": source, "layer": 1}], station, entry, transfer_out, transfer_in, False, 2))
+            cell, layer = shuttle_sources[index % len(shuttle_sources)]
+            delivery = delivery_cells[index % len(delivery_cells)]
+            tasks.append(
+                self._build_task(
+                    topology,
+                    f"task-shuttle-{index + 1}",
+                    "shuttle",
+                    "cross_zone",
+                    [{"cellId": cell, "layer": layer}],
+                    delivery,
+                    False,
+                    2,
+                )
+            )
         return tasks
 
     def _build_task(
@@ -330,25 +339,24 @@ class SimulationService:
         robot_type: str,
         mode: str,
         lines: list[dict[str, Any]],
-        station_node: str,
-        entry_node: str,
-        handoff_node: str | None,
-        conveyor_exit_node: str | None,
+        delivery_cell_id: str,
         urgent: bool,
         priority: int,
         *,
         created_tick: int = 0,
     ) -> dict[str, Any]:
         if not lines:
-            lines = [{"nodeId": station_node, "layer": 1}]
-        source_node = lines[0]["nodeId"]
+            lines = [{"cellId": delivery_cell_id, "layer": 1}]
         line_payload: list[dict[str, Any]] = []
         for line in lines:
-            entry = {"nodeId": line["nodeId"], "cellId": node_to_cell_id(topology, line["nodeId"]), "layer": int(line.get("layer", 1))}
+            cell = line.get("cellId") or node_to_cell_id(topology, line["nodeId"])
+            entry = {"nodeId": line.get("nodeId"), "cellId": cell, "layer": int(line.get("layer", 1))}
             for field in SKU_FIELDS:
                 if line.get(field) not in (None, ""):
                     entry[field] = line[field]
             line_payload.append(entry)
+        source_cell = line_payload[0]["cellId"]
+        source_layer = int(line_payload[0]["layer"])
         return {
             "id": task_id,
             "robotType": robot_type,
@@ -356,22 +364,14 @@ class SimulationService:
             "status": "pending",
             "phase": "pending_assignment",
             "phaseLabel": "待分配",
-            "sourceNode": source_node,
-            "targetNode": station_node,
-            "stationNode": station_node,
-            "entryNode": entry_node,
-            "handoffNode": handoff_node,
-            "conveyorExitNode": conveyor_exit_node,
-            "sourceCellId": node_to_cell_id(topology, source_node),
-            "targetCellId": node_to_cell_id(topology, station_node),
-            "stationCellId": node_to_cell_id(topology, station_node),
-            "entryCellId": node_to_cell_id(topology, entry_node),
-            "handoffCellId": node_to_cell_id(topology, handoff_node) if handoff_node else None,
-            "conveyorExitCellId": node_to_cell_id(topology, conveyor_exit_node) if conveyor_exit_node else None,
+            "sourceCellId": source_cell,
+            "sourceLayer": source_layer,
+            "deliveryCellId": delivery_cell_id,
+            "targetCellId": source_cell,
+            "targetLayer": source_layer,
             "lines": line_payload,
             "currentLineIndex": 0,
             "picked": 0,
-            "stationResourceId": None,
             "priority": priority,
             "etaTicks": 0,
             "urgent": urgent,
@@ -412,8 +412,6 @@ class SimulationService:
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
         self._move_robots(runtime)
-        self._process_conveyor(runtime)
-        self._process_station(runtime)
         self._detect_contention(runtime)
         self._refresh_metrics(runtime)
         if broadcast:
@@ -452,47 +450,29 @@ class SimulationService:
                 )
                 break
 
-        if config.get("conveyorJammedTick") == tick:
-            conveyor = self._resource(runtime, "conveyor_segment")
-            if conveyor:
-                conveyor["meta"]["jammedUntil"] = tick + 6
-            self._emit_alert(
-                runtime,
-                tick,
-                category="conveyor_jam",
-                level="warning",
-                message=f"输送线在 tick {tick} 进入拥堵状态。",
-                details={"resourceId": conveyor["id"] if conveyor else None},
-                suggestion="降低放行阈值，或启用缓存位缓冲。",
-            )
-
     def _inject_urgent_order(self, runtime: RunRuntime, tick: int) -> None:
         urgent_tick = runtime.scenario["orderGenerator"].get("urgentInsertionTick")
         if urgent_tick != tick:
             return
         if any(task["urgent"] and task["createdTick"] == urgent_tick for task in runtime.state["tasks"]):
             return
-        station_node = self._first_node(runtime.topology, {"station"})
-        entry_node = self._first_node(runtime.topology, {"entry"}, fallback=station_node)
+        delivery = self._first_delivery_cell(runtime.topology)
+        if not delivery:
+            return
         inventory = runtime.state.get("inventory") or []
         lines = sample_order_lines(inventory, 1, random.Random())
         if not lines:
-            source_node = self._first_node(runtime.topology, {"storage", "buffer"})
-            if not source_node or not station_node or not entry_node:
+            source_node = self._first_node(runtime.topology, {"storage"})
+            if not source_node:
                 return
             lines = [{"nodeId": source_node, "layer": random.randint(1, CTU_RACK_LAYERS)}]
-        elif not station_node or not entry_node:
-            return
         task = self._build_task(
             runtime.topology,
             f"task-urgent-{tick}",
             "ctu",
             "direct",
             lines,
-            station_node,
-            entry_node,
-            None,
-            None,
+            delivery,
             True,
             1,
             created_tick=tick,
@@ -512,17 +492,8 @@ class SimulationService:
             if task is None:
                 continue
             phase = "pickup_from_ctu" if task["mode"] == "direct" else "pickup_from_shuttle"
-            path_cells = shortest_path(
-                runtime.topology,
-                robot["currentCellId"],
-                task["sourceCellId"],
-                runtime.scenario["pathPolicy"],
-                avoid_storage=robot["type"] == "ctu",
-            )
-            if not path_cells:
+            if not self._robot_path_to(runtime, robot, task["sourceCellId"], task["sourceLayer"]):
                 continue
-            robot["path"] = [cell["id"] for cell in path_cells]
-            robot["targetCellId"] = task["sourceCellId"]
             robot["currentTaskId"] = task_id
             robot["status"] = "moving"
             robot["waitTicks"] = 0
@@ -549,13 +520,7 @@ class SimulationService:
                 robot["status"] = "idle"
                 robot["phaseLabel"] = "待命"
                 robot["path"] = [robot["currentCellId"]]
-                continue
-
-            if task["phase"] in {"waiting_for_conveyor", "conveyor_transfer", "station_queue"}:
-                robot["status"] = "idle"
-                robot["phaseLabel"] = "待命"
-                robot["currentTaskId"] = None
-                robot["path"] = [robot["currentCellId"]]
+                robot["pathLayers"] = [robot.get("currentLayer", 1)]
                 continue
 
             path = robot["path"]
@@ -563,8 +528,10 @@ class SimulationService:
                 self._advance_robot_phase(runtime, robot, task)
                 continue
 
+            path_layers = robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(path)
             current_cell_id = robot["currentCellId"]
             next_cell_id = path[1]
+            next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
             occupied_cells.discard(current_cell_id)
 
             if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
@@ -572,25 +539,67 @@ class SimulationService:
                 robot["waitTicks"] += 1
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
                 occupied_cells.add(current_cell_id)
+                # 连续等待后仍无法前进：CTU 尝试绕开其它设备重新寻路，化解头对头死锁。
+                if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
+                    if self._reroute_ctu(runtime, robot, occupied_cells):
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                        robot["phaseLabel"] = task["phaseLabel"]
                 continue
 
-            robot["status"] = "handoff" if task["phase"] == "handoff_to_conveyor" else "moving"
+            robot["status"] = "moving"
             robot["currentCellId"] = next_cell_id
             robot["currentNode"] = next_cell_id
             floor, row, col = parse_cell_id(next_cell_id)
             robot["currentFloor"] = floor
             robot["currentRow"] = row
             robot["currentCol"] = col
+            robot["currentLayer"] = next_layer
             robot["path"] = path[1:]
+            robot["pathLayers"] = path_layers[1:]
             robot["battery"] = max(10.0, robot["battery"] - 0.35)
             robot["waitTicks"] = 0
             robot["phaseLabel"] = task["phaseLabel"]
             occupied_cells.add(next_cell_id)
             reserved_targets.add(next_cell_id)
-            self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "status": robot["status"]})
+            self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]})
 
             if len(robot["path"]) <= 1:
                 self._advance_robot_phase(runtime, robot, task)
+
+    def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+        """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
+        target = robot.get("targetCellId")
+        if not target or target == robot["currentCellId"]:
+            return False
+        others = {parse_cell_id(cell) for cell in occupied_cells if cell != robot["currentCellId"]}
+        path_cells = shortest_path(
+            runtime.topology,
+            robot["currentCellId"],
+            target,
+            runtime.scenario["pathPolicy"],
+            avoid_storage=True,
+            extra_blocked=others,
+        )
+        if not path_cells or len(path_cells) <= 1:
+            return False
+        robot["path"] = [cell["id"] for cell in path_cells]
+        robot["pathLayers"] = [1] * len(robot["path"])
+        robot["targetCellId"] = target
+        return True
+
+    def _transfer_goods_to_robot(self, runtime: RunRuntime, robot: dict[str, Any], line: dict[str, Any]) -> None:
+        """CTU 取到一箱：把该库位槽从库存移除，并把货物挂到机器人 carrying，前端据此把货箱从库位移到车上。"""
+        node_id = line.get("nodeId")
+        if node_id is None:
+            return
+        layer = int(line.get("layer", 1))
+        inventory = runtime.state.get("inventory") or []
+        for index, slot in enumerate(inventory):
+            if slot.get("nodeId") == node_id and int(slot.get("layer", 1)) == layer:
+                robot.setdefault("carrying", []).append(slot)
+                del inventory[index]
+                return
 
     def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
         tick = runtime.state["tick"]
@@ -599,6 +608,7 @@ class SimulationService:
             lines = task.get("lines", [])
             line_index = task.get("currentLineIndex", 0)
             picked_line = lines[line_index] if 0 <= line_index < len(lines) else {}
+            self._transfer_goods_to_robot(runtime, robot, picked_line)
             robot["load"] = min(capacity, robot.get("load", 0) + 1)
             task["picked"] = task.get("picked", 0) + 1
             task["currentLineIndex"] = line_index + 1
@@ -608,8 +618,8 @@ class SimulationService:
                 task["phaseLabel"] = f"CTU 取货 {task['picked']}/{len(lines)}"
                 robot["phaseLabel"] = f"CTU 取货 {robot['load']}/{capacity}"
             else:
-                self._set_robot_leg(runtime, robot, task, "delivery_to_station", task["stationCellId"])
-                task["phaseLabel"] = f"站台交付（{task['picked']} 箱）"
+                self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"])
+                task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             event: dict[str, Any] = {"taskId": task["id"], "phase": task["phase"], "status": task["status"], "picked": task["picked"], "load": robot["load"]}
             if picked_line.get("skuId"):
@@ -619,149 +629,75 @@ class SimulationService:
             return
 
         if task["phase"] == "pickup_from_shuttle":
-            self._set_robot_leg(runtime, robot, task, "handoff_to_conveyor", task["handoffCellId"])
-            robot["status"] = "handoff"
+            robot["load"] = min(robot.get("capacity", 1), robot.get("load", 0) + 1)
+            task["picked"] = task.get("picked", 0) + 1
+            self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=1)
+            task["phaseLabel"] = "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
 
-        if task["phase"] == "handoff_to_conveyor":
-            task["status"] = "waiting_for_conveyor"
-            task["phase"] = "waiting_for_conveyor"
+        if task["phase"] == "delivery_to_port":
+            task["status"] = "completed"
+            task["phase"] = "completed"
             task["phaseLabel"] = self._phase_label(task["phase"])
+            task["completedTick"] = tick
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
             robot["currentTaskId"] = None
             robot["path"] = [robot["currentCellId"]]
-            if task["id"] not in runtime.state["queues"]["conveyor"]:
-                runtime.state["queues"]["conveyor"].append(task["id"])
-            self._sync_resource_queues(runtime)
-            task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-            self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
-            return
-
-        if task["phase"] == "delivery_to_station":
-            task["status"] = "station_queue"
-            task["phase"] = "station_queue"
-            task["phaseLabel"] = self._phase_label(task["phase"])
-            task["remainingTicks"] = 1
-            task["stationResourceId"] = self._resolve_station_resource_id(runtime, task)
-            if task["id"] not in runtime.state["queues"]["station"]:
-                runtime.state["queues"]["station"].append(task["id"])
-            robot["status"] = "idle"
-            robot["phaseLabel"] = "待命"
-            robot["currentTaskId"] = None
-            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
             robot["load"] = 0
+            robot["carrying"] = []
+            runtime.metrics["completedTasks"] += 1
+            runtime.metrics["throughput"] += 1
+            if task.get("urgent"):
+                runtime.metrics["urgentOrdersHandled"] += 1
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-            self._sync_resource_queues(runtime)
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+            return
 
-    def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None) -> None:
+    def _robot_path_to(self, runtime: RunRuntime, robot: dict[str, Any], target_cell_id: str, target_layer: int | None = None) -> bool:
+        """计算并写入 robot 的 path/pathLayers/target；CTU 走自由网格寻路，四向车走巷道+电梯寻路。"""
+        if robot["type"] == "shuttle":
+            layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
+            path3d = shortest_path_shuttle(
+                runtime.topology,
+                robot["currentCellId"],
+                robot["currentLayer"],
+                target_cell_id,
+                layer,
+                runtime.scenario["pathPolicy"],
+            )
+            if not path3d:
+                return False
+            robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
+            robot["pathLayers"] = [state_layer for _, _, state_layer in path3d]
+            robot["targetLayer"] = layer
+        else:
+            path_cells = shortest_path(
+                runtime.topology,
+                robot["currentCellId"],
+                target_cell_id,
+                runtime.scenario["pathPolicy"],
+                avoid_storage=True,
+            )
+            if not path_cells:
+                return False
+            robot["path"] = [cell["id"] for cell in path_cells]
+            robot["pathLayers"] = [1] * len(robot["path"])
+        robot["targetCellId"] = target_cell_id
+        return True
+
+    def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> None:
         if not target_cell_id:
             return
-        path_cells = shortest_path(
-            runtime.topology,
-            robot["currentCellId"],
-            target_cell_id,
-            runtime.scenario["pathPolicy"],
-            avoid_storage=robot["type"] == "ctu",
-        )
-        robot["path"] = [cell["id"] for cell in path_cells] if path_cells else [robot["currentCellId"]]
-        robot["targetCellId"] = target_cell_id
+        self._robot_path_to(runtime, robot, target_cell_id, target_layer)
         robot["status"] = "moving"
         robot["phaseLabel"] = self._phase_label(phase)
         task["phase"] = phase
         task["phaseLabel"] = self._phase_label(phase)
         task["etaTicks"] = max(len(robot["path"]) - 1, 1)
-
-    def _process_conveyor(self, runtime: RunRuntime) -> None:
-        conveyor = self._resource(runtime, "conveyor_segment")
-        if conveyor is None:
-            return
-
-        tick = runtime.state["tick"]
-        queue = runtime.state["queues"]["conveyor"]
-        jammed_until = int(conveyor.get("meta", {}).get("jammedUntil", 0))
-        threshold = runtime.scenario["conveyorPolicy"]["releaseThreshold"]
-        capacity = max(int(round(conveyor["capacity"] * threshold)) or 1, 1)
-
-        while queue and len(conveyor["occupiedBy"]) < capacity and tick >= jammed_until:
-            task_id = queue.pop(0)
-            task = find_task(runtime.state["tasks"], task_id)
-            if task is None:
-                continue
-            task["status"] = "conveyor_transfer"
-            task["phase"] = "conveyor_transfer"
-            task["phaseLabel"] = self._phase_label(task["phase"])
-            task["remainingTicks"] = 3
-            task["stationResourceId"] = self._resolve_station_resource_id(runtime, task)
-            conveyor["occupiedBy"].append(task_id)
-            task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-            self._record_event(runtime, tick, "resource_occupied", {"resourceId": conveyor["id"], "taskId": task_id, "action": "enter"})
-
-        for task_id in list(conveyor["occupiedBy"]):
-            task = find_task(runtime.state["tasks"], task_id)
-            if task is None:
-                conveyor["occupiedBy"].remove(task_id)
-                continue
-            task["remainingTicks"] -= 1
-            if task["remainingTicks"] <= 0:
-                conveyor["occupiedBy"].remove(task_id)
-                task["status"] = "station_queue"
-                task["phase"] = "station_queue"
-                task["phaseLabel"] = self._phase_label(task["phase"])
-                task["remainingTicks"] = 1
-                if task_id not in runtime.state["queues"]["station"]:
-                    runtime.state["queues"]["station"].append(task_id)
-                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-                self._record_event(runtime, tick, "task_state_changed", {"taskId": task_id, "phase": task["phase"], "status": task["status"]})
-                self._record_event(runtime, tick, "resource_occupied", {"resourceId": conveyor["id"], "taskId": task_id, "action": "leave"})
-
-        self._sync_resource_queues(runtime)
-
-    def _process_station(self, runtime: RunRuntime) -> None:
-        station_resources = self._resources_by_type(runtime, "station")
-        if not station_resources:
-            return
-
-        queue = runtime.state["queues"]["station"]
-        tick = runtime.state["tick"]
-
-        for station_resource in station_resources:
-            while len(station_resource["occupiedBy"]) < station_resource["capacity"]:
-                task_id = next((queued_task_id for queued_task_id in queue if self._task_station_resource_id(runtime, queued_task_id) == station_resource["id"]), None)
-                if task_id is None:
-                    break
-                queue.remove(task_id)
-                task = find_task(runtime.state["tasks"], task_id)
-                if task is None:
-                    continue
-                station_resource["occupiedBy"].append(task_id)
-                task["remainingTicks"] = max(task.get("remainingTicks", 1), 1)
-                self._record_event(runtime, tick, "resource_occupied", {"resourceId": station_resource["id"], "taskId": task_id, "action": "enter"})
-
-            for task_id in list(station_resource["occupiedBy"]):
-                task = find_task(runtime.state["tasks"], task_id)
-                if task is None:
-                    station_resource["occupiedBy"].remove(task_id)
-                    continue
-                task["remainingTicks"] -= 1
-                if task["remainingTicks"] <= 0:
-                    station_resource["occupiedBy"].remove(task_id)
-                    task["status"] = "completed"
-                    task["phase"] = "completed"
-                    task["phaseLabel"] = self._phase_label(task["phase"])
-                    task["completedTick"] = tick
-                    task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-                    runtime.metrics["completedTasks"] += 1
-                    runtime.metrics["throughput"] += 1
-                    if task.get("urgent"):
-                        runtime.metrics["urgentOrdersHandled"] += 1
-                    self._record_event(runtime, tick, "task_state_changed", {"taskId": task_id, "phase": task["phase"], "status": task["status"]})
-                    self._record_event(runtime, tick, "resource_occupied", {"resourceId": station_resource["id"], "taskId": task_id, "action": "leave"})
-
-        self._sync_resource_queues(runtime)
 
     def _detect_contention(self, runtime: RunRuntime) -> None:
         tick = runtime.state["tick"]
@@ -787,41 +723,16 @@ class SimulationService:
                 level="warning",
                 message="检测到潜在死锁，设备等待链持续增长。",
                 details={"waitingChain": waiting_chain},
-                suggestion="优先降低输送线放行阈值，必要时回退等待时间最长的设备。",
+                suggestion="检查巷道规划与让行策略，必要时回退等待时间最长的设备。",
             ):
                 runtime.metrics["deadlocksDetected"] += 1
                 self._record_event(runtime, tick, "deadlock_detected", {"waitingChain": waiting_chain, "message": "检测到潜在死锁"})
 
-        if len(runtime.state["queues"]["conveyor"]) >= 2 and self._emit_alert(
-            runtime,
-            tick,
-            category="conveyor_congestion",
-            level="warning",
-            message="输送线等待队列持续增长。",
-            details={"queueDepth": len(runtime.state["queues"]["conveyor"]), "tasks": runtime.state["queues"]["conveyor"][:]},
-            suggestion="增加缓存位容量，或降低跨区任务的放行速度。",
-        ):
-            runtime.metrics["congestionEvents"] += 1
-
-        if len(runtime.state["queues"]["station"]) >= 2 and self._emit_alert(
-            runtime,
-            tick,
-            category="station_blockage",
-            level="info",
-            message="站台排队加剧，交付节拍出现拥堵。",
-            details={"queueDepth": len(runtime.state["queues"]["station"]), "tasks": runtime.state["queues"]["station"][:]},
-            suggestion="优先释放站台资源，或降低直送任务的放行速度。",
-        ):
-            runtime.metrics["congestionEvents"] += 1
-
     def _refresh_metrics(self, runtime: RunRuntime) -> None:
         pending = [task for task in runtime.state["tasks"] if task["status"] != "completed"]
-        active = [robot for robot in runtime.state["robots"] if robot["status"] in {"moving", "handoff"}]
+        active = [robot for robot in runtime.state["robots"] if robot["status"] == "moving"]
         blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
         completed = [task for task in runtime.state["tasks"] if task["completedTick"] is not None and task["startedTick"] is not None]
-        conveyor = self._resource(runtime, "conveyor_segment")
-        buffer_resource = self._resource(runtime, "buffer_slot")
-        conveyor_capacity = max(conveyor["capacity"], 1) if conveyor else 1
         completed_durations = [task["completedTick"] - task["startedTick"] for task in completed]
 
         runtime.metrics.update(
@@ -829,52 +740,14 @@ class SimulationService:
                 "pendingTasks": len(pending),
                 "activeRobots": len(active),
                 "blockedRobots": len(blocked),
-                "conveyorUtilization": round((len(conveyor["occupiedBy"]) / conveyor_capacity) if conveyor else 0.0, 2),
+                "conveyorUtilization": 0.0,
                 "avgEtaTicks": round(sum(task.get("etaTicks", 0) for task in pending) / len(pending), 2) if pending else 0.0,
                 "avgCompletionTicks": round(sum(completed_durations) / len(completed_durations), 2) if completed_durations else 0.0,
-                "stationQueueDepth": len(runtime.state["queues"]["station"]),
-                "conveyorQueueDepth": len(runtime.state["queues"]["conveyor"]),
-                "bufferOccupancy": len(buffer_resource["occupiedBy"]) if buffer_resource else 0,
+                "stationQueueDepth": 0,
+                "conveyorQueueDepth": 0,
+                "bufferOccupancy": 0,
             }
         )
-        self._sync_resource_queues(runtime)
-
-    def _resource(self, runtime: RunRuntime, resource_type: str) -> dict[str, Any] | None:
-        return next((resource for resource in runtime.state["resources"] if resource["type"] == resource_type), None)
-
-    def _resources_by_type(self, runtime: RunRuntime, resource_type: str) -> list[dict[str, Any]]:
-        return [resource for resource in runtime.state["resources"] if resource["type"] == resource_type]
-
-    def _sync_resource_queues(self, runtime: RunRuntime) -> None:
-        conveyor = self._resource(runtime, "conveyor_segment")
-        if conveyor:
-            conveyor["queue"] = runtime.state["queues"]["conveyor"][:]
-
-        waiting_for_conveyor = [task["id"] for task in runtime.state["tasks"] if task["phase"] == "waiting_for_conveyor" and task["status"] == "waiting_for_conveyor"]
-        buffer_resource = self._resource(runtime, "buffer_slot")
-        if buffer_resource:
-            buffer_resource["occupiedBy"] = waiting_for_conveyor[: buffer_resource["capacity"]]
-            buffer_resource["queue"] = waiting_for_conveyor[:]
-            runtime.state["queues"]["buffer"] = waiting_for_conveyor[:]
-
-        for station_resource in self._resources_by_type(runtime, "station"):
-            station_resource["queue"] = [task_id for task_id in runtime.state["queues"]["station"] if self._task_station_resource_id(runtime, task_id) == station_resource["id"]]
-
-    def _resolve_station_resource_id(self, runtime: RunRuntime, task: dict[str, Any]) -> str | None:
-        target_station = task.get("stationNode") or task.get("targetNode")
-        for resource in self._resources_by_type(runtime, "station"):
-            if target_station in resource.get("nodeIds", []):
-                return resource["id"]
-        stations = self._resources_by_type(runtime, "station")
-        return stations[0]["id"] if stations else None
-
-    def _task_station_resource_id(self, runtime: RunRuntime, task_id: str) -> str | None:
-        task = find_task(runtime.state["tasks"], task_id)
-        if task is None:
-            return None
-        if task.get("stationResourceId"):
-            return task["stationResourceId"]
-        return self._resolve_station_resource_id(runtime, task)
 
     def _record_event(self, runtime: RunRuntime, tick: int, event_type: str, payload: dict[str, Any]) -> None:
         if runtime.record_events:
@@ -905,12 +778,8 @@ class SimulationService:
         mapping = {
             "pending_assignment": "待分配",
             "pickup_from_ctu": "CTU 取货",
-            "delivery_to_station": "站台交付",
             "pickup_from_shuttle": "四向车取货",
-            "handoff_to_conveyor": "交接到输送线",
-            "waiting_for_conveyor": "等待输送线",
-            "conveyor_transfer": "输送中",
-            "station_queue": "站台排队",
+            "delivery_to_port": "输送线交付",
             "completed": "已完成",
         }
         return mapping.get(phase, phase)
@@ -934,7 +803,6 @@ class SimulationService:
         )
         await self.hub.broadcast(runtime.run_id, {"type": "tick", "tick": tick, "payload": runtime.state})
         await self.hub.broadcast(runtime.run_id, {"type": "metrics_snapshot", "tick": tick, "payload": runtime.metrics})
-        await self.hub.broadcast(runtime.run_id, {"type": "resource_occupied", "tick": tick, "payload": {"resources": runtime.state["resources"]}})
         for robot in runtime.state["robots"]:
             await self.hub.broadcast(
                 runtime.run_id,
@@ -947,6 +815,7 @@ class SimulationService:
                         "floor": robot.get("currentFloor", "1F"),
                         "row": robot["currentRow"],
                         "col": robot["currentCol"],
+                        "layer": robot.get("currentLayer", 1),
                         "status": robot["status"],
                         "phaseLabel": robot["phaseLabel"],
                     },

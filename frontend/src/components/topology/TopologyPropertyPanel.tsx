@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Trash2, Plus, Layers, Box, MapPin, Type, ArrowUpRight, RefreshCw } from 'lucide-react'
+import { Trash2, Layers, Box, MapPin, Type, RefreshCw } from 'lucide-react'
 import { TopologyGlyph } from '../TopologyGlyph'
 import {
   CELL_LABELS,
   DIRECTION_LABELS,
+  NODE_LABELS,
   OBJECT_LABELS,
   ZONE_LABELS,
   boxToRect,
@@ -21,7 +22,7 @@ import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
 import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyPayload, ZoneType } from '../../types'
 
 const CELL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
-const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'conveyor', 'station', 'buffer', 'mixed']
+const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'port']
 const DIRECTIONS: ConveyorDirection[] = ['right', 'down', 'left', 'up']
 
 function NumericField({
@@ -66,12 +67,14 @@ function ReadonlyRow({ label, value }: { label: string; value: string }) {
   )
 }
 
-function EntityBadge({ kind, id }: { kind: EditorObjectType; id: string }) {
+const KIND_LABELS: Record<EditorObjectType | NodeType, string> = { ...OBJECT_LABELS, ...NODE_LABELS }
+
+function EntityBadge({ kind, id }: { kind: EditorObjectType | NodeType; id: string }) {
   return (
     <div className="topo-property-hero">
       <TopologyGlyph kind={kind} size="panel" />
       <div className="topo-property-hero-text">
-        <p className="topology-property-eyebrow">{OBJECT_LABELS[kind]}</p>
+        <p className="topology-property-eyebrow">{KIND_LABELS[kind]}</p>
         <h3>{id}</h3>
       </div>
     </div>
@@ -91,19 +94,12 @@ export function TopologyPropertyPanel() {
   const batchAssignZone = useTopologyEditorStore((state) => state.batchAssignZone)
   const deleteSelectedNode = useTopologyEditorStore((state) => state.deleteSelectedNode)
   const deleteSelectedCell = useTopologyEditorStore((state) => state.deleteSelectedCell)
-  const bindBufferResource = useTopologyEditorStore((state) => state.bindBufferResource)
-  const bindStationResource = useTopologyEditorStore((state) => state.bindStationResource)
-  const bindLiftResource = useTopologyEditorStore((state) => state.bindLiftResource)
-  const bindConveyorSegment = useTopologyEditorStore((state) => state.bindConveyorSegment)
-  const unbindConveyorSegment = useTopologyEditorStore((state) => state.unbindConveyorSegment)
   const updateConveyorLevels = useTopologyEditorStore((state) => state.updateConveyorLevels)
   const applyShuttleAisle = useTopologyEditorStore((state) => state.applyShuttleAisle)
   const applyShuttleSlotRemove = useTopologyEditorStore((state) => state.applyShuttleSlotRemove)
   const applyShuttleLift = useTopologyEditorStore((state) => state.applyShuttleLift)
   const activeShuttleLevel = useTopologyEditorStore((state) => state.activeShuttleLevel)
   const setActiveShuttleLevel = useTopologyEditorStore((state) => state.setActiveShuttleLevel)
-
-  const [liftPairId, setLiftPairId] = useState('')
 
   const zones = draft.zones
   const floors = floorsOf(draft)
@@ -153,18 +149,11 @@ export function TopologyPropertyPanel() {
         draft={draft}
         onUpdateCell={updateCell}
         onSetLevels={updateConveyorLevels}
-        onBind={bindConveyorSegment}
-        onUnbind={unbindConveyorSegment}
       />
     )
   }
 
   if (cell) {
-    const boundResources = draft.resources.filter((resource) => resource.cellIds.includes(cell.id))
-    const segmentResource =
-      cell.type === 'conveyor'
-        ? draft.resources.find((resource) => resource.type === 'conveyor_segment' && resource.cellIds.includes(cell.id))
-        : undefined
     return (
       <div className="topo-property-body">
         <EntityBadge kind={cell.type === 'road' ? 'road' : cell.type === 'blocked' ? 'blocked' : 'conveyor'} id={cell.id} />
@@ -216,31 +205,6 @@ export function TopologyPropertyPanel() {
             </label>
           </>
         ) : null}
-        {cell.type === 'conveyor' ? (
-          segmentResource ? (
-            <div className="topo-property-note">
-              <strong>所属输送线 · {segmentResource.label}</strong>
-              <p>
-                {segmentResource.cellIds.length} 格 · 容量 {segmentResource.capacity}
-              </p>
-            </div>
-          ) : (
-            <p className="muted-copy">该格尚未归入输送线资源。</p>
-          )
-        ) : null}
-        {cell.type === 'conveyor' ? (
-          segmentResource ? (
-            <button className="ghost-button topo-property-danger" type="button" onClick={() => unbindConveyorSegment(cell.id)}>
-              <Trash2 size={14} />
-              取消输送线识别
-            </button>
-          ) : (
-            <button className="ghost-button topo-property-bind" type="button" onClick={() => bindConveyorSegment(cell.id)}>
-              <Plus size={14} />
-              识别为输送线资源
-            </button>
-          )
-        ) : null}
         <NumericField
           label="通行代价 cost"
           value={cell.cost}
@@ -262,18 +226,6 @@ export function TopologyPropertyPanel() {
             ))}
           </select>
         </label>
-        {boundResources.length ? (
-          <div className="topo-property-note-stack">
-            {boundResources.map((resource) => (
-              <div className="topology-property-note" key={resource.id}>
-                <strong>{resource.label}</strong>
-                <p>
-                  资源 {resource.id} / {resource.type}
-                </p>
-              </div>
-            ))}
-          </div>
-        ) : null}
         <button className="ghost-button topo-property-danger" type="button" onClick={deleteSelectedCell}>
           <Trash2 size={14} />
           删除该格
@@ -283,11 +235,7 @@ export function TopologyPropertyPanel() {
   }
 
   if (node) {
-    const kind = node.type as EditorObjectType
-    const stationResource = draft.resources.find((r) => r.type === 'station' && r.nodeIds.includes(node.id))
-    const bufferResource = draft.resources.find((r) => r.type === 'buffer_slot' && r.nodeIds.includes(node.id))
-    const liftResource = draft.resources.filter((r) => r.type === 'lift' && r.nodeIds.includes(node.id))
-    const otherLiftNodes = node.type === 'lift' ? draft.nodes.filter((n) => n.type === 'lift' && n.id !== node.id) : []
+    const kind = node.type
     return (
       <div className="topo-property-body">
         <EntityBadge kind={kind} id={node.id} />
@@ -337,59 +285,6 @@ export function TopologyPropertyPanel() {
             ))}
           </select>
         </label>
-
-        {node.type === 'buffer' ? (
-          <button className="ghost-button topo-property-bind" type="button" onClick={() => bindBufferResource(node.id)} disabled={Boolean(bufferResource)}>
-            <Plus size={14} />
-            {bufferResource ? '已绑定缓存资源' : '绑定为缓存资源'}
-          </button>
-        ) : null}
-        {node.type === 'station' ? (
-          <button className="ghost-button topo-property-bind" type="button" onClick={() => bindStationResource(node.id)} disabled={Boolean(stationResource)}>
-            <Plus size={14} />
-            {stationResource ? '已绑定站台资源' : '绑定为站台资源'}
-          </button>
-        ) : null}
-
-        {node.type === 'lift' ? (
-          <div className="topo-property-stack">
-            {liftResource.length ? (
-              <div className="topology-property-note">
-                <strong>已绑定提升机资源</strong>
-                {liftResource.map((resource) => (
-                  <p key={resource.id}>
-                    {resource.id} → {resource.nodeIds.map((rid) => draft.nodes.find((n) => n.id === rid)?.label ?? rid).join(' / ')}
-                  </p>
-                ))}
-              </div>
-            ) : (
-              <>
-                <p className="muted-copy">提升机需与另一楼层提升机节点绑定成资源。</p>
-                {otherLiftNodes.length ? (
-                  <div className="topo-property-inline">
-                    <select value={liftPairId || otherLiftNodes[0]?.id || ''} onChange={(event) => setLiftPairId(event.target.value)}>
-                      {otherLiftNodes.map((other) => (
-                        <option key={other.id} value={other.id}>
-                          {other.label}（{other.floor ?? '1F'}）
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      onClick={() => bindLiftResource([node.id, liftPairId || otherLiftNodes[0]?.id].filter(Boolean) as string[])}
-                    >
-                      <ArrowUpRight size={14} />
-                      绑定提升机
-                    </button>
-                  </div>
-                ) : (
-                  <p className="muted-copy">先在其它楼层放置提升机节点。</p>
-                )}
-              </>
-            )}
-          </div>
-        ) : null}
 
         <button className="ghost-button topo-property-danger" type="button" onClick={deleteSelectedNode}>
           <Trash2 size={14} />
@@ -569,15 +464,11 @@ function ConveyorRunEditor({
   draft,
   onUpdateCell,
   onSetLevels,
-  onBind,
-  onUnbind,
 }: {
   selection: { kind: 'conveyor-run'; cellId: string; ids: string[]; floor: string }
   draft: TopologyPayload
   onUpdateCell: (id: string, patch: Partial<TopologyCell>) => void
   onSetLevels: (ids: string[], levels: number) => void
-  onBind: (cellId: string) => void
-  onUnbind: (cellId: string) => void
 }) {
   const runCells = draft.cells.filter((cell) => selection.ids.includes(cell.id))
 
@@ -598,9 +489,6 @@ function ConveyorRunEditor({
     })
   }
 
-  const segmentResource = draft.resources.find(
-    (resource) => resource.type === 'conveyor_segment' && resource.cellIds.includes(selection.cellId),
-  )
   const level = runCells[0]?.levels ?? 1
 
   return (
@@ -639,17 +527,6 @@ function ConveyorRunEditor({
           </select>
         </label>
       ))}
-      {segmentResource ? (
-        <button className="ghost-button topo-property-danger" type="button" onClick={() => onUnbind(selection.cellId)}>
-          <Trash2 size={14} />
-          取消输送线识别（{segmentResource.label}）
-        </button>
-      ) : (
-        <button className="ghost-button topo-property-bind" type="button" onClick={() => onBind(selection.cellId)}>
-          <Plus size={14} />
-          识别为输送线资源
-        </button>
-      )}
     </div>
   )
 }

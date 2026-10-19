@@ -1,18 +1,7 @@
-export type ZoneType = 'ctu' | 'shuttle' | 'conveyor' | 'buffer' | 'station' | 'mixed'
+export type ZoneType = 'ctu' | 'shuttle' | 'port'
 export type CellType = 'road' | 'blocked' | 'conveyor'
 export type ConveyorDirection = 'right' | 'left' | 'up' | 'down'
-export type NodeType =
-  | 'intersection'
-  | 'storage'
-  | 'buffer'
-  | 'station'
-  | 'lift'
-  | 'entry'
-  | 'conveyor_gate'
-  | 'ctu_robot'
-  | 'shuttle_robot'
-  | 'lift_transfer'
-  | 'turn_transfer'
+export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer'
 export type EditorObjectType =
   | 'select'
   | 'batch'
@@ -20,18 +9,10 @@ export type EditorObjectType =
   | 'road'
   | 'blocked'
   | 'conveyor'
-  | 'storage'
-  | 'station'
-  | 'buffer'
-  | 'entry'
-  | 'conveyor_gate'
-  | 'intersection'
-  | 'lift'
   | 'ctu_robot'
   | 'shuttle_robot'
   | 'lift_transfer'
   | 'turn_transfer'
-export type ResourceType = 'conveyor_segment' | 'buffer_slot' | 'lift' | 'station'
 export type RobotType = 'ctu' | 'shuttle'
 export type DispatchPolicy = 'greedy' | 'hungarian'
 export type PathPolicy = 'astar' | 'dijkstra'
@@ -87,16 +68,6 @@ export interface TopologyNode {
   label: string
 }
 
-export interface Resource {
-  id: string
-  type: ResourceType
-  label: string
-  cellIds: string[]
-  nodeIds: string[]
-  capacity: number
-  meta: Record<string, unknown>
-}
-
 export interface TopologyPayload {
   id: string
   name: string
@@ -110,7 +81,6 @@ export interface TopologyPayload {
   zones: Zone[]
   cells: TopologyCell[]
   nodes: TopologyNode[]
-  resources: Resource[]
 }
 
 export interface RobotConfig {
@@ -183,16 +153,23 @@ export interface SimulationRobot {
   currentFloor?: string
   currentRow: number
   currentCol: number
+  /** 四向车当前所在货架层（1..4），CTU 恒为 1 */
+  currentLayer?: number
   status: string
   battery: number
   path: string[]
+  /** 与 path 等长的每格所在货架层 */
+  pathLayers?: number[]
   targetCellId: string
+  targetLayer?: number
   currentTaskId: string | null
   waitTicks: number
   failed: boolean
   phaseLabel: string
   load: number
   capacity: number
+  /** CTU 当前装载的货物箱（取货后从库位移到车上，交付后清空） */
+  carrying?: GoodsSlot[]
 }
 
 export interface SimulationTaskHistory {
@@ -222,22 +199,15 @@ export interface SimulationTask {
   status: string
   phase: string
   phaseLabel: string
-  sourceNode: string
-  targetNode: string
-  stationNode: string
-  entryNode: string
-  handoffNode: string | null
-  conveyorExitNode: string | null
   sourceCellId: string
+  sourceLayer: number
   targetCellId: string
-  stationCellId: string
-  entryCellId: string
-  handoffCellId: string | null
-  conveyorExitCellId: string | null
+  targetLayer: number
+  /** 交付点（输送线出入口入口格），等于任务最终 targetCellId */
+  deliveryCellId: string
   lines: SimulationTaskLine[]
   currentLineIndex: number
   picked: number
-  stationResourceId: string | null
   priority: number
   etaTicks: number
   urgent: boolean
@@ -247,18 +217,6 @@ export interface SimulationTask {
   createdTick: number
   startedTick: number | null
   completedTick: number | null
-}
-
-export interface SimulationResourceState {
-  id: string
-  label: string
-  type: ResourceType
-  capacity: number
-  cellIds: string[]
-  nodeIds: string[]
-  occupiedBy: string[]
-  queue: string[]
-  meta: Record<string, unknown>
 }
 
 export interface SimulationAlert {
@@ -327,7 +285,6 @@ export interface SimulationState {
   robots: SimulationRobot[]
   tasks: SimulationTask[]
   inventory?: GoodsSlot[]
-  resources: SimulationResourceState[]
   alerts: SimulationAlert[]
   queues: SimulationQueues
   createdAt: string

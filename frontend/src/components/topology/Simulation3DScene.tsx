@@ -3,13 +3,16 @@ import type { ReactNode } from 'react'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import { Group, MOUSE, Vector3 } from 'three'
-import { BoxView, RackView, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
+import { BoxView, GoodsBoxes, RackView, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
 import {
   CELL,
   CTU_ROBOT_LEVELS,
+  GOODS_CATEGORY_COLORS,
+  GOODS_DEFAULT_COLOR,
   ZONE_LEVEL_HEIGHT,
   buildSceneSpec,
   robotWorldPosition,
+  type SceneBox,
 } from '../../lib/topology3d'
 import type { GoodsSlot, SimulationRobot, SimulationTask, TopologyPayload } from '../../types'
 
@@ -50,8 +53,8 @@ function RobotGroup({ position, children }: { position: [number, number, number]
   return <group ref={groupRef}>{children}</group>
 }
 
-/** CTU 车：底座 + 4 立柱 + 5 层载货搁板，前 `load` 层点亮（0/5→5/5）。局部坐标，原点=格中心贴地。 */
-function CtuCart({ load }: { load: number }) {
+/** CTU 车：底座 + 4 立柱 + 5 层载货搁板，前 `load` 层点亮（0/5→5/5），并渲染实际装载的货物箱。局部坐标，原点=格中心贴地。 */
+function CtuCart({ load, carrying }: { load: number; carrying?: GoodsSlot[] }) {
   const levelHeight = ZONE_LEVEL_HEIGHT.ctu
   const w = CELL * 0.7
   const d = CELL * 0.7
@@ -69,6 +72,9 @@ function CtuCart({ load }: { load: number }) {
     [-halfW + 0.08, halfD - 0.08],
     [halfW - 0.08, halfD - 0.08],
   ]
+  const boxW = w * 0.55
+  const boxD = d * 0.55
+  const boxH = levelHeight * 0.5
 
   return (
     <group>
@@ -93,6 +99,15 @@ function CtuCart({ load }: { load: number }) {
               emissiveIntensity={filled ? 0.35 : 0}
               roughness={0.5}
             />
+          </mesh>
+        )
+      })}
+      {(carrying ?? []).slice(0, CTU_ROBOT_LEVELS).map((slot, i) => {
+        const color = GOODS_CATEGORY_COLORS[slot.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+        return (
+          <mesh key={`carry-${i}`} position={[0, baseTop + i * levelHeight + shelfH + boxH / 2, 0]}>
+            <boxGeometry args={[boxW, boxH, boxD]} />
+            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.25} roughness={0.6} />
           </mesh>
         )
       })}
@@ -122,6 +137,12 @@ export default function Simulation3DScene({
 
   // 实时机器人替换静态设备节点（robot.id == 拓扑 device node id），避免重复绘制。
   const liveRobotIds = useMemo(() => new Set(robots.map((robot) => robot.id)), [robots])
+
+  // 商品箱单独走 InstancedMesh 批量绘制（含取货高亮按 key 染色）。
+  const goodsBoxes = useMemo(
+    () => spec.items.filter((item): item is SceneBox => item.kind === 'box' && item.key.startsWith('goods-')),
+    [spec],
+  )
 
   // 取货高亮：机器人当前处于 CTU 取货阶段时，高亮其当前取货行对应的商品箱。
   const highlightKeys = useMemo(() => {
@@ -154,6 +175,8 @@ export default function Simulation3DScene({
       {spec.items.map((item) => {
         // 隐藏被实时机器人替代的静态设备节点
         if (item.entity?.kind === 'node' && liveRobotIds.has(item.entity.id)) return null
+        // 商品箱走批量 InstancedMesh
+        if (item.kind === 'box' && item.key.startsWith('goods-')) return null
         switch (item.kind) {
           case 'slab':
             return (
@@ -182,6 +205,8 @@ export default function Simulation3DScene({
         }
       })}
 
+      <GoodsBoxes boxes={goodsBoxes} highlightKeys={highlightKeys} />
+
       {robots.map((robot) => {
         const position = robotWorldPosition(
           robot.currentFloor ?? '1F',
@@ -193,7 +218,7 @@ export default function Simulation3DScene({
         )
         return (
           <RobotGroup key={robot.id} position={position}>
-            {robot.type === 'ctu' ? <CtuCart load={robot.load} /> : <ShuttleCart />}
+            {robot.type === 'ctu' ? <CtuCart load={robot.load} carrying={robot.carrying} /> : <ShuttleCart />}
           </RobotGroup>
         )
       })}
