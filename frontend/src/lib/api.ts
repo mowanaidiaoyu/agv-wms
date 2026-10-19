@@ -14,6 +14,12 @@ import type {
   HeatPredictionRequest,
   HeatPredictionResponse,
 } from '../features/sku-heat/types'
+import type {
+  InventorySummary,
+  InventoryZoneSummary,
+  StorageInventoryLocation,
+  SyntheticInventorySeedResult,
+} from '../features/inventory/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
 const WS_BASE = 'ws://127.0.0.1:8000/ws'
@@ -135,6 +141,37 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
       signal,
+    })
+  },
+  getInventorySummary(topologyId: string) {
+    const query = new URLSearchParams({ topology_id: topologyId })
+    return request<InventorySummary>(`/inventory/summary?${query}`)
+  },
+  listInventoryZones(topologyId: string) {
+    const query = new URLSearchParams({ topology_id: topologyId })
+    return request<InventoryZoneSummary[]>(`/inventory/zones?${query}`)
+  },
+  listInventoryLocations(topologyId: string, zoneId?: string, skuId?: string, search?: string) {
+    const query = new URLSearchParams({ topology_id: topologyId })
+    if (zoneId) query.set('zone_id', zoneId)
+    if (skuId) query.set('sku_id', skuId)
+    if (search) query.set('search', search)
+    return request<StorageInventoryLocation[]>(`/inventory/locations?${query}`)
+  },
+  getInventoryLocation(topologyId: string, storageNodeId: string) {
+    const query = new URLSearchParams({ topology_id: topologyId })
+    return request<StorageInventoryLocation>(
+      `/inventory/locations/${encodeURIComponent(storageNodeId)}?${query}`,
+    )
+  },
+  getInventorySku(topologyId: string, skuId: string) {
+    const query = new URLSearchParams({ topology_id: topologyId })
+    return request(`/inventory/sku/${encodeURIComponent(skuId)}?${query}`)
+  },
+  initializeSyntheticInventory(topologyId: string, seed = 42) {
+    return request<SyntheticInventorySeedResult>('/inventory/synthetic-demo', {
+      method: 'POST',
+      body: JSON.stringify({ topology_id: topologyId, seed }),
     })
   },
 }

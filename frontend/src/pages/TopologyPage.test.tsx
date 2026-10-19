@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { TopologyPage } from './TopologyPage'
 
-vi.mock('../../lib/api', () => ({
+vi.mock('../lib/api', () => ({
   api: {
     listTopologies: vi.fn(async () => []),
     getTopology: vi.fn(async () => {
@@ -12,12 +13,48 @@ vi.mock('../../lib/api', () => ({
     saveTopology: vi.fn(async () => ({})),
     deleteTopology: vi.fn(async () => ({})),
     validateTopology: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
+    getInventorySummary: vi.fn(async () => ({
+      topology_id: 'topology-new', storage_location_count: 1, stocked_location_count: 1,
+      sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+      data_sources: ['synthetic_demo'],
+    })),
+    listInventoryLocations: vi.fn(async () => [{
+      topology_id: 'topology-new', topology_version: '2.0.0', storage_node_id: 'storage-a',
+      label: '库位 A', zone_id: 'zone-ctu', zone_label: 'CTU 库区', zone_type: 'ctu',
+      floor: '1F', row: 1, col: 2, rack_level: null,
+      balances: [{
+        topology_id: 'topology-new', zone_id: 'zone-ctu', storage_node_id: 'storage-a',
+        storage_layer: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+        source: 'synthetic_demo', updated_at: '2026-10-19T00:00:00Z',
+        sku: { sku_id: 'SKU-DEMO-001', sku_name: '标准紧固件套装', category: 'fastener', specification: 'M6', unit: 'box', weight_kg: 2.4, material: 'steel', source: 'synthetic_demo' },
+      }],
+      access_mapping: { topology_id: 'topology-new', storage_node_id: 'storage-a', access_cell_id: null, status: 'unconfigured', source: null, validated_at: null },
+      data_sources: ['synthetic_demo'],
+    }]),
+    getInventoryLocation: vi.fn(async () => ({
+      topology_id: 'topology-new', topology_version: '2.0.0', storage_node_id: 'storage-a',
+      label: '库位 A', zone_id: 'zone-ctu', zone_label: 'CTU 库区', zone_type: 'ctu',
+      floor: '1F', row: 1, col: 2, rack_level: null,
+      balances: [{
+        topology_id: 'topology-new', zone_id: 'zone-ctu', storage_node_id: 'storage-a',
+        storage_layer: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+        source: 'synthetic_demo', updated_at: '2026-10-19T00:00:00Z',
+        sku: { sku_id: 'SKU-DEMO-001', sku_name: '标准紧固件套装', category: 'fastener', specification: 'M6', unit: 'box', weight_kg: 2.4, material: 'steel', source: 'synthetic_demo' },
+      }],
+      access_mapping: { topology_id: 'topology-new', storage_node_id: 'storage-a', access_cell_id: null, status: 'unconfigured', source: null, validated_at: null },
+      data_sources: ['synthetic_demo'],
+    })),
+    initializeSyntheticInventory: vi.fn(async () => ({ topology_id: 'topology-new', seed: 42, inserted_skus: 0, inserted_balances: 0, source: 'synthetic_demo' })),
   },
 }))
 
 // jsdom 无 WebGL，three/r3f 无法渲染，测试用桩替代 3D 场景
 vi.mock('../components/topology/Topology3DScene', () => ({
-  default: () => <div data-testid="topology-3d" />,
+  default: ({ onInventoryNodeSelect }: { onInventoryNodeSelect?: (id: string) => void }) => (
+    <div data-testid="topology-3d">
+      <button type="button" onClick={() => onInventoryNodeSelect?.('storage-a')}>选择测试库位</button>
+    </div>
+  ),
 }))
 
 function renderPage() {
@@ -58,5 +95,17 @@ describe('TopologyPage', () => {
     expect(await screen.findByTestId('topology-3d')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /适配全图|适配/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /100%/ })).not.toBeInTheDocument()
+  })
+
+  it('opens inventory mode and shows the location selected from the 3D scene', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(screen.getByRole('tab', { name: '库存查看' }))
+    expect(await screen.findByText(/数据来源：确定性演示数据/)).toBeInTheDocument()
+
+    await user.click(await screen.findByRole('button', { name: '选择测试库位' }))
+    expect(await screen.findByText('标准紧固件套装')).toBeInTheDocument()
+    expect(screen.getByText('尚未配置合法 CTU 取货停靠点，不能生成取货路径。')).toBeInTheDocument()
   })
 })

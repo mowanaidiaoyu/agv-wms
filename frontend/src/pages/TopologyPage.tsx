@@ -6,6 +6,7 @@ import { ObjectPalette } from '../components/topology/ObjectPalette'
 import { TopologyEditorToolbar } from '../components/topology/TopologyEditorToolbar'
 import { TopologyPropertyPanel } from '../components/topology/TopologyPropertyPanel'
 import { TopologyValidationPanel } from '../components/topology/TopologyValidationPanel'
+import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPanel'
 import { api } from '../lib/api'
 import { BATCH_PLACE_TYPES, floorsOf, OBJECT_LABELS } from '../lib/topology'
 import { usePlatformStore } from '../store/usePlatformStore'
@@ -161,7 +162,22 @@ export function TopologyPage() {
   const records = useMemo(() => topologiesQuery.data ?? [], [topologiesQuery.data])
   const initializedRef = useRef(false)
 
-  const [inspectorTab, setInspectorTab] = useState<'property' | 'validate'>('property')
+  const [inspectorTab, setInspectorTab] = useState<'property' | 'validate' | 'inventory'>('property')
+  const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
+  const inventoryMode = inspectorTab === 'inventory'
+  const inventoryLocationsQuery = useQuery({
+    queryKey: ['inventory-locations', draft.id],
+    queryFn: () => api.listInventoryLocations(draft.id),
+    enabled: inventoryMode && Boolean(draft.id),
+  })
+  const stockedInventoryNodeIds = useMemo(
+    () => new Set(
+      (inventoryLocationsQuery.data ?? [])
+        .filter((location) => location.balances.length > 0)
+        .map((location) => location.storage_node_id),
+    ),
+    [inventoryLocationsQuery.data],
+  )
 
   useEffect(() => {
     if (topologiesQuery.isLoading || initializedRef.current) return
@@ -235,6 +251,13 @@ export function TopologyPage() {
                     onCellEnter={pointerEnterAt}
                     onEntityDown={entityPointerDown}
                     onMoveCell={moveCell}
+                    inventoryMode={inventoryMode}
+                    selectedInventoryNodeId={selectedInventoryNodeId}
+                    stockedInventoryNodeIds={stockedInventoryNodeIds}
+                    onInventoryNodeSelect={(storageNodeId) => {
+                      setSelectedInventoryNodeId(storageNodeId)
+                      setInspectorTab('inventory')
+                    }}
                   />
                 </Suspense>
               )}
@@ -261,9 +284,28 @@ export function TopologyPage() {
               >
                 校验
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={inspectorTab === 'inventory'}
+                className={inspectorTab === 'inventory' ? 'topo-inspector-tab active' : 'topo-inspector-tab'}
+                onClick={() => setInspectorTab('inventory')}
+              >
+                库存查看
+              </button>
             </div>
             <div className="topo-inspector-body">
-              {inspectorTab === 'property' ? <TopologyPropertyPanel /> : <TopologyValidationPanel onValidate={runValidate} />}
+              {inspectorTab === 'property' ? (
+                <TopologyPropertyPanel />
+              ) : inspectorTab === 'validate' ? (
+                <TopologyValidationPanel onValidate={runValidate} />
+              ) : (
+                <StorageInventoryPanel
+                  topologyId={draft.id}
+                  selectedStorageNodeId={selectedInventoryNodeId}
+                  onSelectStorageNode={setSelectedInventoryNodeId}
+                />
+              )}
             </div>
           </aside>
         </div>

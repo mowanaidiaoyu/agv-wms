@@ -23,6 +23,7 @@ import {
 import type { CellBox } from '../../lib/topology'
 import type { EditorObjectType, TopologyPayload } from '../../types'
 import type { TopologySelection } from '../../store/useTopologyEditorStore'
+import { InventoryOverlay } from '../../features/inventory/InventoryOverlay'
 
 export type Topology3DSceneProps = {
   topology: TopologyPayload
@@ -34,6 +35,10 @@ export type Topology3DSceneProps = {
   onCellEnter: (row: number, col: number) => void
   onEntityDown: (kind: SceneEntityKind, id: string, floor: string) => void
   onMoveCell: (row: number, col: number) => void
+  inventoryMode?: boolean
+  selectedInventoryNodeId?: string | null
+  stockedInventoryNodeIds?: ReadonlySet<string>
+  onInventoryNodeSelect?: (storageNodeId: string) => void
 }
 
 const HIGHLIGHT = '#fde047'
@@ -65,6 +70,21 @@ function makeSelectProps(
     },
     onPointerOver: () => setHoverEntity(entity.id),
     onPointerOut: () => setHoverEntity(null),
+  }
+}
+
+function makeInventorySelectProps(
+  entity: SceneEntity | undefined,
+  storageNodeIds: ReadonlySet<string>,
+  onInventoryNodeSelect?: (storageNodeId: string) => void,
+): PointerHandlers {
+  if (!entity || entity.kind !== 'node' || !storageNodeIds.has(entity.id) || !onInventoryNodeSelect) return {}
+  return {
+    onPointerDown: (event) => {
+      if (!isLeftButton(event)) return
+      event.stopPropagation()
+      onInventoryNodeSelect(entity.id)
+    },
   }
 }
 
@@ -290,6 +310,10 @@ function SceneContent({
   onCellEnter,
   onEntityDown,
   onMoveCell,
+  inventoryMode,
+  selectedInventoryNodeId,
+  storageNodeIds,
+  onInventoryNodeSelect,
 }: {
   spec: SceneSpec
   activeFloor: string
@@ -300,17 +324,22 @@ function SceneContent({
   onCellEnter: (row: number, col: number) => void
   onEntityDown: (kind: SceneEntityKind, id: string, floor: string) => void
   onMoveCell: (row: number, col: number) => void
+  inventoryMode: boolean
+  selectedInventoryNodeId: string | null
+  storageNodeIds: ReadonlySet<string>
+  onInventoryNodeSelect?: (storageNodeId: string) => void
 }) {
   const [hoverCell, setHoverCell] = useState<{ row: number; col: number } | null>(null)
   const [hoverEntity, setHoverEntity] = useState<string | null>(null)
 
-  const canSelect = activeTool === 'select'
+  const canSelect = activeTool === 'select' && !inventoryMode
   const activeFloorIndex = Math.max(0, spec.floors.indexOf(activeFloor))
   const activeFloorY = floorPlaneY(activeFloorIndex)
   const gridPositions = useMemo(() => buildGridPositions(spec.cols, spec.rows), [spec.cols, spec.rows])
 
   const highlightIds = useMemo(() => {
     const ids = new Set<string>()
+    if (selectedInventoryNodeId) ids.add(selectedInventoryNodeId)
     if (!selection) return ids
     if (selection.kind === 'cell' || selection.kind === 'node') {
       ids.add(selection.id)
@@ -340,7 +369,7 @@ function SceneContent({
       }
     }
     return ids
-  }, [selection, spec])
+  }, [selectedInventoryNodeId, selection, spec])
 
   const marqueeCenter =
     marquee && marquee.row1 >= marquee.row0 && marquee.col1 >= marquee.col0
@@ -420,7 +449,9 @@ function SceneContent({
                 box={item}
                 highlighted={highlightIds.has(item.key)}
                 hovered={hoverEntity === item.entity?.id}
-                selectProps={makeSelectProps(canSelect, item.entity, onEntityDown, setHoverEntity)}
+                selectProps={inventoryMode
+                  ? makeInventorySelectProps(item.entity, storageNodeIds, onInventoryNodeSelect)
+                  : makeSelectProps(canSelect, item.entity, onEntityDown, setHoverEntity)}
               />
             )
         }
@@ -518,8 +549,16 @@ export default function Topology3DScene({
   onCellEnter,
   onEntityDown,
   onMoveCell,
+  inventoryMode = false,
+  selectedInventoryNodeId = null,
+  stockedInventoryNodeIds = new Set<string>(),
+  onInventoryNodeSelect,
 }: Topology3DSceneProps) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
+  const storageNodeIds = useMemo(
+    () => new Set(topology.nodes.filter((node) => node.type === 'storage').map((node) => node.id)),
+    [topology.nodes],
+  )
 
   return (
     <Canvas
@@ -540,7 +579,19 @@ export default function Topology3DScene({
         onCellEnter={onCellEnter}
         onEntityDown={onEntityDown}
         onMoveCell={onMoveCell}
+        inventoryMode={inventoryMode}
+        selectedInventoryNodeId={selectedInventoryNodeId}
+        storageNodeIds={storageNodeIds}
+        onInventoryNodeSelect={onInventoryNodeSelect}
       />
+      {inventoryMode ? (
+        <InventoryOverlay
+          topology={topology}
+          activeFloor={activeFloor}
+          selectedStorageNodeId={selectedInventoryNodeId}
+          stockedStorageNodeIds={stockedInventoryNodeIds}
+        />
+      ) : null}
       <OrbitControls
         makeDefault
         target={spec.camera.target}
