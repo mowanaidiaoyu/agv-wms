@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../lib/api'
-import type { InventorySummary, StorageAccessAudit, StorageAccessCandidateList, StorageInventoryLocation } from './types'
+import type { CtuRoadSemanticAudit, InventorySummary, StorageAccessAudit, StorageAccessCandidateList, StorageInventoryLocation } from './types'
 import { StorageInventoryPanel } from './StorageInventoryPanel'
 
 vi.mock('../../lib/api', () => ({
@@ -14,6 +14,8 @@ vi.mock('../../lib/api', () => ({
     previewSyntheticInventorySupplement: vi.fn(),
     supplementSyntheticInventory: vi.fn(),
     configureStorageAccessMapping: vi.fn(),
+    listCtuRoadDrafts: vi.fn(),
+    createCtuRoadDraft: vi.fn(),
   },
 }))
 
@@ -55,12 +57,18 @@ const empty = location('storage-empty', 'shuttle', null)
 
 function renderPanel(
   selectedStorageNodeId: string | null = null,
-  access?: { audit: StorageAccessAudit; candidates: StorageAccessCandidateList; selectedAccessCellId: string },
+  access?: {
+    audit: StorageAccessAudit
+    candidates: StorageAccessCandidateList
+    selectedAccessCellId: string
+    ctuRoadAudit?: CtuRoadSemanticAudit
+  },
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   const onSelectStorageNode = vi.fn()
   const onLocateStorageNode = vi.fn()
   const onLocateAccessCell = vi.fn()
+  const onToggleRoadSemanticOverlay = vi.fn()
   const view = render(
     <QueryClientProvider client={queryClient}>
       <StorageInventoryPanel
@@ -73,13 +81,16 @@ function renderPanel(
         accessCandidates={access?.candidates}
         selectedAccessCellId={access?.selectedAccessCellId}
         onSelectAccessCandidate={vi.fn()}
+        ctuRoadAudit={access?.ctuRoadAudit}
+        onToggleRoadSemanticOverlay={onToggleRoadSemanticOverlay}
       />
     </QueryClientProvider>,
   )
-  return { ...view, onSelectStorageNode, onLocateStorageNode, onLocateAccessCell }
+  return { ...view, onSelectStorageNode, onLocateStorageNode, onLocateAccessCell, onToggleRoadSemanticOverlay }
 }
 
 beforeEach(() => {
+  vi.clearAllMocks()
   vi.mocked(api.getInventorySummary).mockResolvedValue(summary)
   vi.mocked(api.listInventoryLocations).mockResolvedValue([positive, zero, empty])
   vi.mocked(api.getInventoryLocation).mockImplementation(async (_topologyId, nodeId) => (
@@ -99,6 +110,7 @@ beforeEach(() => {
     topology_id: 'topology-a', storage_node_id: 'storage-a', access_cell_id: 'cell-r1-c1',
     status: 'configured', source: 'manual_verified', validated_at: '2026-10-20T00:00:00Z',
   })
+  vi.mocked(api.listCtuRoadDrafts).mockResolvedValue([])
 })
 
 describe('StorageInventoryPanel', () => {
@@ -163,5 +175,59 @@ describe('StorageInventoryPanel', () => {
     expect(save).toBeEnabled()
     fireEvent.click(save)
     await waitFor(() => expect(api.configureStorageAccessMapping).toHaveBeenCalledWith('topology-a', 'storage-a', 'cell-r1-c1'))
+  })
+
+  it('keeps the CTU trial area unverified while saving and exporting an isolated draft', async () => {
+    const audit: StorageAccessAudit = {
+      topology_id: 'topology-a', topology_version: '2.0.0', storage_location_count: 3,
+      eligible_location_count: 0, review_required_location_count: 0, unmappable_location_count: 3,
+      configured_mapping_count: 0, invalid_mapping_count: 0, reason_counts: { NO_ADJACENT_REAL_ROAD: 3 },
+    }
+    const candidates: StorageAccessCandidateList = {
+      topology_id: 'topology-a', topology_version: '2.0.0', storage_node_id: 'storage-a',
+      eligible_count: 0, review_required_count: 0, rejected_count: 0, candidates: [],
+    }
+    const ctuRoadAudit: CtuRoadSemanticAudit = {
+      topology_id: 'topology-a', topology_revision: '2.0.0', vehicle_type: 'ctu',
+      render_contract: { road_cell_color: '#2e3a52', ctu_zone_geometry_color: '#0e7490', shuttle_aisle_color: '#3a4f6e', color_grants_traversability: false },
+      road_counts: { total: 12, ctu: 1, shuttle: 8, unassigned: 3, other: 0, invalid: 0 },
+      road_components: { 'unassigned-component-1': 3 },
+      road_cells: [], ctu_road_overlap_storage_count: 1, ctu_road_eligible_count: 0,
+      storage_node_count: 3, ctu_storage_node_count: 3, stable_ctu_storage_geometry_count: 3,
+      pick_face_declared_count: 0, ctu_vehicle_footprint_declared: false, formal_access_cell_count: 0,
+      saved_draft_count: 0, warnings: ['颜色不授予权限'],
+      trial_area: {
+        draft_key: 'trial', status: 'UNVERIFIED', review_status: 'draft', vehicle_type: 'ctu', floor: '1F',
+        zone_ids: ['zone-ctu'], road_class: 'unassigned', road_cell_ids: ['cell-r4-c0', 'cell-r4-c1', 'cell-r4-c2'],
+        road_component_id: 'unassigned-component-1', vehicle_start_cell_id: 'cell-r4-c0',
+        storage_node_ids: ['storage-a', 'storage-zero', 'storage-empty'], pick_face: 'unknown', access_cell_id: null,
+        mapping_source: 'topology_audit_draft', eligible_for_planning: false, reasons: ['等待 B 审核'],
+      },
+    }
+    vi.mocked(api.createCtuRoadDraft).mockResolvedValue({
+      contract_version: 'ctu-road-pick-contract/v1', draft_id: 'draft-1', topology_id: 'topology-a',
+      topology_revision: '2.0.0', zone_id: 'zone-ctu', zone_ids: ['zone-ctu'],
+      road_cell_ids: ctuRoadAudit.trial_area!.road_cell_ids, vehicle_type: 'ctu', floor: '1F', traversability: 'unverified',
+      road_connectivity: { component_id: 'unassigned-component-1', cell_count: 3 },
+      storage_node_ids: ctuRoadAudit.trial_area!.storage_node_ids, pick_face: 'unknown', access_cell_id: null,
+      vehicle_start_cell_id: 'cell-r4-c0', mapping_source: 'topology_audit_draft', review_status: 'draft',
+      eligible_for_planning: false, reviewer_required: 'researcher_b', note: '等待研究生 B 审核', reasons: ['等待 B 审核'],
+      created_at: '2026-10-20T00:00:00Z', updated_at: '2026-10-20T00:00:00Z', version_status: 'current',
+    })
+    const callbacks = renderPanel('storage-a', { audit, candidates, selectedAccessCellId: '', ctuRoadAudit })
+
+    expect(await screen.findByRole('region', { name: 'CTU 道路语义审计' })).toHaveTextContent('UNVERIFIED')
+    expect(screen.getByText('该草案尚未经过研究生 B 审核，不能用于正式规划。')).toBeInTheDocument()
+    const exportLink = screen.getByRole('link', { name: '导出待 B 审核清单' })
+    expect(exportLink).toHaveAttribute('download', 'ctu-road-review-2.0.0.json')
+    expect(exportLink.getAttribute('href')).toContain('data:application/json')
+    fireEvent.click(screen.getByRole('button', { name: '高亮道路语义图层' }))
+    expect(callbacks.onToggleRoadSemanticOverlay).toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '定位试验区起点' }))
+    expect(callbacks.onLocateAccessCell).toHaveBeenCalledWith('cell-r4-c0')
+    fireEvent.click(screen.getByRole('button', { name: '保存独立审核草案' }))
+    await waitFor(() => expect(api.createCtuRoadDraft).toHaveBeenCalledWith('topology-a', '最小 CTU 取货试验区，等待研究生 B 审核'))
+    expect(await screen.findByRole('status')).toHaveTextContent('状态仍为 draft')
+    expect(api.configureStorageAccessMapping).not.toHaveBeenCalled()
   })
 })

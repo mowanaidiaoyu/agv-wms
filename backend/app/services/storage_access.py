@@ -108,7 +108,9 @@ def evaluate_access_candidate(
     cell_zone = zones.get(cell.get("zoneId"))
     if not node_zone or node_zone.get("type") != "ctu":
         reject("STORAGE_NOT_IN_CTU_ZONE", "库位不属于真实 CTU 库区。")
-    if cell_zone and cell_zone.get("type") != "ctu":
+    if not cell_zone:
+        reject("ACCESS_ZONE_UNASSIGNED", "候选道路尚未归属 CTU 库区，只能进入审核草案，不能保存为正式映射。")
+    elif cell_zone.get("type") != "ctu":
         reject("ACCESS_IN_NON_CTU_ZONE", "候选道路属于非 CTU 库区。")
 
     if int(cell["row"]) == int(node["row"]) and int(cell["col"]) == int(node["col"]):
@@ -137,14 +139,10 @@ def evaluate_access_candidate(
     hard_rejection_codes = {
         "STORAGE_NODE_MISSING", "ACCESS_CELL_MISSING", "ACCESS_CELL_NOT_ROAD", "ACCESS_FLOOR_MISMATCH",
         "STORAGE_NOT_IN_CTU_ZONE", "ACCESS_IN_NON_CTU_ZONE", "ACCESS_OVERLAPS_STORAGE",
-        "ACCESS_OCCUPIED_BY_STORAGE", "ACCESS_NOT_ON_PICK_FACE", "ACCESS_ROAD_ISOLATED",
+        "ACCESS_ZONE_UNASSIGNED", "ACCESS_OCCUPIED_BY_STORAGE", "ACCESS_NOT_ON_PICK_FACE", "ACCESS_ROAD_ISOLATED",
     }
     if any(code in hard_rejection_codes for code in reason_codes):
         status: CandidateStatus = "rejected"
-    elif not cell_zone:
-        status = "review_required"
-        reason_codes.append("ACCESS_ZONE_UNASSIGNED")
-        reasons.append("道路 Cell 尚未归属 CTU 库区，需要先核实并补充拓扑空间语义。")
     elif not orientation_known:
         status = "review_required"
         reason_codes.append("RACK_FACE_UNDECLARED")

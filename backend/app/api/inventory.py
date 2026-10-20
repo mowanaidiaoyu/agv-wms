@@ -7,6 +7,9 @@ from ..inventory_schemas import (
     AccessCandidateList,
     AccessMapping,
     AccessMappingRequest,
+    CtuRoadSemanticAudit,
+    CtuTrialDraft,
+    CtuTrialDraftRequest,
     InventorySummary,
     StorageLocationInventory,
     SyntheticInventorySeedRequest,
@@ -117,6 +120,30 @@ def supplement_synthetic_inventory(payload: SyntheticInventorySupplementRequest)
             fill_all=payload.fill_all,
             seed=payload.seed,
         )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ctu-road-audit", response_model=CtuRoadSemanticAudit)
+def audit_ctu_road_semantics(topology_id: str = Query(min_length=1)):
+    try:
+        return service().audit_ctu_road_semantics(topology_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/ctu-road-drafts", response_model=list[CtuTrialDraft])
+def list_ctu_road_drafts(topology_id: str = Query(min_length=1)):
+    try:
+        return service().list_ctu_topology_drafts(topology_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/ctu-road-drafts", response_model=CtuTrialDraft)
+def create_ctu_road_draft(payload: CtuTrialDraftRequest):
+    try:
+        return service().create_ctu_trial_draft(payload.topology_id, payload.note)
     except Exception as exc:
         raise _translate_error(exc) from exc
 

@@ -87,6 +87,7 @@ export function PathDemoPage() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
   const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
   const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
+  const [roadSemanticOverlayEnabled, setRoadSemanticOverlayEnabled] = useState(false)
   const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
   const [startCellId, setStartCellId] = useState('')
   const [goalCellId, setGoalCellId] = useState('')
@@ -129,6 +130,11 @@ export function PathDemoPage() {
     queryKey: ['storage-access-candidates', topologyId, selectedInventoryNodeId],
     queryFn: () => api.getStorageAccessCandidates(topologyId, selectedInventoryNodeId!),
     enabled: workspaceMode === 'inventory' && Boolean(topologyId && selectedInventoryNodeId),
+  })
+  const ctuRoadAuditQuery = useQuery({
+    queryKey: ['ctu-road-audit', topologyId],
+    queryFn: () => api.getCtuRoadSemanticAudit(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
   })
   const stockedInventoryNodeIds = useMemo(
     () => new Set(
@@ -837,6 +843,9 @@ export function PathDemoPage() {
               accessCandidatesError={storageAccessCandidatesQuery.isError ? String(storageAccessCandidatesQuery.error) : null}
               selectedAccessCellId={selectedAccessCellId}
               onSelectAccessCandidate={setSelectedAccessCellId}
+              ctuRoadAudit={ctuRoadAuditQuery.data}
+              roadSemanticOverlayEnabled={roadSemanticOverlayEnabled}
+              onToggleRoadSemanticOverlay={() => setRoadSemanticOverlayEnabled((enabled) => !enabled)}
             />
           )}
         </aside>
@@ -871,6 +880,7 @@ export function PathDemoPage() {
                   setSelectedAccessCellId(accessCellId)
                   locateAccessCell(accessCellId)
                 }}
+                roadSemanticCells={roadSemanticOverlayEnabled ? ctuRoadAuditQuery.data?.road_cells ?? [] : []}
               />
             </Suspense>
           ) : <div className="path-demo-empty">正在读取拓扑…</div>}

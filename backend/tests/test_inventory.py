@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.core.db import get_conn, init_db, utc_now
 from app.core.repository import Repository
 from app.main import app
 from app.services.inventory import AccessMappingValidationError, InventoryConflictError, InventoryService
+from app.services.ctu_topology_audit import audit_ctu_topology
 from app.services.storage_access import audit_access_candidates, evaluate_access_candidate
 
 
@@ -441,6 +443,13 @@ def test_access_candidate_rejects_blocked_cells_and_roads_across_racks():
     assert across_rack["status"] == "rejected"
     assert "ACCESS_NOT_ON_PICK_FACE" in across_rack["reason_codes"]
 
+    topology["cells"].append(
+        {"id": "cell-r3-c3", "floor": "1F", "row": 3, "col": 3, "type": "road", "zoneId": None, "cost": 1, "walkable": True}
+    )
+    unassigned = evaluate_access_candidate(topology, "storage-c", "cell-r3-c3")
+    assert unassigned["status"] == "rejected"
+    assert "ACCESS_ZONE_UNASSIGNED" in unassigned["reason_codes"]
+
 
 def test_unconfigured_storage_cannot_plan_pick_path_and_reviewed_mapping_uses_road_only(repository: Repository):
     service = InventoryService(repository)
@@ -473,3 +482,107 @@ def test_real_666_has_no_provable_or_reviewable_access_candidate():
     assert audit["review_required_location_count"] == 0
     assert audit["unmappable_location_count"] == 2496
     assert audit["reason_counts"]["NO_ADJACENT_REAL_ROAD"] == 2495
+
+
+def test_real_666_ctu_road_semantics_are_classified_without_color_inference():
+    topology_path = Path(__file__).resolve().parents[2] / "docs" / "topologies" / "666.json"
+    topology = json.loads(topology_path.read_text(encoding="utf-8"))
+    audit = audit_ctu_topology(topology)
+
+    assert audit["render_contract"]["color_grants_traversability"] is False
+    assert audit["road_counts"] == {
+        "total": 1437,
+        "ctu": 1,
+        "shuttle": 1416,
+        "unassigned": 20,
+        "other": 0,
+        "invalid": 0,
+    }
+    roads = {item["road_cell_id"]: item for item in audit["road_cells"]}
+    assert roads["cell-r37-c85"]["road_class"] == "ctu"
+    assert roads["cell-r37-c85"]["eligible_for_ctu"] is False
+    assert roads["cell-r68-c8"]["road_class"] == "unassigned"
+    assert roads["cell-r68-c8"]["eligible_for_ctu"] is False
+    assert any(item["road_class"] == "shuttle" and not item["eligible_for_ctu"] for item in roads.values())
+    assert audit["ctu_road_overlap_storage_count"] == 1
+    assert audit["ctu_road_eligible_count"] == 0
+    assert audit["pick_face_declared_count"] == 0
+    assert audit["ctu_vehicle_footprint_declared"] is False
+    assert audit["storage_node_count"] == 2496
+    assert audit["stable_ctu_storage_geometry_count"] == 2496
+
+
+def test_real_666_trial_area_is_unverified_and_uses_only_existing_entities(tmp_path: Path):
+    topology_path = Path(__file__).resolve().parents[2] / "docs" / "topologies" / "666.json"
+    file_hash_before = hashlib.sha256(topology_path.read_bytes()).hexdigest()
+    topology = json.loads(topology_path.read_text(encoding="utf-8"))
+    repository = Repository(tmp_path / "ctu-draft.db")
+    repository.upsert_topology(topology["id"], topology["name"], topology)
+    service = InventoryService(repository)
+    before_summary = service.summary(topology["id"])
+    before_topology = repository.get_topology(topology["id"])
+
+    audit = service.audit_ctu_road_semantics(topology["id"])
+    trial = audit["trial_area"]
+    assert trial["status"] == "UNVERIFIED"
+    assert trial["review_status"] == "draft"
+    assert trial["eligible_for_planning"] is False
+    assert len(trial["storage_node_ids"]) == 5
+    assert trial["road_cell_ids"] == [
+        "cell-r68-c8", "cell-r68-c9", "cell-r68-c10", "cell-r68-c11",
+        "cell-r69-c8", "cell-r69-c9", "cell-r69-c10", "cell-r69-c11",
+    ]
+    known_cells = {cell["id"] for cell in topology["cells"]}
+    known_nodes = {node["id"] for node in topology["nodes"]}
+    assert set(trial["road_cell_ids"]) <= known_cells
+    assert set(trial["storage_node_ids"]) <= known_nodes
+
+    draft = service.create_ctu_trial_draft(topology["id"], "等待 B 审核")
+    assert draft["review_status"] == "draft"
+    assert draft["traversability"] == "unverified"
+    assert draft["pick_face"] == "unknown"
+    assert draft["access_cell_id"] is None
+    assert draft["eligible_for_planning"] is False
+    assert draft["version_status"] == "current"
+    assert service.create_ctu_trial_draft(topology["id"])["draft_id"] == draft["draft_id"]
+    assert len(service.list_ctu_topology_drafts(topology["id"])) == 1
+    assert service.summary(topology["id"]) == before_summary
+    assert repository.get_topology(topology["id"]) == before_topology
+    assert hashlib.sha256(topology_path.read_bytes()).hexdigest() == file_hash_before
+
+    changed = json.loads(json.dumps(topology))
+    changed["meta"]["version"] = "2.0.1"
+    repository.upsert_topology(changed["id"], changed["name"], changed)
+    assert service.list_ctu_topology_drafts(topology["id"])[0]["version_status"] == "topology_version_mismatch"
+
+
+def test_ctu_road_audit_and_draft_api_are_read_only_for_formal_mappings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    topology = inventory_topology()
+    topology["cells"].extend([
+        {"id": "cell-r4-c0", "floor": "1F", "row": 4, "col": 0, "type": "road", "zoneId": None, "cost": 1, "walkable": True},
+        {"id": "cell-r4-c1", "floor": "1F", "row": 4, "col": 1, "type": "road", "zoneId": None, "cost": 1, "walkable": True},
+        {"id": "cell-r4-c2", "floor": "1F", "row": 4, "col": 2, "type": "road", "zoneId": None, "cost": 1, "walkable": True},
+    ])
+    repository = Repository(tmp_path / "ctu-draft-api.db")
+    repository.upsert_topology(topology["id"], topology["name"], topology)
+    monkeypatch.setattr(inventory_api, "repo", repository)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/inventory/ctu-road-audit", params={"topology_id": topology["id"]})
+    assert response.status_code == 200
+    assert response.json()["road_counts"]["unassigned"] == 3
+    created = client.post(
+        "/api/v1/inventory/ctu-road-drafts",
+        json={"topology_id": topology["id"], "note": "B review"},
+    )
+    assert created.status_code == 200
+    assert created.json()["review_status"] == "draft"
+    listed = client.get("/api/v1/inventory/ctu-road-drafts", params={"topology_id": topology["id"]})
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    with get_conn(repository.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM storage_access_mappings").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM warehouse_inventory").fetchone()[0] == 0

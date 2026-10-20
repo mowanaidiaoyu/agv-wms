@@ -4,7 +4,7 @@ import { DoubleSide, Object3D, type InstancedMesh } from 'three'
 import { floorPlaneY, worldX, worldZ } from '../../lib/topology3d'
 import { floorsOf } from '../../lib/topology'
 import type { TopologyPayload } from '../../types'
-import type { StorageAccessCandidate } from './types'
+import type { CtuRoadSemanticCell, StorageAccessCandidate } from './types'
 
 interface InventoryOverlayProps {
   topology: TopologyPayload
@@ -14,6 +14,40 @@ interface InventoryOverlayProps {
   accessCandidates?: StorageAccessCandidate[]
   selectedAccessCellId?: string | null
   onAccessCandidateSelect?: (accessCellId: string) => void
+  roadSemanticCells?: CtuRoadSemanticCell[]
+}
+
+function RoadSemanticInstances({
+  cells,
+  color,
+  floorY,
+  cols,
+  rows,
+}: {
+  cells: CtuRoadSemanticCell[]
+  color: string
+  floorY: number
+  cols: number
+  rows: number
+}) {
+  const meshRef = useRef<InstancedMesh>(null)
+  const matrixObject = useMemo(() => new Object3D(), [])
+  useLayoutEffect(() => {
+    if (!meshRef.current) return
+    cells.forEach((cell, index) => {
+      matrixObject.position.set(worldX(cell.col, cols), floorY + 0.29, worldZ(cell.row, rows))
+      matrixObject.updateMatrix()
+      meshRef.current!.setMatrixAt(index, matrixObject.matrix)
+    })
+    meshRef.current.instanceMatrix.needsUpdate = true
+  }, [cells, cols, floorY, matrixObject, rows])
+  if (!cells.length) return null
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, cells.length]} raycast={() => null}>
+      <boxGeometry args={[0.76, 0.025, 0.76]} />
+      <meshBasicMaterial color={color} transparent opacity={0.58} depthWrite={false} />
+    </instancedMesh>
+  )
 }
 
 /** Lightweight scene markers: no permanent text and no duplicate rack geometry. */
@@ -25,6 +59,7 @@ export function InventoryOverlay({
   accessCandidates = [],
   selectedAccessCellId = null,
   onAccessCandidateSelect,
+  roadSemanticCells = [],
 }: InventoryOverlayProps) {
   const floorY = floorPlaneY(Math.max(0, floorsOf(topology).indexOf(activeFloor)))
   const markers = useMemo(
@@ -39,6 +74,10 @@ export function InventoryOverlay({
   const stockedNodes = markers.filter((node) => node.id !== selectedStorageNodeId)
   const instancesRef = useRef<InstancedMesh>(null)
   const matrixObject = useMemo(() => new Object3D(), [])
+  const semanticCells = useMemo(
+    () => roadSemanticCells.filter((cell) => cell.floor === activeFloor),
+    [activeFloor, roadSemanticCells],
+  )
 
   useLayoutEffect(() => {
     if (!instancesRef.current) return
@@ -56,6 +95,34 @@ export function InventoryOverlay({
 
   return (
     <group>
+      <RoadSemanticInstances
+        cells={semanticCells.filter((cell) => cell.road_class === 'ctu')}
+        color="#22d3ee"
+        floorY={floorY}
+        cols={topology.grid.cols}
+        rows={topology.grid.rows}
+      />
+      <RoadSemanticInstances
+        cells={semanticCells.filter((cell) => cell.road_class === 'shuttle')}
+        color="#f97316"
+        floorY={floorY}
+        cols={topology.grid.cols}
+        rows={topology.grid.rows}
+      />
+      <RoadSemanticInstances
+        cells={semanticCells.filter((cell) => cell.road_class === 'unassigned')}
+        color="#facc15"
+        floorY={floorY}
+        cols={topology.grid.cols}
+        rows={topology.grid.rows}
+      />
+      <RoadSemanticInstances
+        cells={semanticCells.filter((cell) => cell.road_class === 'other' || cell.road_class === 'invalid')}
+        color="#ef4444"
+        floorY={floorY}
+        cols={topology.grid.cols}
+        rows={topology.grid.rows}
+      />
       {stockedNodes.length ? (
         <instancedMesh ref={instancesRef} args={[undefined, undefined, stockedNodes.length]} raycast={() => null}>
           <sphereGeometry args={[0.09, 10, 8]} />

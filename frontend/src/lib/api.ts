@@ -15,6 +15,8 @@ import type {
   HeatPredictionResponse,
 } from '../features/sku-heat/types'
 import type {
+  CtuRoadSemanticAudit,
+  CtuTrialDraft,
   InventorySummary,
   InventoryZoneSummary,
   StorageAccessAudit,
@@ -193,6 +195,18 @@ export const api = {
   },
   getStorageAccessAudit(topologyId: string) {
     return request<StorageAccessAudit>(`/inventory/access-mappings/audit?topology_id=${encodeURIComponent(topologyId)}`)
+  },
+  getCtuRoadSemanticAudit(topologyId: string) {
+    return request<CtuRoadSemanticAudit>(`/inventory/ctu-road-audit?topology_id=${encodeURIComponent(topologyId)}`)
+  },
+  listCtuRoadDrafts(topologyId: string) {
+    return request<CtuTrialDraft[]>(`/inventory/ctu-road-drafts?topology_id=${encodeURIComponent(topologyId)}`)
+  },
+  createCtuRoadDraft(topologyId: string, note: string | null = null) {
+    return request<CtuTrialDraft>('/inventory/ctu-road-drafts', {
+      method: 'POST',
+      body: JSON.stringify({ topology_id: topologyId, note }),
+    })
   },
   getStorageAccessCandidates(topologyId: string, storageNodeId: string, limit = 12) {
     const query = new URLSearchParams({ topology_id: topologyId, limit: String(limit) })

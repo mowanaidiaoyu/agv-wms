@@ -2552,6 +2552,83 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.inventory-road-audit {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 0.75rem;
+  background: rgba(8, 47, 73, 0.22);
+}
+
+.inventory-road-audit-heading,
+.inventory-trial-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.inventory-unverified {
+  padding: 0.15rem 0.42rem;
+  border: 1px solid rgba(250, 204, 21, 0.48);
+  border-radius: 999px;
+  color: #fde047;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+}
+
+.inventory-road-counts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.inventory-road-counts span,
+.inventory-road-legend span {
+  padding: 0.38rem 0.48rem;
+  border-radius: 0.45rem;
+  background: rgba(15, 23, 42, 0.62);
+  font-size: 0.74rem;
+}
+
+.inventory-road-counts strong {
+  margin-left: 0.25rem;
+  color: #f8fafc;
+}
+
+.inventory-road-legend {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.inventory-road-legend .is-ctu { color: #22d3ee; }
+.inventory-road-legend .is-shuttle { color: #fb923c; }
+.inventory-road-legend .is-unassigned { color: #fde047; }
+
+.inventory-trial-area {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.65rem;
+  border: 1px dashed rgba(250, 204, 21, 0.4);
+  border-radius: 0.6rem;
+  background: rgba(66, 32, 6, 0.22);
+}
+
+.inventory-trial-area > span,
+.inventory-trial-area > small {
+  color: #cbd5e1;
+  font-size: 0.73rem;
+}
+
+.inventory-trial-actions a.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
 .inventory-access-audit strong {
   grid-column: 1 / -1;
 }

@@ -198,6 +198,91 @@ class StorageAccessPathResult(BaseModel):
     execution_status: Literal["planning_preview_only"]
 
 
+class CtuRoadSemanticCell(BaseModel):
+    road_cell_id: str
+    floor: str
+    row: int
+    col: int
+    zone_id: str | None
+    road_class: Literal["ctu", "shuttle", "unassigned", "other", "invalid"]
+    traversability: Literal["walkable", "blocked"]
+    component_id: str
+    component_size: int = Field(ge=1)
+    eligible_for_ctu: bool
+
+
+class CtuTrialArea(BaseModel):
+    draft_key: str
+    status: Literal["UNVERIFIED"]
+    review_status: Literal["draft"]
+    vehicle_type: Literal["ctu"]
+    floor: str
+    zone_ids: list[str]
+    road_class: str
+    road_cell_ids: list[str]
+    road_component_id: str
+    vehicle_start_cell_id: str
+    storage_node_ids: list[str]
+    pick_face: Literal["unknown"]
+    access_cell_id: None = None
+    mapping_source: Literal["topology_audit_draft"]
+    eligible_for_planning: Literal[False]
+    reasons: list[str]
+
+
+class CtuRoadSemanticAudit(BaseModel):
+    topology_id: str
+    topology_revision: str
+    vehicle_type: Literal["ctu"]
+    render_contract: dict[str, str | bool]
+    road_counts: dict[str, int]
+    road_components: dict[str, int]
+    road_cells: list[CtuRoadSemanticCell]
+    ctu_road_overlap_storage_count: int = Field(ge=0)
+    ctu_road_eligible_count: int = Field(ge=0)
+    storage_node_count: int = Field(ge=0)
+    ctu_storage_node_count: int = Field(ge=0)
+    stable_ctu_storage_geometry_count: int = Field(ge=0)
+    pick_face_declared_count: int = Field(ge=0)
+    ctu_vehicle_footprint_declared: bool
+    formal_access_cell_count: int = Field(ge=0)
+    trial_area: CtuTrialArea | None
+    warnings: list[str]
+    saved_draft_count: int = Field(ge=0)
+
+
+class CtuTrialDraftRequest(BaseModel):
+    topology_id: str = Field(min_length=1)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class CtuTrialDraft(BaseModel):
+    contract_version: Literal["ctu-road-pick-contract/v1"]
+    draft_id: str
+    topology_id: str
+    topology_revision: str
+    zone_id: str | None
+    zone_ids: list[str]
+    road_cell_ids: list[str]
+    vehicle_type: Literal["ctu"]
+    floor: str
+    traversability: Literal["unverified"]
+    road_connectivity: dict[str, str | int]
+    storage_node_ids: list[str]
+    pick_face: Literal["unknown"]
+    access_cell_id: None = None
+    vehicle_start_cell_id: str
+    mapping_source: Literal["topology_audit_draft"]
+    review_status: Literal["draft", "verified", "rejected"]
+    eligible_for_planning: Literal[False]
+    reviewer_required: Literal["researcher_b"]
+    note: str | None
+    reasons: list[str]
+    created_at: str
+    updated_at: str
+    version_status: Literal["current", "topology_version_mismatch"]
+
+
 # Reserved contracts for C-INV-2/C-INV-3. They are intentionally not exposed as
 # inventory mutation endpoints in this Gate.
 class OrderLineContract(BaseModel):

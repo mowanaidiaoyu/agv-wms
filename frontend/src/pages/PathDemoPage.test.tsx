@@ -29,6 +29,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     accessCandidates,
     selectedAccessCellId,
     onAccessCandidateSelect,
+    roadSemanticCells,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -47,6 +48,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     accessCandidates?: Array<{ access_cell_id: string }>
     selectedAccessCellId?: string | null
     onAccessCandidateSelect?: (accessCellId: string) => void
+    roadSemanticCells?: Array<{ road_cell_id: string }>
   }) => (
     <div>
       <div
@@ -68,6 +70,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-selected-inventory-node={selectedInventoryNodeId ?? ''}
         data-access-candidates={accessCandidates?.map((candidate) => candidate.access_cell_id).join(',') ?? ''}
         data-selected-access-cell={selectedAccessCellId ?? ''}
+        data-road-semantic-cells={roadSemanticCells?.map((cell) => cell.road_cell_id).join(',') ?? ''}
       />
       <button
         type="button"
@@ -93,6 +96,9 @@ vi.mock('../lib/api', () => ({
     getStorageAccessCandidates: vi.fn(),
     configureStorageAccessMapping: vi.fn(),
     planStorageAccessPath: vi.fn(),
+    getCtuRoadSemanticAudit: vi.fn(),
+    listCtuRoadDrafts: vi.fn(),
+    createCtuRoadDraft: vi.fn(),
   },
 }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
@@ -330,6 +336,18 @@ beforeEach(() => {
       status: 'eligible', reason_codes: ['REAL_CTU_ROAD'], reasons: ['真实可通行 CTU road Cell。'],
     }],
   })
+  vi.mocked(api.getCtuRoadSemanticAudit).mockResolvedValue({
+    topology_id: topology.id, topology_revision: topology.meta.version, vehicle_type: 'ctu',
+    render_contract: { road_cell_color: '#2e3a52', ctu_zone_geometry_color: '#0e7490', shuttle_aisle_color: '#3a4f6e', color_grants_traversability: false },
+    road_counts: { total: 1, ctu: 1, shuttle: 0, unassigned: 0, other: 0, invalid: 0 },
+    road_components: { 'ctu-component-1': 1 },
+    road_cells: [{ road_cell_id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, zone_id: 'zone-ctu', road_class: 'ctu', traversability: 'walkable', component_id: 'ctu-component-1', component_size: 1, eligible_for_ctu: false }],
+    ctu_road_overlap_storage_count: 0, ctu_road_eligible_count: 0,
+    storage_node_count: 1, ctu_storage_node_count: 1, stable_ctu_storage_geometry_count: 1,
+    pick_face_declared_count: 0, ctu_vehicle_footprint_declared: false, formal_access_cell_count: 0,
+    trial_area: null, warnings: ['颜色不授予权限'], saved_draft_count: 0,
+  })
+  vi.mocked(api.listCtuRoadDrafts).mockResolvedValue([])
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
   vi.mocked(pathDemoApi.multiScenarios).mockResolvedValue(multiScenarios)
@@ -652,6 +670,9 @@ describe('PathDemoPage', () => {
     expect(screen.getByText('12', { selector: 'strong' })).toBeInTheDocument()
     expect(screen.getByLabelText('搜索 SKU 或库位')).toBeInTheDocument()
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'true')
+    expect(await screen.findByRole('region', { name: 'CTU 道路语义审计' })).toHaveTextContent('CTU road 1')
+    fireEvent.click(screen.getByRole('button', { name: '高亮道路语义图层' }))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-road-semantic-cells', 'cell-r1-c1')
 
     fireEvent.click(screen.getByTestId('mock-storage-node'))
     expect(await screen.findByText('标准紧固件套装')).toBeInTheDocument()

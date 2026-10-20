@@ -4,7 +4,7 @@ import { useMemo } from 'react'
 import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { InventoryOverlay } from '../inventory/InventoryOverlay'
-import type { StorageAccessCandidate } from '../inventory/types'
+import type { CtuRoadSemanticCell, StorageAccessCandidate } from '../inventory/types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
@@ -132,6 +132,7 @@ export function PathDemo3DScene({
   accessCandidates = [],
   selectedAccessCellId = null,
   onAccessCandidateSelect,
+  roadSemanticCells = [],
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -156,6 +157,7 @@ export function PathDemo3DScene({
   accessCandidates?: StorageAccessCandidate[]
   selectedAccessCellId?: string | null
   onAccessCandidateSelect?: (accessCellId: string) => void
+  roadSemanticCells?: CtuRoadSemanticCell[]
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const storageNodeIds = useMemo(
@@ -206,6 +208,7 @@ export function PathDemo3DScene({
           accessCandidates={accessCandidates}
           selectedAccessCellId={selectedAccessCellId}
           onAccessCandidateSelect={onAccessCandidateSelect}
+          roadSemanticCells={roadSemanticCells}
         />
       ) : null}
       <PathDemo3DOverlay

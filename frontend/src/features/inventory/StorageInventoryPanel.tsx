@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, MapPin, PackageSearch, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api'
 import type {
+  CtuRoadSemanticAudit,
   StorageAccessAudit,
   StorageAccessCandidateList,
   StorageInventoryLocation,
@@ -20,6 +21,9 @@ interface StorageInventoryPanelProps {
   accessCandidatesError?: string | null
   selectedAccessCellId?: string | null
   onSelectAccessCandidate?: (accessCellId: string) => void
+  ctuRoadAudit?: CtuRoadSemanticAudit
+  roadSemanticOverlayEnabled?: boolean
+  onToggleRoadSemanticOverlay?: () => void
 }
 
 function formatSource(source: string): string {
@@ -41,6 +45,9 @@ export function StorageInventoryPanel({
   accessCandidatesError = null,
   selectedAccessCellId = null,
   onSelectAccessCandidate,
+  ctuRoadAudit,
+  roadSemanticOverlayEnabled = false,
+  onToggleRoadSemanticOverlay,
 }: StorageInventoryPanelProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -95,6 +102,18 @@ export function StorageInventoryPanel({
       setReviewConfirmed(false)
     },
   })
+  const draftsQuery = useQuery({
+    queryKey: ['ctu-road-drafts', topologyId],
+    queryFn: () => api.listCtuRoadDrafts(topologyId),
+    enabled: Boolean(topologyId),
+  })
+  const createDraftMutation = useMutation({
+    mutationFn: () => api.createCtuRoadDraft(topologyId, '最小 CTU 取货试验区，等待研究生 B 审核'),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['ctu-road-drafts', topologyId] })
+      await queryClient.invalidateQueries({ queryKey: ['ctu-road-audit', topologyId] })
+    },
+  })
   const resetConfigureAccessMutation = configureAccessMutation.reset
 
   useEffect(() => {
@@ -121,6 +140,30 @@ export function StorageInventoryPanel({
   const selectedCandidate = accessCandidates?.candidates.find(
     (candidate) => candidate.access_cell_id === selectedAccessCellId,
   ) ?? null
+  const auditExportHref = useMemo(() => {
+    if (!ctuRoadAudit) return '#'
+    const reviewPackage = {
+      contract_version: 'ctu-road-pick-contract/v1',
+      topology_id: ctuRoadAudit.topology_id,
+      topology_revision: ctuRoadAudit.topology_revision,
+      review_status: 'draft',
+      eligible_for_planning: false,
+      road_counts: ctuRoadAudit.road_counts,
+      trial_area: ctuRoadAudit.trial_area,
+      warnings: ctuRoadAudit.warnings,
+      reviewer_questions: [
+        '哪些蓝色巷道对应 CTU road？',
+        '通道宽度及车辆占用约束是什么？',
+        '每个货架应从哪一侧取货？',
+        'CTU 停靠时占用哪些道路空间？',
+        '哪些巷道属于同一个可连通区域？',
+        '不同层库位是否共用平面停靠点？',
+        '是否存在额外取货操作距离约束？',
+        '是否需要增加站台或车辆起始节点？',
+      ],
+    }
+    return `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(reviewPackage, null, 2))}`
+  }, [ctuRoadAudit])
 
   return (
     <section className="inventory-panel" aria-label="库位库存">
@@ -137,6 +180,67 @@ export function StorageInventoryPanel({
           <span>当前不可映射 {accessAudit.unmappable_location_count}</span>
           <span>已保存 {accessAudit.configured_mapping_count}</span>
         </div>
+      ) : null}
+
+      {ctuRoadAudit ? (
+        <section className="inventory-road-audit" aria-label="CTU 道路语义审计">
+          <div className="inventory-road-audit-heading">
+            <strong>CTU 道路语义审计</strong>
+            <span className="inventory-unverified">UNVERIFIED</span>
+          </div>
+          <p>颜色仅用于 3D 显示，不授予车辆通行权限。</p>
+          <div className="inventory-road-counts">
+            <span>CTU road <strong>{ctuRoadAudit.road_counts.ctu}</strong></span>
+            <span>四向车 road <strong>{ctuRoadAudit.road_counts.shuttle}</strong></span>
+            <span>未归属 road <strong>{ctuRoadAudit.road_counts.unassigned}</strong></span>
+            <span>可用于 CTU <strong>{ctuRoadAudit.ctu_road_eligible_count}</strong></span>
+          </div>
+          <div className="inventory-road-legend" aria-label="道路语义图例">
+            <span className="is-ctu">CTU road</span>
+            <span className="is-shuttle">四向车 road</span>
+            <span className="is-unassigned">未归属 road</span>
+          </div>
+          <button type="button" className="ghost-button" onClick={onToggleRoadSemanticOverlay}>
+            {roadSemanticOverlayEnabled ? '关闭道路语义图层' : '高亮道路语义图层'}
+          </button>
+          {ctuRoadAudit.trial_area ? (
+            <div className="inventory-trial-area">
+              <strong>最小取货试验区草案</strong>
+              <span>道路 {ctuRoadAudit.trial_area.road_cell_ids.length} 格 · 库位 {ctuRoadAudit.trial_area.storage_node_ids.length} 个</span>
+              <span>起始 Cell：{ctuRoadAudit.trial_area.vehicle_start_cell_id}</span>
+              <span>Pick Face：unknown · Access Cell：未指定</span>
+              <p>该草案尚未经过研究生 B 审核，不能用于正式规划。</p>
+              <div className="inventory-trial-actions">
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => onLocateAccessCell?.(ctuRoadAudit.trial_area!.vehicle_start_cell_id)}
+                >
+                  定位试验区起点
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={createDraftMutation.isPending}
+                  onClick={() => createDraftMutation.mutate()}
+                >
+                  {createDraftMutation.isPending ? '正在保存草案…' : '保存独立审核草案'}
+                </button>
+                <a
+                  className="ghost-button"
+                  href={auditExportHref}
+                  download={`ctu-road-review-${ctuRoadAudit.topology_revision}.json`}
+                >
+                  导出待 B 审核清单
+                </a>
+              </div>
+              <small>状态说明：draft 待审核；verified 才可进入正式映射；rejected 禁止使用。</small>
+              <small>已保存草案：{draftsQuery.data?.length ?? ctuRoadAudit.saved_draft_count}</small>
+              {createDraftMutation.data ? <p className="inventory-access-ok" role="status">草案已隔离保存，状态仍为 draft。</p> : null}
+              {createDraftMutation.isError ? <p className="inventory-warning">草案保存失败：{String(createDraftMutation.error)}</p> : null}
+            </div>
+          ) : <p className="inventory-warning">没有可由现有真实 Road Cell 组成的最小试验区草案。</p>}
+        </section>
       ) : null}
 
       {summary ? (

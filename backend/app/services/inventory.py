@@ -6,8 +6,9 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from ..core.db import get_conn, utc_now
+from ..core.db import decode_json, encode_json, get_conn, utc_now
 from ..core.repository import Repository
+from .ctu_topology_audit import audit_ctu_topology
 from .pathfinding import shortest_path_result
 from .storage_access import access_candidates, audit_access_candidates, evaluate_access_candidate
 
@@ -403,6 +404,97 @@ class InventoryService:
             else:
                 invalid += 1
         return {**audit, "configured_mapping_count": configured, "invalid_mapping_count": invalid}
+
+    def audit_ctu_road_semantics(self, topology_id: str) -> dict[str, Any]:
+        topology = self._topology_payload(self._topology_record(topology_id))
+        audit = audit_ctu_topology(topology)
+        access_audit = self.audit_access_candidates(topology_id)
+        audit["formal_access_cell_count"] = access_audit["configured_mapping_count"]
+        audit["saved_draft_count"] = len(self.list_ctu_topology_drafts(topology_id))
+        return audit
+
+    def create_ctu_trial_draft(self, topology_id: str, note: str | None = None) -> dict[str, Any]:
+        """Persist the deterministic audit proposal without changing topology or access mappings."""
+
+        topology = self._topology_payload(self._topology_record(topology_id))
+        audit = audit_ctu_topology(topology)
+        trial_area = audit.get("trial_area")
+        if not trial_area:
+            raise InventoryConflictError("Topology has no real road component suitable for an audit-only CTU trial draft")
+        version = str(audit["topology_revision"])
+        digest_source = ":".join(
+            [
+                topology_id,
+                version,
+                *trial_area["road_cell_ids"],
+                *trial_area["storage_node_ids"],
+            ]
+        )
+        draft_id = f"ctu-audit-{hashlib.sha256(digest_source.encode()).hexdigest()[:16]}"
+        now = utc_now()
+        payload = {
+            "contract_version": "ctu-road-pick-contract/v1",
+            "draft_id": draft_id,
+            "topology_id": topology_id,
+            "topology_revision": version,
+            "zone_id": trial_area["zone_ids"][0] if len(trial_area["zone_ids"]) == 1 else None,
+            "zone_ids": trial_area["zone_ids"],
+            "road_cell_ids": trial_area["road_cell_ids"],
+            "vehicle_type": "ctu",
+            "floor": trial_area["floor"],
+            "traversability": "unverified",
+            "road_connectivity": {
+                "component_id": trial_area["road_component_id"],
+                "cell_count": len(trial_area["road_cell_ids"]),
+            },
+            "storage_node_ids": trial_area["storage_node_ids"],
+            "pick_face": "unknown",
+            "access_cell_id": None,
+            "vehicle_start_cell_id": trial_area["vehicle_start_cell_id"],
+            "mapping_source": "topology_audit_draft",
+            "review_status": "draft",
+            "eligible_for_planning": False,
+            "reviewer_required": "researcher_b",
+            "note": note,
+            "reasons": trial_area["reasons"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        with get_conn(self.db_path) as conn:
+            existing = conn.execute(
+                "SELECT payload FROM ctu_topology_drafts WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            if existing:
+                return self._draft_payload(topology, decode_json(existing["payload"]))
+            conn.execute(
+                """
+                INSERT INTO ctu_topology_drafts (
+                  draft_id, topology_id, topology_version, review_status, source, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, 'draft', 'topology_audit_draft', ?, ?, ?)
+                """,
+                (draft_id, topology_id, version, encode_json(payload), now, now),
+            )
+        return self._draft_payload(topology, payload)
+
+    def list_ctu_topology_drafts(self, topology_id: str) -> list[dict[str, Any]]:
+        topology = self._topology_payload(self._topology_record(topology_id))
+        with get_conn(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM ctu_topology_drafts WHERE topology_id = ? ORDER BY updated_at DESC, draft_id",
+                (topology_id,),
+            ).fetchall()
+        return [self._draft_payload(topology, decode_json(row["payload"])) for row in rows]
+
+    @staticmethod
+    def _draft_payload(topology: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        current_version = str(topology.get("meta", {}).get("version", "unknown"))
+        return {
+            **payload,
+            "version_status": (
+                "current" if payload.get("topology_revision") == current_version else "topology_version_mismatch"
+            ),
+        }
 
     def plan_storage_access_path(
         self,

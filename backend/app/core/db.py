@@ -122,6 +122,20 @@ def init_db(db_path: Path = DB_PATH) -> None:
               PRIMARY KEY (topology_id, storage_node_id)
             );
 
+            CREATE TABLE IF NOT EXISTS ctu_topology_drafts (
+              draft_id TEXT PRIMARY KEY,
+              topology_id TEXT NOT NULL,
+              topology_version TEXT NOT NULL,
+              review_status TEXT NOT NULL CHECK (review_status IN ('draft', 'verified', 'rejected')),
+              source TEXT NOT NULL,
+              payload TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_ctu_topology_drafts_topology
+              ON ctu_topology_drafts (topology_id, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS inventory_movements (
               event_id TEXT PRIMARY KEY,
               topology_id TEXT NOT NULL,
