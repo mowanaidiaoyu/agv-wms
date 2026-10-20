@@ -34,6 +34,7 @@ import { api } from '../lib/api'
 import { floorPlaneY, worldX, worldZ } from '../lib/topology3d'
 import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPanel'
 import type { StorageInventoryLocation } from '../features/inventory/types'
+import { ShuttleDemoWorkspace } from '../features/shuttle-lift/ShuttleDemoWorkspace'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -55,7 +56,7 @@ const planningStatusLabel = {
 }
 
 type DemoMode = 'single' | 'preset' | 'custom'
-type WorkspaceMode = 'planning' | 'inventory'
+type WorkspaceMode = 'planning' | 'inventory' | 'shuttle'
 type PlanningStatus = keyof typeof planningStatusLabel
 type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
 
@@ -460,12 +461,30 @@ export function PathDemoPage() {
       <header className="path-demo-header">
         <div>
           <p className="eyebrow">Gate C-3D-3 · deterministic space-time path playback</p>
-          <h2>{demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
-          <p>路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。</p>
+          <h2>{workspaceMode === 'shuttle' ? '四向车三层轨道与双提升机演示' : demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
+          <p>{workspaceMode === 'shuttle' ? '路径来自独立 ShuttleGraph；跨层仅能通过程序验证的 Lift-A / Lift-B，本页面不控制真实设备。' : '路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。'}</p>
         </div>
-        <span className="path-demo-mode">CTU · {demoMode === 'single' ? '单车演示模式' : '多车离线演示'}</span>
+        <span className="path-demo-mode">{workspaceMode === 'shuttle' ? 'SHUTTLE · 单车跨层离线演示' : `CTU · ${demoMode === 'single' ? '单车演示模式' : '多车离线演示'}`}</span>
       </header>
 
+      {workspaceMode === 'shuttle' && topologyRecord ? (
+        <ShuttleDemoWorkspace
+          topologyRecord={topologyRecord}
+          topologies={topologiesQuery.data ?? []}
+          onTopologyChange={(nextTopologyId) => {
+            setTopologyId(nextTopologyId)
+            setSelectedInventoryNodeId(null)
+            setSelectedAccessCellId(null)
+            setStartCellId('')
+            setGoalCellId('')
+            setPresetVehicles([])
+            setCustomVehicles([])
+            setRoadSelection(null)
+            invalidatePlan()
+          }}
+          onWorkspaceModeChange={setWorkspaceMode}
+        />
+      ) : (
       <div className="path-demo-layout">
         <aside className="path-demo-panel">
           <label>
@@ -487,7 +506,7 @@ export function PathDemoPage() {
               {(topologiesQuery.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
+          <div className="path-demo-workspace-tabs is-three" role="tablist" aria-label="工作台模式">
             <button
               type="button"
               role="tab"
@@ -505,6 +524,16 @@ export function PathDemoPage() {
                 setRoadSelection(null)
               }}
             >库存查看</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={workspaceMode === 'shuttle'}
+              className={workspaceMode === 'shuttle' ? 'active' : ''}
+              onClick={() => {
+                setWorkspaceMode('shuttle')
+                setRoadSelection(null)
+              }}
+            >四向车跨层</button>
           </div>
           {workspaceMode === 'planning' ? (
             <>
@@ -886,6 +915,7 @@ export function PathDemoPage() {
           ) : <div className="path-demo-empty">正在读取拓扑…</div>}
         </div>
       </div>
+      )}
     </section>
   )
 }

@@ -62,6 +62,7 @@
   border-radius: 9px;
   background: rgba(2, 6, 23, 0.5);
 }
+.path-demo-workspace-tabs.is-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .path-demo-workspace-tabs button {
   padding: 8px;
@@ -373,6 +374,40 @@
   height: 100%;
   color: #94a3b8;
 }
+
+.shuttle-demo-panel { min-width: 0; }
+.shuttle-contract-card {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid rgba(34, 211, 238, 0.35);
+  border-radius: 9px;
+  background: rgba(8, 47, 73, 0.28);
+  color: #cbd5e1;
+  font-size: 12px;
+}
+.shuttle-contract-card strong { color: #67e8f9; font-size: 13px; }
+.shuttle-contract-card p { margin: 2px 0 0; color: #94a3b8; line-height: 1.45; }
+.shuttle-contract-card .is-verified { color: #86efac; }
+.shuttle-contract-card .is-blocked { color: #fda4af; }
+.shuttle-level-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.shuttle-stats dd { max-width: 210px; overflow-wrap: anywhere; }
+.shuttle-lift-label,
+.shuttle-vehicle-label {
+  display: block;
+  padding: 4px 7px;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  color: #fef3c7;
+  background: rgba(69, 26, 3, 0.9);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  user-select: none;
+}
+.shuttle-lift-label.is-active { color: #fef9c3; box-shadow: 0 0 20px rgba(250, 204, 21, 0.8); }
+.shuttle-vehicle-label { border-color: #14b8a6; color: #ccfbf1; background: rgba(4, 47, 46, 0.92); }
 
 @media (max-width: 1050px) {
   .path-demo-layout { grid-template-columns: 1fr; }

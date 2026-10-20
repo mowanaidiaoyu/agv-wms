@@ -5,6 +5,8 @@ import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type Scene
 import type { TopologyPayload } from '../../types'
 import { InventoryOverlay } from '../inventory/InventoryOverlay'
 import type { CtuRoadSemanticCell, StorageAccessCandidate } from '../inventory/types'
+import { ShuttleLift3D } from '../shuttle-lift/ShuttleLift3D'
+import type { ShuttleVisualizationState } from '../shuttle-lift/types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
@@ -133,6 +135,7 @@ export function PathDemo3DScene({
   selectedAccessCellId = null,
   onAccessCandidateSelect,
   roadSemanticCells = [],
+  shuttleVisualization,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -158,6 +161,7 @@ export function PathDemo3DScene({
   selectedAccessCellId?: string | null
   onAccessCandidateSelect?: (accessCellId: string) => void
   roadSemanticCells?: CtuRoadSemanticCell[]
+  shuttleVisualization?: ShuttleVisualizationState
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const storageNodeIds = useMemo(
@@ -220,6 +224,7 @@ export function PathDemo3DScene({
         conflictEvent={conflictEvent}
         conflictWorld={conflictWorld}
       />
+      {shuttleVisualization ? <ShuttleLift3D state={shuttleVisualization} /> : null}
       <RoadCellSelectionLayer
         topology={topology}
         activeFloor={activeFloor}

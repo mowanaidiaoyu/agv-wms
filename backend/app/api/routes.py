@@ -19,12 +19,14 @@ from ..services.inventory import InventoryService
 from .path_demo import router as path_demo_router
 from .sku_algorithm import router as sku_algorithm_router
 from .inventory import router as inventory_router
+from .shuttle import router as shuttle_router
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
 router.include_router(path_demo_router)
 router.include_router(sku_algorithm_router)
 router.include_router(inventory_router)
+router.include_router(shuttle_router)
 
 
 @router.get("/health")

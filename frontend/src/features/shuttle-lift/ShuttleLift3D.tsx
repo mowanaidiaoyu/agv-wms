@@ -1,0 +1,162 @@
+import { Html, Line } from '@react-three/drei'
+import { useLayoutEffect, useMemo, useRef } from 'react'
+import { InstancedMesh, Object3D } from 'three'
+import type { ShuttleLift, ShuttlePlaybackSample, ShuttleTrackNode, ShuttleVisualizationState } from './types'
+
+const LEVEL_COLORS = ['#38bdf8', '#22d3ee', '#818cf8'] as const
+const VEHICLE_CENTER_HEIGHT = 0.22
+
+function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) {
+  const level1Ref = useRef<InstancedMesh>(null)
+  const level2Ref = useRef<InstancedMesh>(null)
+  const level3Ref = useRef<InstancedMesh>(null)
+  const grouped = useMemo(
+    () => ([1, 2, 3] as const).map((level) => state.tracks.filter((node) => node.shuttle_level === level)),
+    [state.tracks],
+  )
+  useLayoutEffect(() => {
+    const object = new Object3D()
+    const meshes = [level1Ref.current, level2Ref.current, level3Ref.current]
+    grouped.forEach((nodes, levelIndex) => {
+      const mesh = meshes[levelIndex]
+      if (!mesh) return
+      nodes.forEach((node, index) => {
+        object.position.set(node.world_x, node.world_y + 0.025, node.world_z)
+        object.updateMatrix()
+        mesh.setMatrixAt(index, object.matrix)
+      })
+      mesh.instanceMatrix.needsUpdate = true
+    })
+  }, [grouped])
+  return (
+    <group>
+      {grouped.map((nodes, index) => (
+        <instancedMesh
+          key={index}
+          ref={index === 0 ? level1Ref : index === 1 ? level2Ref : level3Ref}
+          args={[undefined, undefined, nodes.length]}
+          frustumCulled={false}
+        >
+          <boxGeometry args={[1.58, 0.05, 1.58]} />
+          <meshStandardMaterial
+            color={LEVEL_COLORS[index]}
+            emissive={LEVEL_COLORS[index]}
+            emissiveIntensity={0.34}
+            transparent
+            opacity={0.52}
+            roughness={0.65}
+          />
+        </instancedMesh>
+      ))}
+    </group>
+  )
+}
+function LiftModel({ lift, entrance, sample, selected }: { lift: ShuttleLift; entrance?: ShuttleTrackNode; sample: ShuttlePlaybackSample | null; selected: boolean }) {
+  const entranceNodes = Object.values(lift.level_entrances)
+  const active = sample?.liftId === lift.lift_id && ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift'].includes(sample.phase)
+  const baseY = 1.35
+  const topY = 4.15
+  const platformY = active && sample ? sample.world[1] - VEHICLE_CENTER_HEIGHT : baseY
+  if (!entrance) return null
+  const x = entrance.world_x
+  const z = entrance.world_z
+  const color = selected ? '#facc15' : '#f59e0b'
+  return (
+    <group position={[x, 0, z]}>
+      <mesh position={[0, (baseY + topY) / 2, 0]}>
+        <boxGeometry args={[1.72, topY - baseY + 1.1, 1.72]} />
+        <meshStandardMaterial color={color} wireframe transparent opacity={selected ? 0.9 : 0.55} />
+      </mesh>
+      <mesh position={[0, platformY, 0]}>
+        <boxGeometry args={[1.5, 0.14, 1.5]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={active ? 0.75 : 0.28} metalness={0.42} />
+      </mesh>
+      <Html position={[0, topY + 0.85, 0]} center distanceFactor={18} style={{ pointerEvents: 'none' }}>
+        <span className={`shuttle-lift-label ${active ? 'is-active' : ''}`}>{lift.label} · {entranceNodes.length} 层</span>
+      </Html>
+    </group>
+  )
+}
+
+function ShuttleVehicle({ sample }: { sample: ShuttlePlaybackSample }) {
+  return (
+    <group position={sample.world} rotation={[0, sample.headingRadians, 0]}>
+      <mesh castShadow>
+        <boxGeometry args={[0.92, 0.22, 0.82]} />
+        <meshStandardMaterial color="#14b8a6" emissive="#0f766e" emissiveIntensity={0.45} metalness={0.38} roughness={0.4} />
+      </mesh>
+      <mesh position={[0, 0.16, 0]} castShadow>
+        <boxGeometry args={[0.66, 0.12, 0.56]} />
+        <meshStandardMaterial color="#dbeafe" metalness={0.55} roughness={0.3} />
+      </mesh>
+      <mesh position={[0, 0.25, 0]}>
+        <cylinderGeometry args={[0.08, 0.08, 0.12, 12]} />
+        <meshStandardMaterial color="#facc15" emissive="#f59e0b" emissiveIntensity={0.8} />
+      </mesh>
+      {[-0.34, 0.34].flatMap((x) => [-0.3, 0.3].map((z) => (
+        <mesh key={`${x}:${z}`} position={[x, -0.13, z]} rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[0.1, 0.1, 0.1, 10]} />
+          <meshStandardMaterial color="#111827" roughness={0.82} />
+        </mesh>
+      )))}
+      <mesh position={[0, -0.2, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.48, 0.6, 28]} />
+        <meshBasicMaterial color="#2dd4bf" transparent opacity={0.75} />
+      </mesh>
+      <Html position={[0, 0.72, 0]} center distanceFactor={14} style={{ pointerEvents: 'none' }}>
+        <span className="shuttle-vehicle-label">SHUTTLE-01 · L{sample.shuttleLevel}</span>
+      </Html>
+    </group>
+  )
+}
+
+function ShuttlePath({ state }: { state: ShuttleVisualizationState }) {
+  const lookup = useMemo(() => new Map(state.tracks.map((node) => [node.track_node_id, node])), [state.tracks])
+  if (!state.plan || state.plan.result_status !== 'success') return null
+  return (
+    <group>
+      {state.plan.path_edges.map((edge, index) => {
+        const from = lookup.get(edge.from_track_node)
+        const to = lookup.get(edge.to_track_node)
+        if (!from || !to) return null
+        const vertical = edge.edge_type === 'lift'
+        return (
+          <Line
+            key={`${edge.from_track_node}:${edge.to_track_node}:${index}`}
+            points={[
+              [from.world_x, from.world_y + 0.16, from.world_z],
+              [to.world_x, to.world_y + 0.16, to.world_z],
+            ]}
+            color={vertical ? '#facc15' : '#f8fafc'}
+            lineWidth={vertical ? 4 : 2.4}
+            dashed={vertical}
+            dashSize={0.22}
+            gapSize={0.12}
+          />
+        )
+      })}
+    </group>
+  )
+}
+
+export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
+  const trackLookup = useMemo(() => new Map(state.tracks.map((node) => [node.track_node_id, node])), [state.tracks])
+  return (
+    <group>
+      <ShuttleTrackInstances state={state} />
+      <ShuttlePath state={state} />
+      {state.lifts.map((lift) => (
+        <LiftModel
+          key={lift.lift_id}
+          lift={lift}
+          entrance={trackLookup.get(lift.level_entrances.L1)}
+          sample={state.sample}
+          selected={state.selectedLiftId === lift.lift_id}
+        />
+      ))}
+      {state.sample ? <ShuttleVehicle sample={state.sample} /> : null}
+    </group>
+  )
+}
+
+// End of the offline shuttle visualization layer.

@@ -28,6 +28,13 @@ import type {
   SyntheticInventorySupplementPreview,
   SyntheticInventorySupplementResult,
 } from '../features/inventory/types'
+import type {
+  ShuttleLiftsResponse,
+  ShuttlePlanRequest,
+  ShuttlePlanResponse,
+  ShuttleTopologyLevelsResponse,
+  ShuttleTracksResponse,
+} from '../features/shuttle-lift/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
 const WS_BASE = 'ws://127.0.0.1:8000/ws'
@@ -239,6 +246,22 @@ export const api = {
         start_cell_id: startCellId,
         algorithm,
       }),
+    })
+  },
+  getShuttleLevels(topologyId: string) {
+    return request<ShuttleTopologyLevelsResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/levels`)
+  },
+  getShuttleTracks(topologyId: string, level?: 1 | 2 | 3) {
+    const query = level ? `?level=${level}` : ''
+    return request<ShuttleTracksResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/tracks${query}`)
+  },
+  getShuttleLifts(topologyId: string) {
+    return request<ShuttleLiftsResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/lifts`)
+  },
+  planShuttlePath(payload: ShuttlePlanRequest) {
+    return request<ShuttlePlanResponse>('/shuttle/plan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     })
   },
 }
