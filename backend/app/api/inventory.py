@@ -9,6 +9,9 @@ from ..inventory_schemas import (
     StorageLocationInventory,
     SyntheticInventorySeedRequest,
     SyntheticInventorySeedResult,
+    SyntheticInventorySupplementPreview,
+    SyntheticInventorySupplementRequest,
+    SyntheticInventorySupplementResult,
     ZoneInventorySummary,
 )
 from ..services.inventory import (
@@ -85,6 +88,31 @@ def initialize_synthetic_inventory(payload: SyntheticInventorySeedRequest):
     """Explicit, idempotent demo initialization; never called during startup."""
     try:
         return service().seed_synthetic_demo(payload.topology_id, payload.seed)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/synthetic-demo/supplement/preview", response_model=SyntheticInventorySupplementPreview)
+def preview_synthetic_inventory_supplement(
+    topology_id: str = Query(min_length=1),
+    count: int | None = Query(default=None, gt=0),
+    fill_all: bool = False,
+):
+    try:
+        return service().preview_synthetic_supplement(topology_id, count=count, fill_all=fill_all)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/synthetic-demo/supplement", response_model=SyntheticInventorySupplementResult)
+def supplement_synthetic_inventory(payload: SyntheticInventorySupplementRequest):
+    try:
+        return service().supplement_synthetic_demo(
+            payload.topology_id,
+            count=payload.count,
+            fill_all=payload.fill_all,
+            seed=payload.seed,
+        )
     except Exception as exc:
         raise _translate_error(exc) from exc
 

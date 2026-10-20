@@ -219,7 +219,25 @@ class AlgorithmEvaluationResponse(BaseModel):
     results: list[dict[str, Any]]
 
 
+class TopologyValidationIssue(BaseModel):
+    category: Literal["structure", "accessibility", "runtime"]
+    severity: Literal["error", "warning"]
+    code: str
+    message: str
+    entity_kind: Literal["node", "cell", "zone", "resource"] | None = None
+    entity_id: str | None = None
+
+
+class TopologyValidationCategory(BaseModel):
+    category: Literal["structure", "accessibility", "runtime"]
+    label: str
+    error_count: int = Field(ge=0)
+    warning_count: int = Field(ge=0)
+    issues: list[TopologyValidationIssue] = Field(default_factory=list)
+
+
 class TopologyValidationResult(BaseModel):
     valid: bool
     errors: list[str]
     warnings: list[str]
+    categories: list[TopologyValidationCategory] = Field(default_factory=list)

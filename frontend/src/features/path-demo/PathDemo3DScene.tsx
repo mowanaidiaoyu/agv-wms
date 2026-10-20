@@ -1,7 +1,9 @@
 import { Canvas } from '@react-three/fiber'
+import type { ThreeEvent } from '@react-three/fiber'
 import { useMemo } from 'react'
 import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
+import { InventoryOverlay } from '../inventory/InventoryOverlay'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
@@ -43,7 +45,19 @@ function RackModel({ rack }: { rack: SceneRack }) {
     </group>
   )
 }
-function StaticSceneItem({ item }: { item: SceneItem }) {
+function StaticSceneItem({
+  item,
+  inventoryMode,
+  selectedInventoryNodeId,
+  storageNodeIds,
+  onInventoryNodeSelect,
+}: {
+  item: SceneItem
+  inventoryMode: boolean
+  selectedInventoryNodeId: string | null
+  storageNodeIds: ReadonlySet<string>
+  onInventoryNodeSelect?: (storageNodeId: string) => void
+}) {
   if (item.kind === 'slab') {
     return (
       <mesh position={[item.x, item.y + 0.09, item.z]} receiveShadow>
@@ -61,16 +75,29 @@ function StaticSceneItem({ item }: { item: SceneItem }) {
       </mesh>
     )
   }
+  const inventorySelectable = inventoryMode
+    && item.entity?.kind === 'node'
+    && storageNodeIds.has(item.entity.id)
+  const selected = inventorySelectable && item.entity?.id === selectedInventoryNodeId
+  const handleInventorySelect = (event: ThreeEvent<PointerEvent>) => {
+    if (!inventorySelectable || !item.entity || !onInventoryNodeSelect) return
+    event.stopPropagation()
+    onInventoryNodeSelect(item.entity.id)
+  }
   return (
-    <mesh position={item.position} castShadow={item.size[1] > 0.2}>
+    <mesh
+      position={item.position}
+      castShadow={item.size[1] > 0.2}
+      onPointerDown={inventorySelectable ? handleInventorySelect : undefined}
+    >
       <boxGeometry args={item.size} />
       {item.wire ? (
         <meshBasicMaterial color={item.color} wireframe transparent opacity={0.9} />
       ) : (
         <meshStandardMaterial
-          color={item.color}
-          emissive={item.emissive}
-          emissiveIntensity={0.25}
+          color={selected ? '#facc15' : item.color}
+          emissive={selected ? '#a16207' : item.emissive}
+          emissiveIntensity={selected ? 0.8 : 0.25}
           transparent={typeof item.opacity === 'number'}
           opacity={item.opacity ?? 1}
           roughness={0.72}
@@ -97,6 +124,10 @@ export function PathDemo3DScene({
   onRoadCellSelect,
   onInvalidRoadSelection,
   conflictEvent,
+  inventoryMode = false,
+  selectedInventoryNodeId = null,
+  stockedInventoryNodeIds = new Set<string>(),
+  onInventoryNodeSelect,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -114,8 +145,16 @@ export function PathDemo3DScene({
   onRoadCellSelect?: (cell: PathDemoCell) => void
   onInvalidRoadSelection?: () => void
   conflictEvent?: MultiPathConflictEvent | null
+  inventoryMode?: boolean
+  selectedInventoryNodeId?: string | null
+  stockedInventoryNodeIds?: ReadonlySet<string>
+  onInventoryNodeSelect?: (storageNodeId: string) => void
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
+  const storageNodeIds = useMemo(
+    () => new Set(topology.nodes.filter((node) => node.type === 'storage').map((node) => node.id)),
+    [topology.nodes],
+  )
   const visibleItems = useMemo(
     () => spec.items.filter((item) => (item.kind === 'slab' ? item.label === activeFloor : item.floor === activeFloor)),
     [activeFloor, spec.items],
@@ -141,7 +180,24 @@ export function PathDemo3DScene({
       <ambientLight intensity={0.7} />
       <hemisphereLight intensity={0.5} color="#d7dee9" groundColor="#0b101a" />
       <directionalLight position={[14, 24, 12]} intensity={1.5} castShadow />
-      {visibleItems.map((item) => <StaticSceneItem key={item.key} item={item} />)}
+      {visibleItems.map((item) => (
+        <StaticSceneItem
+          key={item.key}
+          item={item}
+          inventoryMode={inventoryMode}
+          selectedInventoryNodeId={selectedInventoryNodeId}
+          storageNodeIds={storageNodeIds}
+          onInventoryNodeSelect={onInventoryNodeSelect}
+        />
+      ))}
+      {inventoryMode ? (
+        <InventoryOverlay
+          topology={topology}
+          activeFloor={activeFloor}
+          selectedStorageNodeId={selectedInventoryNodeId}
+          stockedStorageNodeIds={stockedInventoryNodeIds}
+        />
+      ) : null}
       <PathDemo3DOverlay
         trajectory={trajectory}
         sample={sample}
@@ -155,7 +211,7 @@ export function PathDemo3DScene({
         topology={topology}
         activeFloor={activeFloor}
         roadCells={roadCells}
-        enabled={roadSelectionEnabled}
+        enabled={roadSelectionEnabled && !inventoryMode}
         onSelect={onRoadCellSelect}
         onInvalidSelection={onInvalidRoadSelection}
       />

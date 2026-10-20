@@ -61,19 +61,39 @@ def insert_balance(
     on_hand: int,
     reserved: int,
     zone_id: str = "zone-ctu",
+    source: str = "synthetic_demo",
 ) -> None:
     now = utc_now()
     with get_conn(repository.db_path) as conn:
         conn.execute(
             "INSERT OR IGNORE INTO sku_catalog VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (sku_id, f"Name {sku_id}", "test", "spec", "piece", None, None, "synthetic_demo", now),
+            (sku_id, f"Name {sku_id}", "test", "spec", "piece", None, None, source, now),
         )
         conn.execute(
             """
             INSERT INTO warehouse_inventory VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
             """,
-            ("topology-inventory-test", zone_id, storage_node_id, sku_id, on_hand, reserved, "synthetic_demo", now),
+            ("topology-inventory-test", zone_id, storage_node_id, sku_id, on_hand, reserved, source, now),
         )
+
+
+def extended_inventory_repository(tmp_path: Path, storage_count: int = 12) -> Repository:
+    topology = inventory_topology()
+    topology["grid"]["rows"] = 20
+    topology["grid"]["cols"] = 20
+    topology["zones"][0]["width"] = 18
+    topology["zones"][0]["height"] = 18
+    topology["nodes"] = [
+        {
+            "id": f"storage-{index:02d}", "type": "storage", "floor": "1F",
+            "row": 2 + index // 10, "col": 2 + index % 10,
+            "zoneId": "zone-ctu", "capacity": 1, "label": f"Storage {index:02d}",
+        }
+        for index in range(storage_count)
+    ]
+    repository = Repository(tmp_path / "supplement.db")
+    repository.upsert_topology(topology["id"], topology["name"], topology)
+    return repository
 
 
 def test_location_sku_association_and_same_sku_in_multiple_locations(repository: Repository, service: InventoryService):
@@ -98,6 +118,9 @@ def test_zone_and_global_summary_include_empty_locations(repository: Repository,
         "topology_id": "topology-inventory-test",
         "storage_location_count": 4,
         "stocked_location_count": 1,
+        "positive_inventory_location_count": 1,
+        "unconfigured_location_count": 3,
+        "zero_inventory_location_count": 0,
         "sku_count": 1,
         "quantity_on_hand": 20,
         "quantity_reserved": 5,
@@ -107,6 +130,7 @@ def test_zone_and_global_summary_include_empty_locations(repository: Repository,
     zones = {item["zone_id"]: item for item in service.zone_summaries("topology-inventory-test")}
     assert zones["zone-ctu"]["storage_location_count"] == 3
     assert zones["zone-ctu"]["quantity_available"] == 15
+    assert zones["zone-ctu"]["unconfigured_location_count"] == 2
     assert zones["zone-shuttle"]["stocked_location_count"] == 0
 
 
@@ -252,3 +276,96 @@ def test_real_666_demo_seed_only_references_existing_storage_nodes(tmp_path: Pat
     assert seeded_ids
     assert seeded_ids <= real_storage_ids
     assert all(item["access_mapping"]["status"] == "unconfigured" for item in locations if item["balances"])
+
+
+def test_supplement_adds_requested_missing_locations_without_overwriting_existing(tmp_path: Path):
+    repository = extended_inventory_repository(tmp_path)
+    service = InventoryService(repository)
+    insert_balance(repository, "storage-00", "SKU-REAL", 50, 11, source="wms_import")
+
+    preview = service.preview_synthetic_supplement("topology-inventory-test", count=3)
+    assert preview["eligible_location_count"] == 11
+    assert preview["estimated_insert_count"] == 3
+
+    result = service.supplement_synthetic_demo("topology-inventory-test", count=3, seed=9)
+    assert result["inserted_locations"] == 3
+    assert result["after"]["stocked_location_count"] == 4
+    original = service.get_location("topology-inventory-test", "storage-00")["balances"][0]
+    assert (original["quantity_on_hand"], original["quantity_reserved"], original["source"]) == (50, 11, "wms_import")
+    assert all(
+        balance["source"] == "synthetic_demo"
+        for location in service.list_locations("topology-inventory-test")
+        if location["storage_node_id"] != "storage-00"
+        for balance in location["balances"]
+    )
+
+
+def test_fill_all_supplement_is_repeatable_without_duplicate_records(tmp_path: Path):
+    repository = extended_inventory_repository(tmp_path, storage_count=10)
+    service = InventoryService(repository)
+    first = service.supplement_synthetic_demo("topology-inventory-test", fill_all=True, seed=42)
+    balances_after_first = service.list_locations("topology-inventory-test")
+    second = service.supplement_synthetic_demo("topology-inventory-test", fill_all=True, seed=42)
+
+    assert first["inserted_locations"] == 10
+    assert first["after"]["unconfigured_location_count"] == 0
+    assert second["inserted_locations"] == 0
+    assert second["after"] == first["after"]
+    assert service.list_locations("topology-inventory-test") == balances_after_first
+
+
+def test_inventory_summary_distinguishes_unconfigured_zero_and_positive_locations(tmp_path: Path):
+    repository = extended_inventory_repository(tmp_path, storage_count=3)
+    service = InventoryService(repository)
+    insert_balance(repository, "storage-00", "SKU-ZERO", 0, 0)
+    insert_balance(repository, "storage-01", "SKU-POSITIVE", 5, 2)
+
+    summary = service.summary("topology-inventory-test")
+    assert summary["stocked_location_count"] == 2
+    assert summary["positive_inventory_location_count"] == 1
+    assert summary["zero_inventory_location_count"] == 1
+    assert summary["unconfigured_location_count"] == 1
+
+
+def test_supplement_api_previews_and_fills_only_real_ctu_storage_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    repository = extended_inventory_repository(tmp_path, storage_count=6)
+    monkeypatch.setattr(inventory_api, "repo", repository)
+    client = TestClient(app)
+
+    preview = client.get(
+        "/api/v1/inventory/synthetic-demo/supplement/preview",
+        params={"topology_id": "topology-inventory-test", "count": 2},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["eligible_location_count"] == 6
+    assert preview.json()["estimated_insert_count"] == 2
+
+    first = client.post(
+        "/api/v1/inventory/synthetic-demo/supplement",
+        json={"topology_id": "topology-inventory-test", "count": 2, "fill_all": False, "seed": 5},
+    )
+    assert first.status_code == 200
+    assert first.json()["inserted_locations"] == 2
+    assert first.json()["after"]["stocked_location_count"] == 2
+
+    remaining = client.post(
+        "/api/v1/inventory/synthetic-demo/supplement",
+        json={"topology_id": "topology-inventory-test", "fill_all": True, "seed": 5},
+    )
+    assert remaining.status_code == 200
+    assert remaining.json()["inserted_locations"] == 4
+    assert remaining.json()["after"]["unconfigured_location_count"] == 0
+    assert all(
+        location["storage_node_id"].startswith("storage-")
+        for location in InventoryService(repository).list_locations("topology-inventory-test")
+        if location["balances"]
+    )
+
+    invalid = client.post(
+        "/api/v1/inventory/synthetic-demo/supplement",
+        json={"topology_id": "topology-inventory-test", "count": 1, "fill_all": True},
+    )
+    assert invalid.status_code == 409

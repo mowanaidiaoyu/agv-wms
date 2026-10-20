@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
@@ -23,6 +23,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     onRoadCellSelect,
     selectedVehicleId,
     conflictEvent,
+    inventoryMode,
+    selectedInventoryNodeId,
+    onInventoryNodeSelect,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -35,6 +38,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     onRoadCellSelect?: (cell: PathDemoCell) => void
     selectedVehicleId?: string
     conflictEvent?: { event_id: string } | null
+    inventoryMode?: boolean
+    selectedInventoryNodeId?: string | null
+    onInventoryNodeSelect?: (storageNodeId: string) => void
   }) => (
     <div>
       <div
@@ -52,17 +58,30 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-road-selection-enabled={roadSelectionEnabled ? 'true' : 'false'}
         data-conflict-event={conflictEvent?.event_id ?? ''}
         data-camera-target={cameraActionRequest?.targetWorld?.join(',') ?? ''}
+        data-inventory-mode={inventoryMode ? 'true' : 'false'}
+        data-selected-inventory-node={selectedInventoryNodeId ?? ''}
       />
       <button
         type="button"
         data-testid="mock-road-cell"
         onClick={() => onRoadCellSelect?.({ id: 'cell-r3-c3', floor: '1F', row: 3, col: 3, type: 'road', component_id: 'component-1' })}
       >mock road cell</button>
+      <button type="button" data-testid="mock-storage-node" onClick={() => onInventoryNodeSelect?.('storage-a')}>mock storage node</button>
     </div>
   ),
 }))
 
-vi.mock('../lib/api', () => ({ api: { listTopologies: vi.fn() } }))
+vi.mock('../lib/api', () => ({
+  api: {
+    listTopologies: vi.fn(),
+    getInventorySummary: vi.fn(),
+    listInventoryLocations: vi.fn(),
+    getInventoryLocation: vi.fn(),
+    initializeSyntheticInventory: vi.fn(),
+    previewSyntheticInventorySupplement: vi.fn(),
+    supplementSyntheticInventory: vi.fn(),
+  },
+}))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
   DEFAULT_MULTI_PATH_PLANNING_CONFIG: {
     time_step_seconds: 0.25,
@@ -81,9 +100,9 @@ const topology: TopologyPayload = {
   name: '666',
   meta: { version: '2.0.0', viewport: { x: 0, y: 0, zoom: 1 }, tags: [], floors: ['1F'] },
   grid: { rows: 4, cols: 4, cellSize: 32, originX: 0, originY: 0 },
-  zones: [],
-  cells: [],
-  nodes: [],
+  zones: [{ id: 'zone-ctu', label: 'CTU 库区', type: 'ctu', x: 0, y: 0, width: 4, height: 4 }],
+  cells: [{ id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, type: 'road', zoneId: 'zone-ctu', cost: 1, walkable: true }],
+  nodes: [{ id: 'storage-a', type: 'storage', floor: '1F', row: 1, col: 2, zoneId: 'zone-ctu', capacity: 1, label: '库位 A' }],
   resources: [],
 }
 
@@ -108,6 +127,25 @@ const options = {
   traversable_cells: cells,
   default_start: cells[0],
   default_goal: cells[2],
+}
+
+const inventoryLocation = {
+  topology_id: topology.id,
+  topology_version: topology.meta.version,
+  storage_node_id: 'storage-a',
+  label: '库位 A',
+  zone_id: 'zone-ctu',
+  zone_label: 'CTU 库区',
+  zone_type: 'ctu',
+  floor: '1F', row: 1, col: 2, rack_level: null,
+  balances: [{
+    topology_id: topology.id, zone_id: 'zone-ctu', storage_node_id: 'storage-a', storage_layer: 1,
+    sku: { sku_id: 'SKU-DEMO-001', sku_name: '标准紧固件套装', category: 'fastener', specification: 'M6', unit: 'box', weight_kg: 2.4, material: 'steel', source: 'synthetic_demo' },
+    quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+    source: 'synthetic_demo', updated_at: '2026-10-20T00:00:00Z',
+  }],
+  access_mapping: { topology_id: topology.id, storage_node_id: 'storage-a', access_cell_id: 'cell-r1-c1', status: 'configured' as const, source: 'manual_verified', validated_at: '2026-10-20T00:00:00Z' },
+  data_sources: ['synthetic_demo'],
 }
 
 const makePlan = (algorithm: 'astar' | 'dijkstra') => ({
@@ -252,6 +290,19 @@ async function enterCustomModeWithSixVehicles() {
 beforeEach(() => {
   useMultiPathExperimentStore.setState({ customDraft: null, evaluation: null, viewedAlgorithm: null })
   vi.mocked(api.listTopologies).mockResolvedValue([{ id: topology.id, name: topology.name, payload: topology }])
+  vi.mocked(api.getInventorySummary).mockResolvedValue({
+    topology_id: topology.id, storage_location_count: 1, stocked_location_count: 1,
+    positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0,
+    sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+    data_sources: ['synthetic_demo'],
+  })
+  vi.mocked(api.listInventoryLocations).mockResolvedValue([inventoryLocation])
+  vi.mocked(api.getInventoryLocation).mockResolvedValue(inventoryLocation)
+  vi.mocked(api.previewSyntheticInventorySupplement).mockResolvedValue({
+    topology_id: topology.id, eligible_location_count: 0, requested_location_count: 100,
+    estimated_insert_count: 0, fill_all: false,
+    before: { topology_id: topology.id, storage_location_count: 1, stocked_location_count: 1, positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0, sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10, data_sources: ['synthetic_demo'] },
+  })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
   vi.mocked(pathDemoApi.multiScenarios).mockResolvedValue(multiScenarios)
@@ -560,6 +611,86 @@ describe('PathDemoPage', () => {
     await waitFor(() => expect(screen.getByText('未规划')).toBeInTheDocument())
     expect(screen.getByLabelText('选择跟随车辆')).toHaveValue('CTU-06')
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', '')
+  })
+
+  it('shares the selected topology with inventory mode and locates real storage and access coordinates', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+
+    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+
+    await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topology.id))
+    expect(api.listInventoryLocations).toHaveBeenCalledWith(topology.id)
+    await waitFor(() => expect(screen.getByText('正库存')).toBeInTheDocument())
+    expect(screen.getByText('12', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByLabelText('搜索 SKU 或库位')).toBeInTheDocument()
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'true')
+
+    fireEvent.click(screen.getByTestId('mock-storage-node'))
+    expect(await screen.findByText('标准紧固件套装')).toBeInTheDocument()
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-inventory-node', 'storage-a')
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '0.5,0.5,0.5')
+
+    fireEvent.click(screen.getByRole('button', { name: '查看停靠点' }))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')
+
+    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'false')
+    expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
+  })
+
+  it('shows inventory API failures without affecting the planning workspace', async () => {
+    vi.mocked(api.getInventorySummary).mockRejectedValueOnce(new Error('summary unavailable'))
+    vi.mocked(api.listInventoryLocations).mockRejectedValueOnce(new Error('locations unavailable'))
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+
+    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('库存加载失败')
+
+    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
+  })
+
+  it('switches inventory queries with topology ID and ignores the late previous response', async () => {
+    const topologyB = { ...topology, id: 'topology-b', name: 'Warehouse B' }
+    vi.mocked(api.listTopologies).mockResolvedValue([
+      { id: topology.id, name: topology.name, payload: topology },
+      { id: topologyB.id, name: topologyB.name, payload: topologyB },
+    ])
+    const summaryForOld = {
+      topology_id: topology.id, storage_location_count: 1, stocked_location_count: 1,
+      positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0,
+      sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
+      data_sources: ['synthetic_demo'],
+    }
+    const summaryForB = { ...summaryForOld, topology_id: topologyB.id, quantity_on_hand: 77, quantity_available: 75 }
+    let resolveOldSummary: ((value: typeof summaryForOld) => void) | undefined
+    let resolveOldLocations: ((value: typeof inventoryLocation[]) => void) | undefined
+    vi.mocked(api.getInventorySummary).mockImplementation((topologyId) => (
+      topologyId === topology.id
+        ? new Promise((resolve) => { resolveOldSummary = resolve })
+        : Promise.resolve(summaryForB)
+    ))
+    vi.mocked(api.listInventoryLocations).mockImplementation((topologyId) => (
+      topologyId === topology.id
+        ? new Promise((resolve) => { resolveOldLocations = resolve })
+        : Promise.resolve([])
+    ))
+
+    renderPage()
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+    fireEvent.change(screen.getByLabelText('拓扑'), { target: { value: topologyB.id } })
+
+    await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topologyB.id))
+    await waitFor(() => expect(screen.getByText('77', { selector: 'strong' })).toBeInTheDocument())
+    await act(async () => {
+      resolveOldSummary?.(summaryForOld)
+      resolveOldLocations?.([inventoryLocation])
+    })
+    expect(screen.getByText('77', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.queryByText('12', { selector: 'strong' })).not.toBeInTheDocument()
   })
 })
 

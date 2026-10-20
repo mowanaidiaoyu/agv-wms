@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import sqlite3
+import hashlib
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,80 @@ class InventoryService:
             "source": SYNTHETIC_DEMO,
         }
 
+    def preview_synthetic_supplement(
+        self,
+        topology_id: str,
+        *,
+        count: int | None = None,
+        fill_all: bool = False,
+    ) -> dict[str, Any]:
+        self._validate_supplement_request(count, fill_all)
+        topology = self._topology_payload(self._topology_record(topology_id))
+        candidates, existing_count = self._supplement_candidates(topology_id, topology, seed=0)
+        requested = len(candidates) if fill_all else int(count or 0)
+        return {
+            "topology_id": topology_id,
+            "eligible_location_count": len(candidates),
+            "requested_location_count": requested,
+            "estimated_insert_count": min(requested, len(candidates)),
+            "fill_all": fill_all,
+            "before": self.summary(topology_id),
+            "_existing_count": existing_count,
+        }
+
+    def supplement_synthetic_demo(
+        self,
+        topology_id: str,
+        *,
+        count: int | None = None,
+        fill_all: bool = False,
+        seed: int = 42,
+    ) -> dict[str, Any]:
+        self._validate_supplement_request(count, fill_all)
+        topology = self._topology_payload(self._topology_record(topology_id))
+        before = self.summary(topology_id)
+        candidates, existing_count = self._supplement_candidates(topology_id, topology, seed=seed)
+        requested = len(candidates) if fill_all else int(count or 0)
+        selected = candidates[:requested]
+        inserted_locations = 0
+        inserted_balances = 0
+        now = utc_now()
+
+        with get_conn(self.db_path) as conn:
+            self._insert_demo_skus(conn, now)
+            for node in selected:
+                sku, on_hand, reserved = self._stable_demo_balance(node["id"], seed)
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO warehouse_inventory (
+                      topology_id, zone_id, storage_node_id, storage_layer, sku_id,
+                      quantity_on_hand, quantity_reserved, source, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        topology_id, node.get("zoneId"), node["id"], sku["sku_id"],
+                        on_hand, reserved, SYNTHETIC_DEMO, now,
+                    ),
+                )
+                if cursor.rowcount:
+                    inserted_locations += 1
+                    inserted_balances += cursor.rowcount
+
+        return {
+            "topology_id": topology_id,
+            "seed": seed,
+            "fill_all": fill_all,
+            "requested_location_count": requested,
+            "eligible_before": len(candidates),
+            "inserted_locations": inserted_locations,
+            "inserted_balances": inserted_balances,
+            "skipped_existing_locations": existing_count,
+            "skipped_due_to_limit": max(0, len(candidates) - len(selected)),
+            "source": SYNTHETIC_DEMO,
+            "before": before,
+            "after": self.summary(topology_id),
+        }
+
     def list_locations(
         self,
         topology_id: str,
@@ -170,10 +245,17 @@ class InventoryService:
         topology = self._topology_payload(self._topology_record(topology_id))
         rows = [row for values in self._inventory_rows(topology_id).values() for row in values]
         totals = self._sum_balances(rows)
+        recorded_ids = {row["storage_node_id"] for row in rows}
+        positive_ids = {row["storage_node_id"] for row in rows if int(row["quantity_on_hand"]) > 0}
+        zero_ids = recorded_ids - positive_ids
+        total_locations = len(self._storage_nodes(topology))
         return {
             "topology_id": topology_id,
-            "storage_location_count": len(self._storage_nodes(topology)),
-            "stocked_location_count": len({row["storage_node_id"] for row in rows}),
+            "storage_location_count": total_locations,
+            "stocked_location_count": len(recorded_ids),
+            "positive_inventory_location_count": len(positive_ids),
+            "unconfigured_location_count": total_locations - len(recorded_ids),
+            "zero_inventory_location_count": len(zero_ids),
             "sku_count": len({row["sku_id"] for row in rows}),
             **totals,
             "data_sources": sorted({row["source"] for row in rows}),
@@ -186,6 +268,8 @@ class InventoryService:
         for zone in topology.get("zones", []):
             zone_locations = [location for location in locations if location["zone_id"] == zone["id"]]
             balances = [balance for location in zone_locations for balance in location["balances"]]
+            recorded_ids = {balance["storage_node_id"] for balance in balances}
+            positive_ids = {balance["storage_node_id"] for balance in balances if int(balance["quantity_on_hand"]) > 0}
             totals = self._sum_balances(balances)
             results.append({
                 "topology_id": topology_id,
@@ -194,11 +278,71 @@ class InventoryService:
                 "zone_type": zone.get("type", "mixed"),
                 "storage_location_count": len(zone_locations),
                 "stocked_location_count": sum(bool(location["balances"]) for location in zone_locations),
+                "positive_inventory_location_count": len(positive_ids),
+                "unconfigured_location_count": len(zone_locations) - len(recorded_ids),
+                "zero_inventory_location_count": len(recorded_ids - positive_ids),
                 "sku_count": len({balance["sku_id"] for balance in balances}),
                 **totals,
                 "data_sources": sorted({balance["source"] for balance in balances}),
             })
         return results
+
+    @staticmethod
+    def _validate_supplement_request(count: int | None, fill_all: bool) -> None:
+        if fill_all and count is not None:
+            raise InventoryConflictError("count must be omitted when fill_all is true")
+        if not fill_all and (count is None or count <= 0):
+            raise InventoryConflictError("count must be positive when fill_all is false")
+
+    def _supplement_candidates(
+        self,
+        topology_id: str,
+        topology: dict[str, Any],
+        *,
+        seed: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        zones = self._zone_lookup(topology)
+        ctu_nodes = [
+            node for node in self._storage_nodes(topology)
+            if zones.get(node.get("zoneId"), {}).get("type") == "ctu"
+        ]
+        with get_conn(self.db_path) as conn:
+            existing_rows = conn.execute(
+                "SELECT DISTINCT storage_node_id FROM warehouse_inventory WHERE topology_id = ?",
+                (topology_id,),
+            ).fetchall()
+        ctu_node_ids = {node["id"] for node in ctu_nodes}
+        existing_ids = {row["storage_node_id"] for row in existing_rows if row["storage_node_id"] in ctu_node_ids}
+        candidates = [node for node in ctu_nodes if node["id"] not in existing_ids]
+        candidates.sort(key=lambda node: hashlib.sha256(f"{seed}:{node['id']}".encode()).hexdigest())
+        return candidates, len(existing_ids)
+
+    @staticmethod
+    def _insert_demo_skus(conn: sqlite3.Connection, now: str) -> int:
+        inserted = 0
+        for sku in DEMO_SKUS:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO sku_catalog (
+                  sku_id, sku_name, category, specification, unit,
+                  weight_kg, material, source, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sku["sku_id"], sku["sku_name"], sku["category"], sku["specification"],
+                    sku["unit"], sku["weight_kg"], sku["material"], SYNTHETIC_DEMO, now,
+                ),
+            )
+            inserted += cursor.rowcount
+        return inserted
+
+    @staticmethod
+    def _stable_demo_balance(storage_node_id: str, seed: int) -> tuple[dict[str, Any], int, int]:
+        digest = hashlib.sha256(f"{seed}:{storage_node_id}".encode()).digest()
+        sku = DEMO_SKUS[int.from_bytes(digest[:2], "big") % len(DEMO_SKUS)]
+        on_hand = 12 + int.from_bytes(digest[2:4], "big") % 89
+        reserved = int.from_bytes(digest[4:6], "big") % (min(8, on_hand) + 1)
+        return sku, on_hand, reserved
 
     def configure_access_mapping(
         self,
@@ -226,6 +370,10 @@ class InventoryService:
                 (topology_id, storage_node_id, access_cell_id, version, source, now),
             )
         return self.get_location(topology_id, storage_node_id)["access_mapping"]
+
+    def list_access_mappings(self, topology_id: str) -> list[dict[str, Any]]:
+        self._topology_record(topology_id)
+        return list(self._mapping_rows(topology_id).values())
 
     def reserve_inventory(self, topology_id: str, storage_node_id: str, storage_layer: int, sku_id: str, quantity: int) -> None:
         if quantity <= 0:

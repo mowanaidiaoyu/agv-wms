@@ -15,6 +15,7 @@ vi.mock('../lib/api', () => ({
     validateTopology: vi.fn(async () => ({ valid: true, errors: [], warnings: [] })),
     getInventorySummary: vi.fn(async () => ({
       topology_id: 'topology-new', storage_location_count: 1, stocked_location_count: 1,
+      positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0,
       sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
       data_sources: ['synthetic_demo'],
     })),
@@ -45,6 +46,12 @@ vi.mock('../lib/api', () => ({
       data_sources: ['synthetic_demo'],
     })),
     initializeSyntheticInventory: vi.fn(async () => ({ topology_id: 'topology-new', seed: 42, inserted_skus: 0, inserted_balances: 0, source: 'synthetic_demo' })),
+    previewSyntheticInventorySupplement: vi.fn(async () => ({
+      topology_id: 'topology-new', eligible_location_count: 0, requested_location_count: 100,
+      estimated_insert_count: 0, fill_all: false,
+      before: { topology_id: 'topology-new', storage_location_count: 1, stocked_location_count: 1, positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0, sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10, data_sources: ['synthetic_demo'] },
+    })),
+    supplementSyntheticInventory: vi.fn(),
   },
 }))
 

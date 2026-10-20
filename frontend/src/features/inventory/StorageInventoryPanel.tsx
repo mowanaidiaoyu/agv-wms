@@ -2,11 +2,14 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, MapPin, PackageSearch, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api'
+import type { StorageInventoryLocation } from './types'
 
 interface StorageInventoryPanelProps {
   topologyId: string
   selectedStorageNodeId: string | null
   onSelectStorageNode: (storageNodeId: string) => void
+  onLocateStorageNode?: (location: StorageInventoryLocation) => void
+  onLocateAccessCell?: (accessCellId: string) => void
 }
 
 function formatSource(source: string): string {
@@ -20,10 +23,14 @@ export function StorageInventoryPanel({
   topologyId,
   selectedStorageNodeId,
   onSelectStorageNode,
+  onLocateStorageNode,
+  onLocateAccessCell,
 }: StorageInventoryPanelProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [zoneType, setZoneType] = useState<'all' | 'ctu' | 'shuttle'>('all')
+  const [supplementCount, setSupplementCount] = useState(100)
+  const [fillAll, setFillAll] = useState(false)
 
   const summaryQuery = useQuery({
     queryKey: ['inventory-summary', topologyId],
@@ -46,6 +53,20 @@ export function StorageInventoryPanel({
       await queryClient.invalidateQueries({ queryKey: ['inventory-summary', topologyId] })
       await queryClient.invalidateQueries({ queryKey: ['inventory-locations', topologyId] })
       await queryClient.invalidateQueries({ queryKey: ['inventory-location', topologyId] })
+    },
+  })
+  const supplementPreviewQuery = useQuery({
+    queryKey: ['inventory-supplement-preview', topologyId, supplementCount, fillAll],
+    queryFn: () => api.previewSyntheticInventorySupplement(topologyId, fillAll ? null : supplementCount, fillAll),
+    enabled: Boolean(topologyId) && supplementCount > 0,
+  })
+  const supplementMutation = useMutation({
+    mutationFn: () => api.supplementSyntheticInventory(topologyId, fillAll ? null : supplementCount, fillAll, 42),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['inventory-summary', topologyId] })
+      await queryClient.invalidateQueries({ queryKey: ['inventory-locations', topologyId] })
+      await queryClient.invalidateQueries({ queryKey: ['inventory-location', topologyId] })
+      await queryClient.invalidateQueries({ queryKey: ['inventory-supplement-preview', topologyId] })
     },
   })
 
@@ -76,10 +97,21 @@ export function StorageInventoryPanel({
       {summary ? (
         <div className="inventory-summary-grid">
           <span>库位<strong>{summary.storage_location_count}</strong></span>
-          <span>有货库位<strong>{summary.stocked_location_count}</strong></span>
+          <span>有记录<strong>{summary.stocked_location_count}</strong></span>
+          <span>正库存<strong>{summary.positive_inventory_location_count}</strong></span>
+          <span>未配置<strong>{summary.unconfigured_location_count}</strong></span>
+          <span>零库存<strong>{summary.zero_inventory_location_count}</strong></span>
           <span>SKU<strong>{summary.sku_count}</strong></span>
+          <span>现有<strong>{summary.quantity_on_hand}</strong></span>
+          <span>预留<strong>{summary.quantity_reserved}</strong></span>
           <span>可用<strong>{summary.quantity_available}</strong></span>
         </div>
+      ) : null}
+
+      {summaryQuery.isError || locationsQuery.isError ? (
+        <p className="inventory-warning" role="alert">
+          库存加载失败：{String(summaryQuery.error ?? locationsQuery.error)}
+        </p>
       ) : null}
 
       {summary && summary.stocked_location_count === 0 ? (
@@ -94,6 +126,49 @@ export function StorageInventoryPanel({
             <RefreshCw size={14} />
             {seedMutation.isPending ? '正在初始化…' : '初始化 synthetic_demo 库存'}
           </button>
+        </div>
+      ) : null}
+
+      {summary && summary.unconfigured_location_count > 0 ? (
+        <div className="inventory-supplement-card">
+          <strong>补充演示库存</strong>
+          <label>
+            <input type="checkbox" checked={fillAll} onChange={(event) => setFillAll(event.target.checked)} />
+            补充至全部现有 CTU Storage Node
+          </label>
+          {!fillAll ? (
+            <label>
+              指定补充库位数
+              <input
+                aria-label="指定补充库位数"
+                type="number"
+                min={1}
+                value={supplementCount}
+                onChange={(event) => setSupplementCount(Math.max(1, Math.floor(Number(event.target.value) || 1)))}
+              />
+            </label>
+          ) : null}
+          {supplementPreviewQuery.data ? (
+            <p>
+              当前可补充 {supplementPreviewQuery.data.eligible_location_count} 个；本次预计新增{' '}
+              {supplementPreviewQuery.data.estimated_insert_count} 个，不覆盖已有记录。
+            </p>
+          ) : null}
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={supplementMutation.isPending || !supplementPreviewQuery.data?.estimated_insert_count}
+            onClick={() => supplementMutation.mutate()}
+          >
+            {supplementMutation.isPending ? '正在补充…' : '补充演示库存'}
+          </button>
+          {supplementMutation.data ? (
+            <p className="inventory-access-ok" role="status">
+              已新增 {supplementMutation.data.inserted_locations} 个库位；覆盖率{' '}
+              {supplementMutation.data.after.stocked_location_count}/{supplementMutation.data.after.storage_location_count}。
+            </p>
+          ) : null}
+          {supplementMutation.isError ? <p className="inventory-warning">补充失败：{String(supplementMutation.error)}</p> : null}
         </div>
       ) : null}
 
@@ -125,7 +200,10 @@ export function StorageInventoryPanel({
             type="button"
             key={location.storage_node_id}
             className={selectedStorageNodeId === location.storage_node_id ? 'active' : ''}
-            onClick={() => onSelectStorageNode(location.storage_node_id)}
+            onClick={() => {
+              onSelectStorageNode(location.storage_node_id)
+              onLocateStorageNode?.(location)
+            }}
           >
             <span>{location.storage_node_id}</span>
             <small>{location.balances.length ? `${location.balances.length} 种 SKU` : '暂无库存记录'}</small>
@@ -161,7 +239,14 @@ export function StorageInventoryPanel({
               </article>
             )) : <p className="inventory-warning">暂无库存记录</p>}
             {detail.access_mapping.status === 'configured' ? (
-              <p className="inventory-access-ok">取货停靠点：{detail.access_mapping.access_cell_id}</p>
+              <div className="inventory-access-ok">
+                <p>取货停靠点：{detail.access_mapping.access_cell_id}</p>
+                {detail.access_mapping.access_cell_id && onLocateAccessCell ? (
+                  <button type="button" className="ghost-button" onClick={() => onLocateAccessCell(detail.access_mapping.access_cell_id!)}>
+                    查看停靠点
+                  </button>
+                ) : null}
+              </div>
             ) : detail.access_mapping.status === 'topology_version_mismatch' ? (
               <p className="inventory-warning">停靠点映射对应旧拓扑版本，需要重新校验。</p>
             ) : (

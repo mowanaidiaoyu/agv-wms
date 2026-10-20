@@ -52,6 +52,9 @@ export interface InventorySummary {
   topology_id: string
   storage_location_count: number
   stocked_location_count: number
+  positive_inventory_location_count: number
+  unconfigured_location_count: number
+  zero_inventory_location_count: number
   sku_count: number
   quantity_on_hand: number
   quantity_reserved: number
@@ -66,6 +69,9 @@ export interface InventoryZoneSummary {
   zone_type: string
   storage_location_count: number
   stocked_location_count: number
+  positive_inventory_location_count: number
+  unconfigured_location_count: number
+  zero_inventory_location_count: number
   sku_count: number
   quantity_on_hand: number
   quantity_reserved: number
@@ -79,4 +85,28 @@ export interface SyntheticInventorySeedResult {
   inserted_skus: number
   inserted_balances: number
   source: 'synthetic_demo'
+}
+
+export interface SyntheticInventorySupplementPreview {
+  topology_id: string
+  eligible_location_count: number
+  requested_location_count: number
+  estimated_insert_count: number
+  fill_all: boolean
+  before: InventorySummary
+}
+
+export interface SyntheticInventorySupplementResult {
+  topology_id: string
+  seed: number
+  fill_all: boolean
+  requested_location_count: number
+  eligible_before: number
+  inserted_locations: number
+  inserted_balances: number
+  skipped_existing_locations: number
+  skipped_due_to_limit: number
+  source: 'synthetic_demo'
+  before: InventorySummary
+  after: InventorySummary
 }

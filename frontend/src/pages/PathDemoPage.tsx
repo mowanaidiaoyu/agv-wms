@@ -32,6 +32,8 @@ import type {
 } from '../features/path-demo/types'
 import { api } from '../lib/api'
 import { floorPlaneY, worldX, worldZ } from '../lib/topology3d'
+import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPanel'
+import type { StorageInventoryLocation } from '../features/inventory/types'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -53,6 +55,7 @@ const planningStatusLabel = {
 }
 
 type DemoMode = 'single' | 'preset' | 'custom'
+type WorkspaceMode = 'planning' | 'inventory'
 type PlanningStatus = keyof typeof planningStatusLabel
 type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
 
@@ -81,6 +84,8 @@ export function PathDemoPage() {
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const [topologyId, setTopologyId] = useState('')
   const [demoMode, setDemoMode] = useState<DemoMode>('single')
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
+  const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
   const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
   const [startCellId, setStartCellId] = useState('')
   const [goalCellId, setGoalCellId] = useState('')
@@ -109,6 +114,22 @@ export function PathDemoPage() {
   }, [topologiesQuery.data, topologyId])
 
   const topologyRecord = topologiesQuery.data?.find((item) => item.id === topologyId)
+  const inventoryLocationsQuery = useQuery({
+    queryKey: ['inventory-locations', topologyId],
+    queryFn: () => api.listInventoryLocations(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const stockedInventoryNodeIds = useMemo(
+    () => new Set(
+      (inventoryLocationsQuery.data ?? [])
+        .filter((location) => location.balances.length > 0)
+        .map((location) => location.storage_node_id),
+    ),
+    [inventoryLocationsQuery.data],
+  )
+  const selectedInventoryLocation = inventoryLocationsQuery.data?.find(
+    (location) => location.storage_node_id === selectedInventoryNodeId,
+  ) ?? null
 
   useEffect(() => {
     if (demoMode !== 'custom' || !topologyRecord) return
@@ -285,6 +306,40 @@ export function PathDemoPage() {
     setCameraActionRequest((current) => ({ type, targetWorld, sequence: (current?.sequence ?? 0) + 1 }))
   }
 
+  const locateInventoryLocation = (location: StorageInventoryLocation) => {
+    if (!topologyRecord) return
+    const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
+    const floorIndex = Math.max(0, floors.indexOf(location.floor))
+    setSelectedInventoryNodeId(location.storage_node_id)
+    setCameraViewMode('free')
+    requestCameraAction('focus-point', [
+      worldX(location.col, topologyRecord.payload.grid.cols),
+      floorPlaneY(floorIndex) + 0.5,
+      worldZ(location.row, topologyRecord.payload.grid.rows),
+    ])
+  }
+
+  const locateInventoryNode = (storageNodeId: string) => {
+    const location = inventoryLocationsQuery.data?.find((item) => item.storage_node_id === storageNodeId)
+    if (location) locateInventoryLocation(location)
+    else setSelectedInventoryNodeId(storageNodeId)
+  }
+
+  const locateAccessCell = (accessCellId: string) => {
+    if (!topologyRecord) return
+    const cell = topologyRecord.payload.cells.find((item) => item.id === accessCellId)
+    if (!cell) return
+    const floor = cell.floor ?? '1F'
+    const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
+    const floorIndex = Math.max(0, floors.indexOf(floor))
+    setCameraViewMode('free')
+    requestCameraAction('focus-point', [
+      worldX(cell.col, topologyRecord.payload.grid.cols),
+      floorPlaneY(floorIndex) + 0.22,
+      worldZ(cell.row, topologyRecord.payload.grid.rows),
+    ])
+  }
+
   const locateConflictEvent = (event: MultiPathConflictEvent, seekToEvent: boolean) => {
     if (!topologyRecord) return
     const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
@@ -372,7 +427,9 @@ export function PathDemoPage() {
   const markerFloor = demoMode !== 'single'
     ? roadCells.find((cell) => cell.id === activeVehicles[0]?.start_cell_id)?.floor
     : undefined
-  const activeFloor = multiPlan?.vehicles[0]?.start.floor ?? markerFloor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
+  const activeFloor = workspaceMode === 'inventory' && selectedInventoryLocation
+    ? selectedInventoryLocation.floor
+    : multiPlan?.vehicles[0]?.start.floor ?? markerFloor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
   const canPlay = demoMode === 'single' ? trajectory.length > 1 : Boolean(multiPlan && multiPlan.makespan_seconds > 0)
   const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
   const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
@@ -396,6 +453,7 @@ export function PathDemoPage() {
               value={topologyId}
               onChange={(event) => {
                 setTopologyId(event.target.value)
+                setSelectedInventoryNodeId(null)
                 setStartCellId('')
                 setGoalCellId('')
                 setPresetVehicles([])
@@ -407,6 +465,27 @@ export function PathDemoPage() {
               {(topologiesQuery.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
+          <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={workspaceMode === 'planning'}
+              className={workspaceMode === 'planning' ? 'active' : ''}
+              onClick={() => setWorkspaceMode('planning')}
+            >轨迹规划</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={workspaceMode === 'inventory'}
+              className={workspaceMode === 'inventory' ? 'active' : ''}
+              onClick={() => {
+                setWorkspaceMode('inventory')
+                setRoadSelection(null)
+              }}
+            >库存查看</button>
+          </div>
+          {workspaceMode === 'planning' ? (
+            <>
           <label>
             演示模式
             <select
@@ -725,6 +804,16 @@ export function PathDemoPage() {
               onLocate={(event) => locateConflictEvent(event, true)}
             />
           ) : null}
+            </>
+          ) : (
+            <StorageInventoryPanel
+              topologyId={topologyId}
+              selectedStorageNodeId={selectedInventoryNodeId}
+              onSelectStorageNode={setSelectedInventoryNodeId}
+              onLocateStorageNode={locateInventoryLocation}
+              onLocateAccessCell={locateAccessCell}
+            />
+          )}
         </aside>
 
         <div className="path-demo-viewport" aria-label="CTU 3D path demonstration">
@@ -747,6 +836,10 @@ export function PathDemoPage() {
                 onRoadCellSelect={handleRoadCellSelect}
                 onInvalidRoadSelection={() => setSelectionError('该位置不是当前道路连通分量中的可行驶道路格。')}
                 conflictEvent={showNodeConflictVisualization ? selectedConflictEvent : null}
+                inventoryMode={workspaceMode === 'inventory'}
+                selectedInventoryNodeId={selectedInventoryNodeId}
+                stockedInventoryNodeIds={stockedInventoryNodeIds}
+                onInventoryNodeSelect={locateInventoryNode}
               />
             </Suspense>
           ) : <div className="path-demo-empty">正在读取拓扑…</div>}

@@ -113,6 +113,24 @@ export interface TopologyValidationResult {
   valid: boolean
   errors: string[]
   warnings: string[]
+  categories?: TopologyValidationCategory[]
+}
+
+export interface TopologyValidationIssue {
+  category: 'structure' | 'accessibility' | 'runtime'
+  severity: 'error' | 'warning'
+  code: string
+  message: string
+  entity_kind: 'node' | 'cell' | 'zone' | 'resource' | null
+  entity_id: string | null
+}
+
+export interface TopologyValidationCategory {
+  category: 'structure' | 'accessibility' | 'runtime'
+  label: string
+  error_count: number
+  warning_count: number
+  issues: TopologyValidationIssue[]
 }
 
 export interface RobotConfig {

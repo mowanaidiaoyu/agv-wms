@@ -15,6 +15,7 @@ from ..services.runtime import repo, simulation_service
 from ..services.scenario_sync import sync_scenario_with_topology_payload
 from ..services.simulation import validate_runtime_inputs
 from ..services.topology_validation import validate_topology_business_rules
+from ..services.inventory import InventoryService
 from .path_demo import router as path_demo_router
 from .sku_algorithm import router as sku_algorithm_router
 from .inventory import router as inventory_router
@@ -43,7 +44,11 @@ def create_topology(payload: TopologyPayload):
 
 @router.post("/topologies/validate", response_model=TopologyValidationResult)
 def validate_topology(payload: TopologyPayload):
-    return validate_topology_business_rules(payload.model_dump(by_alias=True))
+    inventory = InventoryService(repo)
+    return validate_topology_business_rules(
+        payload.model_dump(by_alias=True),
+        access_mappings=inventory.list_access_mappings(payload.id) if repo.get_topology(payload.id) else [],
+    )
 
 
 @router.get("/topologies/{topology_id}")

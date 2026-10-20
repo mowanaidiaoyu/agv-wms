@@ -19,6 +19,8 @@ import type {
   InventoryZoneSummary,
   StorageInventoryLocation,
   SyntheticInventorySeedResult,
+  SyntheticInventorySupplementPreview,
+  SyntheticInventorySupplementResult,
 } from '../features/inventory/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -172,6 +174,17 @@ export const api = {
     return request<SyntheticInventorySeedResult>('/inventory/synthetic-demo', {
       method: 'POST',
       body: JSON.stringify({ topology_id: topologyId, seed }),
+    })
+  },
+  previewSyntheticInventorySupplement(topologyId: string, count: number | null, fillAll: boolean) {
+    const query = new URLSearchParams({ topology_id: topologyId, fill_all: String(fillAll) })
+    if (count !== null) query.set('count', String(count))
+    return request<SyntheticInventorySupplementPreview>(`/inventory/synthetic-demo/supplement/preview?${query}`)
+  },
+  supplementSyntheticInventory(topologyId: string, count: number | null, fillAll: boolean, seed = 42) {
+    return request<SyntheticInventorySupplementResult>('/inventory/synthetic-demo/supplement', {
+      method: 'POST',
+      body: JSON.stringify({ topology_id: topologyId, count, fill_all: fillAll, seed }),
     })
   },
 }

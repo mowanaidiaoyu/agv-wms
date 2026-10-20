@@ -62,6 +62,9 @@ class InventorySummary(BaseModel):
     topology_id: str
     storage_location_count: int
     stocked_location_count: int
+    positive_inventory_location_count: int
+    unconfigured_location_count: int
+    zero_inventory_location_count: int
     sku_count: int
     quantity_on_hand: int
     quantity_reserved: int
@@ -76,6 +79,9 @@ class ZoneInventorySummary(BaseModel):
     zone_type: str
     storage_location_count: int
     stocked_location_count: int
+    positive_inventory_location_count: int
+    unconfigured_location_count: int
+    zero_inventory_location_count: int
     sku_count: int
     quantity_on_hand: int
     quantity_reserved: int
@@ -94,6 +100,37 @@ class SyntheticInventorySeedResult(BaseModel):
     inserted_skus: int
     inserted_balances: int
     source: Literal["synthetic_demo"] = "synthetic_demo"
+
+
+class SyntheticInventorySupplementRequest(BaseModel):
+    topology_id: str = Field(min_length=1)
+    count: int | None = Field(default=None, gt=0)
+    fill_all: bool = False
+    seed: int = 42
+
+
+class SyntheticInventorySupplementPreview(BaseModel):
+    topology_id: str
+    eligible_location_count: int
+    requested_location_count: int
+    estimated_insert_count: int
+    fill_all: bool
+    before: InventorySummary
+
+
+class SyntheticInventorySupplementResult(BaseModel):
+    topology_id: str
+    seed: int
+    fill_all: bool
+    requested_location_count: int
+    eligible_before: int
+    inserted_locations: int
+    inserted_balances: int
+    skipped_existing_locations: int
+    skipped_due_to_limit: int
+    source: Literal["synthetic_demo"] = "synthetic_demo"
+    before: InventorySummary
+    after: InventorySummary
 
 
 class AccessMappingRequest(BaseModel):

@@ -61,6 +61,11 @@ def validate_runtime_inputs(topology: dict[str, Any], scenario: dict[str, Any]) 
             f"Topology {topology_id} has no CTU or shuttle device nodes. Add ctu_robot or shuttle_robot nodes before starting simulation."
         )
 
+    if not any(node.get("type") == "station" for node in topology.get("nodes", [])):
+        errors.append(
+            f"Topology {topology_id} has no station node. Add a station before starting formal task simulation."
+        )
+
     for device_id, device_node in device_node_lookup.items():
         robot = scenario_robot_lookup.get(device_id)
         if robot is None:
