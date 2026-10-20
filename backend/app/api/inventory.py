@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from ..inventory_schemas import (
+    AccessCandidateAudit,
+    AccessCandidateList,
     AccessMapping,
     AccessMappingRequest,
     InventorySummary,
@@ -12,6 +14,8 @@ from ..inventory_schemas import (
     SyntheticInventorySupplementPreview,
     SyntheticInventorySupplementRequest,
     SyntheticInventorySupplementResult,
+    StorageAccessPathRequest,
+    StorageAccessPathResult,
     ZoneInventorySummary,
 )
 from ..services.inventory import (
@@ -125,6 +129,40 @@ def configure_access_mapping(storage_node_id: str, payload: AccessMappingRequest
             storage_node_id,
             payload.access_cell_id,
             payload.source,
+            reviewed=payload.reviewed,
+        )
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/access-mappings/{storage_node_id}/candidates", response_model=AccessCandidateList)
+def list_access_mapping_candidates(
+    storage_node_id: str,
+    topology_id: str = Query(min_length=1),
+    limit: int = Query(default=12, ge=1, le=50),
+):
+    try:
+        return service().get_access_candidates(topology_id, storage_node_id, limit=limit)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.get("/access-mappings/audit", response_model=AccessCandidateAudit)
+def audit_access_mapping_candidates(topology_id: str = Query(min_length=1)):
+    try:
+        return service().audit_access_candidates(topology_id)
+    except Exception as exc:
+        raise _translate_error(exc) from exc
+
+
+@router.post("/access-path/plan", response_model=StorageAccessPathResult)
+def plan_storage_access_path(payload: StorageAccessPathRequest):
+    try:
+        return service().plan_storage_access_path(
+            payload.topology_id,
+            payload.storage_node_id,
+            payload.start_cell_id,
+            payload.algorithm,
         )
     except Exception as exc:
         raise _translate_error(exc) from exc

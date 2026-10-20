@@ -86,6 +86,7 @@ export function PathDemoPage() {
   const [demoMode, setDemoMode] = useState<DemoMode>('single')
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
   const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
+  const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
   const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
   const [startCellId, setStartCellId] = useState('')
   const [goalCellId, setGoalCellId] = useState('')
@@ -118,6 +119,16 @@ export function PathDemoPage() {
     queryKey: ['inventory-locations', topologyId],
     queryFn: () => api.listInventoryLocations(topologyId),
     enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const storageAccessAuditQuery = useQuery({
+    queryKey: ['storage-access-audit', topologyId],
+    queryFn: () => api.getStorageAccessAudit(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const storageAccessCandidatesQuery = useQuery({
+    queryKey: ['storage-access-candidates', topologyId, selectedInventoryNodeId],
+    queryFn: () => api.getStorageAccessCandidates(topologyId, selectedInventoryNodeId!),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId && selectedInventoryNodeId),
   })
   const stockedInventoryNodeIds = useMemo(
     () => new Set(
@@ -311,6 +322,7 @@ export function PathDemoPage() {
     const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
     const floorIndex = Math.max(0, floors.indexOf(location.floor))
     setSelectedInventoryNodeId(location.storage_node_id)
+    setSelectedAccessCellId(null)
     setCameraViewMode('free')
     requestCameraAction('focus-point', [
       worldX(location.col, topologyRecord.payload.grid.cols),
@@ -322,7 +334,10 @@ export function PathDemoPage() {
   const locateInventoryNode = (storageNodeId: string) => {
     const location = inventoryLocationsQuery.data?.find((item) => item.storage_node_id === storageNodeId)
     if (location) locateInventoryLocation(location)
-    else setSelectedInventoryNodeId(storageNodeId)
+    else {
+      setSelectedInventoryNodeId(storageNodeId)
+      setSelectedAccessCellId(null)
+    }
   }
 
   const locateAccessCell = (accessCellId: string) => {
@@ -454,6 +469,7 @@ export function PathDemoPage() {
               onChange={(event) => {
                 setTopologyId(event.target.value)
                 setSelectedInventoryNodeId(null)
+                setSelectedAccessCellId(null)
                 setStartCellId('')
                 setGoalCellId('')
                 setPresetVehicles([])
@@ -809,9 +825,18 @@ export function PathDemoPage() {
             <StorageInventoryPanel
               topologyId={topologyId}
               selectedStorageNodeId={selectedInventoryNodeId}
-              onSelectStorageNode={setSelectedInventoryNodeId}
+              onSelectStorageNode={(storageNodeId) => {
+                setSelectedInventoryNodeId(storageNodeId)
+                setSelectedAccessCellId(null)
+              }}
               onLocateStorageNode={locateInventoryLocation}
               onLocateAccessCell={locateAccessCell}
+              accessAudit={storageAccessAuditQuery.data}
+              accessCandidates={storageAccessCandidatesQuery.data}
+              accessCandidatesLoading={storageAccessCandidatesQuery.isLoading}
+              accessCandidatesError={storageAccessCandidatesQuery.isError ? String(storageAccessCandidatesQuery.error) : null}
+              selectedAccessCellId={selectedAccessCellId}
+              onSelectAccessCandidate={setSelectedAccessCellId}
             />
           )}
         </aside>
@@ -840,6 +865,12 @@ export function PathDemoPage() {
                 selectedInventoryNodeId={selectedInventoryNodeId}
                 stockedInventoryNodeIds={stockedInventoryNodeIds}
                 onInventoryNodeSelect={locateInventoryNode}
+                accessCandidates={storageAccessCandidatesQuery.data?.candidates ?? []}
+                selectedAccessCellId={selectedAccessCellId}
+                onAccessCandidateSelect={(accessCellId) => {
+                  setSelectedAccessCellId(accessCellId)
+                  locateAccessCell(accessCellId)
+                }}
               />
             </Suspense>
           ) : <div className="path-demo-empty">正在读取拓扑…</div>}

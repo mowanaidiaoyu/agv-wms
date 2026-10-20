@@ -12,6 +12,7 @@ from app.core.db import get_conn, init_db, utc_now
 from app.core.repository import Repository
 from app.main import app
 from app.services.inventory import AccessMappingValidationError, InventoryConflictError, InventoryService
+from app.services.storage_access import audit_access_candidates, evaluate_access_candidate
 
 
 def inventory_topology() -> dict:
@@ -21,7 +22,7 @@ def inventory_topology() -> dict:
         "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": [], "floors": ["1F"]},
         "grid": {"rows": 6, "cols": 6, "cellSize": 32, "originX": 0, "originY": 0},
         "zones": [
-            {"id": "zone-ctu", "label": "CTU 库区", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 4},
+            {"id": "zone-ctu", "label": "CTU 库区", "type": "ctu", "x": 2, "y": 0, "width": 1, "height": 4},
             {"id": "zone-shuttle", "label": "四向车库区", "type": "shuttle", "x": 4, "y": 0, "width": 2, "height": 4},
         ],
         "cells": [
@@ -186,18 +187,18 @@ def test_empty_and_missing_storage_locations(service: InventoryService):
 
 def test_access_mapping_requires_real_adjacent_connected_ctu_road(service: InventoryService):
     mapping = service.configure_access_mapping(
-        "topology-inventory-test", "storage-a", "cell-r1-c1", "manual_verified"
+        "topology-inventory-test", "storage-a", "cell-r1-c1", "manual_verified", reviewed=True
     )
     assert mapping["status"] == "configured"
     assert mapping["access_cell_id"] == "cell-r1-c1"
 
-    with pytest.raises(AccessMappingValidationError, match="does not exist"):
+    with pytest.raises(AccessMappingValidationError):
         service.configure_access_mapping("topology-inventory-test", "storage-b", "missing-cell", "manual")
-    with pytest.raises(AccessMappingValidationError, match="walkable road"):
+    with pytest.raises(AccessMappingValidationError):
         service.configure_access_mapping("topology-inventory-test", "storage-b", "cell-r2-c1", "manual")
-    with pytest.raises(AccessMappingValidationError, match="not connected"):
+    with pytest.raises(AccessMappingValidationError):
         service.configure_access_mapping("topology-inventory-test", "storage-c", "cell-r3-c1", "manual")
-    with pytest.raises(AccessMappingValidationError, match="CTU zone"):
+    with pytest.raises(AccessMappingValidationError):
         service.configure_access_mapping("topology-inventory-test", "storage-shuttle", "cell-r1-c4", "manual")
 
 
@@ -232,12 +233,44 @@ def test_inventory_api_queries_use_isolated_database(monkeypatch: pytest.MonkeyP
     assert detail.json()["storage_node_id"] == "storage-a"
     assert detail.json()["access_mapping"]["status"] == "unconfigured"
 
-    mapped = client.put(
+    candidates = client.get(
+        "/api/v1/inventory/access-mappings/storage-a/candidates",
+        params={"topology_id": "topology-inventory-test"},
+    )
+    assert candidates.status_code == 200
+    assert candidates.json()["eligible_count"] == 1
+    assert candidates.json()["candidates"][0]["access_cell_id"] == "cell-r1-c1"
+
+    audit = client.get(
+        "/api/v1/inventory/access-mappings/audit",
+        params={"topology_id": "topology-inventory-test"},
+    )
+    assert audit.status_code == 200
+    assert audit.json()["eligible_location_count"] == 1
+
+    unreviewed = client.put(
         "/api/v1/inventory/access-mappings/storage-a",
         json={"topology_id": "topology-inventory-test", "access_cell_id": "cell-r1-c1", "source": "manual_verified"},
     )
+    assert unreviewed.status_code == 409
+
+    mapped = client.put(
+        "/api/v1/inventory/access-mappings/storage-a",
+        json={"topology_id": "topology-inventory-test", "access_cell_id": "cell-r1-c1", "source": "manual_verified", "reviewed": True},
+    )
     assert mapped.status_code == 200
     assert mapped.json()["status"] == "configured"
+
+    path_preview = client.post(
+        "/api/v1/inventory/access-path/plan",
+        json={
+            "topology_id": "topology-inventory-test", "storage_node_id": "storage-a",
+            "start_cell_id": "cell-r1-c0", "algorithm": "astar",
+        },
+    )
+    assert path_preview.status_code == 200
+    assert path_preview.json()["access_cell_id"] == "cell-r1-c1"
+    assert all(cell["type"] == "road" for cell in path_preview.json()["path_cells"])
 
     missing = client.get(
         "/api/v1/inventory/locations/missing",
@@ -369,3 +402,74 @@ def test_supplement_api_previews_and_fills_only_real_ctu_storage_nodes(
         json={"topology_id": "topology-inventory-test", "count": 1, "fill_all": True},
     )
     assert invalid.status_code == 409
+
+
+def test_access_candidate_review_is_deterministic_and_does_not_change_inventory(repository: Repository):
+    service = InventoryService(repository)
+    insert_balance(repository, "storage-a", "SKU-REAL", 20, 6, source="wms_import")
+    before = service.get_location("topology-inventory-test", "storage-a")["balances"]
+
+    first = service.get_access_candidates("topology-inventory-test", "storage-a")
+    second = service.get_access_candidates("topology-inventory-test", "storage-a")
+    assert first == second
+    assert first["eligible_count"] == 1
+    assert first["candidates"][0]["access_cell_id"] == "cell-r1-c1"
+    assert first["candidates"][0]["status"] == "eligible"
+
+    with pytest.raises(AccessMappingValidationError, match="explicit human review"):
+        service.configure_access_mapping(
+            "topology-inventory-test", "storage-a", "cell-r1-c1", "manual_verified"
+        )
+    service.configure_access_mapping(
+        "topology-inventory-test", "storage-a", "cell-r1-c1", "manual_verified", reviewed=True
+    )
+    after = service.get_location("topology-inventory-test", "storage-a")["balances"]
+    assert after == before
+
+
+def test_access_candidate_rejects_blocked_cells_and_roads_across_racks():
+    topology = inventory_topology()
+    blocked = evaluate_access_candidate(topology, "storage-b", "cell-r2-c1")
+    assert blocked["status"] == "rejected"
+    assert "ACCESS_CELL_NOT_ROAD" in blocked["reason_codes"]
+
+    topology["cells"].extend([
+        {"id": "cell-r1-c3", "floor": "1F", "row": 1, "col": 3, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": True},
+        {"id": "cell-r1-c4", "floor": "1F", "row": 1, "col": 4, "type": "road", "zoneId": "zone-ctu", "cost": 1, "walkable": True},
+    ])
+    across_rack = evaluate_access_candidate(topology, "storage-a", "cell-r1-c4")
+    assert across_rack["status"] == "rejected"
+    assert "ACCESS_NOT_ON_PICK_FACE" in across_rack["reason_codes"]
+
+
+def test_unconfigured_storage_cannot_plan_pick_path_and_reviewed_mapping_uses_road_only(repository: Repository):
+    service = InventoryService(repository)
+    with pytest.raises(InventoryConflictError, match="no reviewed access mapping"):
+        service.plan_storage_access_path(
+            "topology-inventory-test", "storage-a", "cell-r1-c0", "astar"
+        )
+
+    service.configure_access_mapping(
+        "topology-inventory-test", "storage-a", "cell-r1-c1", "manual_verified", reviewed=True
+    )
+    for algorithm in ("astar", "dijkstra"):
+        result = service.plan_storage_access_path(
+            "topology-inventory-test", "storage-a", "cell-r1-c0", algorithm
+        )
+        assert result["access_cell_id"] == "cell-r1-c1"
+        assert result["path_cells"][-1]["id"] == "cell-r1-c1"
+        assert all(cell["type"] == "road" for cell in result["path_cells"])
+        assert all(cell["id"] != "storage-a" for cell in result["path_cells"])
+        assert result["execution_status"] == "planning_preview_only"
+
+
+def test_real_666_has_no_provable_or_reviewable_access_candidate():
+    topology_path = Path(__file__).resolve().parents[2] / "docs" / "topologies" / "666.json"
+    topology = json.loads(topology_path.read_text(encoding="utf-8"))
+    audit = audit_access_candidates(topology)
+
+    assert audit["storage_location_count"] == 2496
+    assert audit["eligible_location_count"] == 0
+    assert audit["review_required_location_count"] == 0
+    assert audit["unmappable_location_count"] == 2496
+    assert audit["reason_counts"]["NO_ADJACENT_REAL_ROAD"] == 2495

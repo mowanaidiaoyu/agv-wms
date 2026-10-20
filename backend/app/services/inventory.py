@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import random
-import sqlite3
 import hashlib
-from collections import deque
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from ..core.db import get_conn, utc_now
 from ..core.repository import Repository
+from .pathfinding import shortest_path_result
+from .storage_access import access_candidates, audit_access_candidates, evaluate_access_candidate
 
 
 SYNTHETIC_DEMO = "synthetic_demo"
@@ -350,9 +351,15 @@ class InventoryService:
         storage_node_id: str,
         access_cell_id: str,
         source: str,
+        *,
+        reviewed: bool = False,
     ) -> dict[str, Any]:
         topology = self._topology_payload(self._topology_record(topology_id))
-        self._validate_access_mapping(topology, storage_node_id, access_cell_id)
+        evaluation = self._validate_access_mapping(topology, storage_node_id, access_cell_id)
+        if not reviewed:
+            raise AccessMappingValidationError("Access mapping requires explicit human review before saving")
+        if evaluation["status"] == "review_required" and source != "manual_verified":
+            raise AccessMappingValidationError("A review-required candidate must be saved as manual_verified")
         version = str(topology.get("meta", {}).get("version", "unknown"))
         now = utc_now()
         with get_conn(self.db_path) as conn:
@@ -370,6 +377,80 @@ class InventoryService:
                 (topology_id, storage_node_id, access_cell_id, version, source, now),
             )
         return self.get_location(topology_id, storage_node_id)["access_mapping"]
+
+    def get_access_candidates(self, topology_id: str, storage_node_id: str, *, limit: int = 12) -> dict[str, Any]:
+        topology = self._topology_payload(self._topology_record(topology_id))
+        try:
+            return access_candidates(topology, storage_node_id, limit=limit)
+        except ValueError as exc:
+            raise InventoryNotFoundError(str(exc)) from exc
+
+    def audit_access_candidates(self, topology_id: str) -> dict[str, Any]:
+        topology = self._topology_payload(self._topology_record(topology_id))
+        audit = audit_access_candidates(topology)
+        mappings = self._mapping_rows(topology_id)
+        configured = 0
+        invalid = 0
+        for storage_node_id, mapping in mappings.items():
+            if mapping.get("topology_version") != audit["topology_version"]:
+                invalid += 1
+                continue
+            evaluation = evaluate_access_candidate(topology, storage_node_id, str(mapping.get("access_cell_id") or ""))
+            if evaluation["status"] == "eligible" or (
+                evaluation["status"] == "review_required" and mapping.get("source") == "manual_verified"
+            ):
+                configured += 1
+            else:
+                invalid += 1
+        return {**audit, "configured_mapping_count": configured, "invalid_mapping_count": invalid}
+
+    def plan_storage_access_path(
+        self,
+        topology_id: str,
+        storage_node_id: str,
+        start_cell_id: str,
+        algorithm: str,
+    ) -> dict[str, Any]:
+        if algorithm not in {"astar", "dijkstra"}:
+            raise InventoryConflictError(f"Unsupported algorithm: {algorithm}")
+        topology = self._topology_payload(self._topology_record(topology_id))
+        mapping = self._mapping_rows(topology_id).get(storage_node_id)
+        if not mapping:
+            raise InventoryConflictError("Storage location has no reviewed access mapping")
+        topology_version = str(topology.get("meta", {}).get("version", "unknown"))
+        if mapping.get("topology_version") != topology_version:
+            raise InventoryConflictError("Storage access mapping belongs to a different topology version")
+        evaluation = self._validate_access_mapping(topology, storage_node_id, str(mapping["access_cell_id"]))
+        if evaluation["status"] == "review_required" and mapping.get("source") != "manual_verified":
+            raise InventoryConflictError("Storage access mapping has not completed manual review")
+
+        zones = self._zone_lookup(topology)
+        road_cells = [
+            cell for cell in topology.get("cells", [])
+            if cell.get("type") == "road"
+            and cell.get("walkable", True)
+            and zones.get(cell.get("zoneId"), {}).get("type") == "ctu"
+        ]
+        cells_by_id = {cell["id"]: cell for cell in road_cells}
+        if start_cell_id not in cells_by_id:
+            raise InventoryConflictError("Start cell must be a real walkable CTU road Cell")
+        access_cell_id = str(mapping["access_cell_id"])
+        road_only_topology = {**topology, "cells": road_cells}
+        result = shortest_path_result(road_only_topology, start_cell_id, access_cell_id, algorithm)
+        if not result.path:
+            raise InventoryConflictError("No road-only CTU path reaches the reviewed storage access Cell")
+        return {
+            "topology_id": topology_id,
+            "topology_version": topology_version,
+            "storage_node_id": storage_node_id,
+            "access_cell_id": access_cell_id,
+            "algorithm": algorithm,
+            "path_cells": result.path,
+            "total_distance": max(0, len(result.path) - 1),
+            "total_cost": result.total_cost,
+            "visited_nodes": result.visited_nodes,
+            "execution_status": "planning_preview_only",
+        }
 
     def list_access_mappings(self, topology_id: str) -> list[dict[str, Any]]:
         self._topology_record(topology_id)
@@ -447,47 +528,16 @@ class InventoryService:
                 raise InventoryConflictError("Confirmed pick does not have a matching reservation")
         return True
 
-    def _validate_access_mapping(self, topology: dict[str, Any], storage_node_id: str, access_cell_id: str) -> None:
-        node = next((item for item in self._storage_nodes(topology) if item["id"] == storage_node_id), None)
-        if not node:
-            raise AccessMappingValidationError(f"Storage node {storage_node_id} does not exist")
-        cell = next((item for item in topology.get("cells", []) if item["id"] == access_cell_id), None)
-        if not cell:
-            raise AccessMappingValidationError(f"Access cell {access_cell_id} does not exist")
-        zones = self._zone_lookup(topology)
-        cell_zone = zones.get(cell.get("zoneId"))
-        node_zone = zones.get(node.get("zoneId"))
-        if cell.get("type") != "road" or not cell.get("walkable", True):
-            raise AccessMappingValidationError("Access cell must be a walkable road cell")
-        if not cell_zone or cell_zone.get("type") != "ctu":
-            raise AccessMappingValidationError("Access cell is not in a CTU zone")
-        if not node_zone or node_zone.get("type") != "ctu":
-            raise AccessMappingValidationError("Storage node is not in a CTU zone")
-        if (cell.get("floor") or "1F") != (node.get("floor") or "1F"):
-            raise AccessMappingValidationError("Access cell and storage node must be on the same floor")
-        distance = abs(int(cell["row"]) - int(node["row"])) + abs(int(cell["col"]) - int(node["col"]))
-        if distance != 1:
-            raise AccessMappingValidationError("Access cell must be explicitly adjacent to the storage node")
-
-        road_positions = {
-            (item.get("floor") or "1F", int(item["row"]), int(item["col"])): item
-            for item in topology.get("cells", [])
-            if item.get("type") == "road"
-            and item.get("walkable", True)
-            and zones.get(item.get("zoneId"), {}).get("type") == "ctu"
-        }
-        start = (cell.get("floor") or "1F", int(cell["row"]), int(cell["col"]))
-        visited = {start}
-        queue = deque([start])
-        while queue:
-            floor, row, col = queue.popleft()
-            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                nxt = (floor, row + dr, col + dc)
-                if nxt in road_positions and nxt not in visited:
-                    visited.add(nxt)
-                    queue.append(nxt)
-        if len(visited) < 2:
-            raise AccessMappingValidationError("Access cell is not connected to the CTU road network")
+    def _validate_access_mapping(
+        self,
+        topology: dict[str, Any],
+        storage_node_id: str,
+        access_cell_id: str,
+    ) -> dict[str, Any]:
+        evaluation = evaluate_access_candidate(topology, storage_node_id, access_cell_id)
+        if evaluation["status"] == "rejected":
+            raise AccessMappingValidationError("; ".join(evaluation["reasons"]))
+        return evaluation
 
     def _inventory_rows(
         self,
@@ -567,11 +617,21 @@ class InventoryService:
                 "access_cell_id": None, "status": "unconfigured", "source": None, "validated_at": None,
             }
         else:
-            status = "configured" if mapping["topology_version"] == topology_version else "topology_version_mismatch"
+            status = "topology_version_mismatch"
+            validation_message = None
+            if mapping["topology_version"] == topology_version:
+                evaluation = evaluate_access_candidate(topology, node["id"], mapping["access_cell_id"])
+                manually_verified = mapping.get("source") == "manual_verified"
+                if evaluation["status"] == "eligible" or (evaluation["status"] == "review_required" and manually_verified):
+                    status = "configured"
+                else:
+                    status = "invalid"
+                    validation_message = "; ".join(evaluation["reasons"])
             access = {
                 "topology_id": topology["id"], "storage_node_id": node["id"],
                 "access_cell_id": mapping["access_cell_id"], "status": status,
                 "source": mapping["source"], "validated_at": mapping["validated_at"],
+                "validation_message": validation_message,
             }
         zone = zones.get(node.get("zoneId"))
         return {

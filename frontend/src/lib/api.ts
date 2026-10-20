@@ -17,6 +17,10 @@ import type {
 import type {
   InventorySummary,
   InventoryZoneSummary,
+  StorageAccessAudit,
+  StorageAccessCandidateList,
+  StorageAccessMapping,
+  StorageAccessPathResult,
   StorageInventoryLocation,
   SyntheticInventorySeedResult,
   SyntheticInventorySupplementPreview,
@@ -185,6 +189,42 @@ export const api = {
     return request<SyntheticInventorySupplementResult>('/inventory/synthetic-demo/supplement', {
       method: 'POST',
       body: JSON.stringify({ topology_id: topologyId, count, fill_all: fillAll, seed }),
+    })
+  },
+  getStorageAccessAudit(topologyId: string) {
+    return request<StorageAccessAudit>(`/inventory/access-mappings/audit?topology_id=${encodeURIComponent(topologyId)}`)
+  },
+  getStorageAccessCandidates(topologyId: string, storageNodeId: string, limit = 12) {
+    const query = new URLSearchParams({ topology_id: topologyId, limit: String(limit) })
+    return request<StorageAccessCandidateList>(
+      `/inventory/access-mappings/${encodeURIComponent(storageNodeId)}/candidates?${query}`,
+    )
+  },
+  configureStorageAccessMapping(topologyId: string, storageNodeId: string, accessCellId: string) {
+    return request<StorageAccessMapping>(`/inventory/access-mappings/${encodeURIComponent(storageNodeId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        topology_id: topologyId,
+        access_cell_id: accessCellId,
+        source: 'manual_verified',
+        reviewed: true,
+      }),
+    })
+  },
+  planStorageAccessPath(
+    topologyId: string,
+    storageNodeId: string,
+    startCellId: string,
+    algorithm: 'astar' | 'dijkstra',
+  ) {
+    return request<StorageAccessPathResult>('/inventory/access-path/plan', {
+      method: 'POST',
+      body: JSON.stringify({
+        topology_id: topologyId,
+        storage_node_id: storageNodeId,
+        start_cell_id: startCellId,
+        algorithm,
+      }),
     })
   },
 }

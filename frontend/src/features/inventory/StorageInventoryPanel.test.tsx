@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../lib/api'
-import type { InventorySummary, StorageInventoryLocation } from './types'
+import type { InventorySummary, StorageAccessAudit, StorageAccessCandidateList, StorageInventoryLocation } from './types'
 import { StorageInventoryPanel } from './StorageInventoryPanel'
 
 vi.mock('../../lib/api', () => ({
@@ -13,6 +13,7 @@ vi.mock('../../lib/api', () => ({
     initializeSyntheticInventory: vi.fn(),
     previewSyntheticInventorySupplement: vi.fn(),
     supplementSyntheticInventory: vi.fn(),
+    configureStorageAccessMapping: vi.fn(),
   },
 }))
 
@@ -52,7 +53,10 @@ const positive = location('storage-a', 'ctu', 8)
 const zero = location('storage-zero', 'ctu', 0)
 const empty = location('storage-empty', 'shuttle', null)
 
-function renderPanel(selectedStorageNodeId: string | null = null) {
+function renderPanel(
+  selectedStorageNodeId: string | null = null,
+  access?: { audit: StorageAccessAudit; candidates: StorageAccessCandidateList; selectedAccessCellId: string },
+) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   const onSelectStorageNode = vi.fn()
   const onLocateStorageNode = vi.fn()
@@ -65,6 +69,10 @@ function renderPanel(selectedStorageNodeId: string | null = null) {
         onSelectStorageNode={onSelectStorageNode}
         onLocateStorageNode={onLocateStorageNode}
         onLocateAccessCell={onLocateAccessCell}
+        accessAudit={access?.audit}
+        accessCandidates={access?.candidates}
+        selectedAccessCellId={access?.selectedAccessCellId}
+        onSelectAccessCandidate={vi.fn()}
       />
     </QueryClientProvider>,
   )
@@ -86,6 +94,10 @@ beforeEach(() => {
     eligible_before: 1, inserted_locations: 1, inserted_balances: 1,
     skipped_existing_locations: 2, skipped_due_to_limit: 0, source: 'synthetic_demo',
     before: summary, after: { ...summary, stocked_location_count: 3, positive_inventory_location_count: 2, unconfigured_location_count: 0, quantity_on_hand: 20, quantity_available: 17 },
+  })
+  vi.mocked(api.configureStorageAccessMapping).mockResolvedValue({
+    topology_id: 'topology-a', storage_node_id: 'storage-a', access_cell_id: 'cell-r1-c1',
+    status: 'configured', source: 'manual_verified', validated_at: '2026-10-20T00:00:00Z',
   })
 })
 
@@ -125,5 +137,31 @@ describe('StorageInventoryPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '补充演示库存' }))
     await waitFor(() => expect(api.supplementSyntheticInventory).toHaveBeenCalledWith('topology-a', 100, false, 42))
     expect(await screen.findByRole('status')).toHaveTextContent('已新增 1 个库位')
+  })
+
+  it('requires explicit review before saving a backend-eligible real road candidate', async () => {
+    const audit: StorageAccessAudit = {
+      topology_id: 'topology-a', topology_version: '2.0.0', storage_location_count: 3,
+      eligible_location_count: 1, review_required_location_count: 0, unmappable_location_count: 2,
+      configured_mapping_count: 0, invalid_mapping_count: 0, reason_counts: { NO_ADJACENT_REAL_ROAD: 2 },
+    }
+    const candidates: StorageAccessCandidateList = {
+      topology_id: 'topology-a', topology_version: '2.0.0', storage_node_id: 'storage-a',
+      eligible_count: 1, review_required_count: 0, rejected_count: 0,
+      candidates: [{
+        topology_id: 'topology-a', topology_version: '2.0.0', storage_node_id: 'storage-a',
+        access_cell_id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, zone_id: 'zone-ctu',
+        distance_cells: 1, status: 'eligible', reason_codes: ['REAL_CTU_ROAD'], reasons: ['真实可通行 CTU road Cell。'],
+      }],
+    }
+    renderPanel('storage-a', { audit, candidates, selectedAccessCellId: 'cell-r1-c1' })
+
+    expect(await screen.findByText('可验证 1')).toBeInTheDocument()
+    const save = screen.getByRole('button', { name: '审核并保存正式映射' })
+    expect(save).toBeDisabled()
+    fireEvent.click(screen.getByLabelText('我已核对货架取货面、道路归属和现场通行空间'))
+    expect(save).toBeEnabled()
+    fireEvent.click(save)
+    await waitFor(() => expect(api.configureStorageAccessMapping).toHaveBeenCalledWith('topology-a', 'storage-a', 'cell-r1-c1'))
   })
 })

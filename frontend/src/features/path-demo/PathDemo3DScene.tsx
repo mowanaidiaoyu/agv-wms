@@ -4,6 +4,7 @@ import { useMemo } from 'react'
 import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { InventoryOverlay } from '../inventory/InventoryOverlay'
+import type { StorageAccessCandidate } from '../inventory/types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
@@ -128,6 +129,9 @@ export function PathDemo3DScene({
   selectedInventoryNodeId = null,
   stockedInventoryNodeIds = new Set<string>(),
   onInventoryNodeSelect,
+  accessCandidates = [],
+  selectedAccessCellId = null,
+  onAccessCandidateSelect,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -149,6 +153,9 @@ export function PathDemo3DScene({
   selectedInventoryNodeId?: string | null
   stockedInventoryNodeIds?: ReadonlySet<string>
   onInventoryNodeSelect?: (storageNodeId: string) => void
+  accessCandidates?: StorageAccessCandidate[]
+  selectedAccessCellId?: string | null
+  onAccessCandidateSelect?: (accessCellId: string) => void
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const storageNodeIds = useMemo(
@@ -196,6 +203,9 @@ export function PathDemo3DScene({
           activeFloor={activeFloor}
           selectedStorageNodeId={selectedInventoryNodeId}
           stockedStorageNodeIds={stockedInventoryNodeIds}
+          accessCandidates={accessCandidates}
+          selectedAccessCellId={selectedAccessCellId}
+          onAccessCandidateSelect={onAccessCandidateSelect}
         />
       ) : null}
       <PathDemo3DOverlay

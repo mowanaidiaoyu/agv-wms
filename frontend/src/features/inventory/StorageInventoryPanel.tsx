@@ -1,8 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, MapPin, PackageSearch, RefreshCw } from 'lucide-react'
 import { api } from '../../lib/api'
-import type { StorageInventoryLocation } from './types'
+import type {
+  StorageAccessAudit,
+  StorageAccessCandidateList,
+  StorageInventoryLocation,
+} from './types'
 
 interface StorageInventoryPanelProps {
   topologyId: string
@@ -10,6 +14,12 @@ interface StorageInventoryPanelProps {
   onSelectStorageNode: (storageNodeId: string) => void
   onLocateStorageNode?: (location: StorageInventoryLocation) => void
   onLocateAccessCell?: (accessCellId: string) => void
+  accessAudit?: StorageAccessAudit
+  accessCandidates?: StorageAccessCandidateList
+  accessCandidatesLoading?: boolean
+  accessCandidatesError?: string | null
+  selectedAccessCellId?: string | null
+  onSelectAccessCandidate?: (accessCellId: string) => void
 }
 
 function formatSource(source: string): string {
@@ -25,12 +35,19 @@ export function StorageInventoryPanel({
   onSelectStorageNode,
   onLocateStorageNode,
   onLocateAccessCell,
+  accessAudit,
+  accessCandidates,
+  accessCandidatesLoading = false,
+  accessCandidatesError = null,
+  selectedAccessCellId = null,
+  onSelectAccessCandidate,
 }: StorageInventoryPanelProps) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [zoneType, setZoneType] = useState<'all' | 'ctu' | 'shuttle'>('all')
   const [supplementCount, setSupplementCount] = useState(100)
   const [fillAll, setFillAll] = useState(false)
+  const [reviewConfirmed, setReviewConfirmed] = useState(false)
 
   const summaryQuery = useQuery({
     queryKey: ['inventory-summary', topologyId],
@@ -69,6 +86,21 @@ export function StorageInventoryPanel({
       await queryClient.invalidateQueries({ queryKey: ['inventory-supplement-preview', topologyId] })
     },
   })
+  const configureAccessMutation = useMutation({
+    mutationFn: (accessCellId: string) => api.configureStorageAccessMapping(topologyId, selectedStorageNodeId!, accessCellId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['inventory-location', topologyId, selectedStorageNodeId] })
+      await queryClient.invalidateQueries({ queryKey: ['inventory-locations', topologyId] })
+      await queryClient.invalidateQueries({ queryKey: ['storage-access-audit', topologyId] })
+      setReviewConfirmed(false)
+    },
+  })
+  const resetConfigureAccessMutation = configureAccessMutation.reset
+
+  useEffect(() => {
+    setReviewConfirmed(false)
+    resetConfigureAccessMutation()
+  }, [resetConfigureAccessMutation, selectedAccessCellId, selectedStorageNodeId])
 
   const filteredLocations = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase()
@@ -86,6 +118,9 @@ export function StorageInventoryPanel({
   const summary = summaryQuery.data
   const detail = detailQuery.data
   const sources = summary?.data_sources ?? []
+  const selectedCandidate = accessCandidates?.candidates.find(
+    (candidate) => candidate.access_cell_id === selectedAccessCellId,
+  ) ?? null
 
   return (
     <section className="inventory-panel" aria-label="库位库存">
@@ -93,6 +128,16 @@ export function StorageInventoryPanel({
         <Database size={15} />
         <span>数据来源：{sources.length ? sources.map(formatSource).join('、') : '尚无库存数据'}</span>
       </div>
+
+      {accessAudit ? (
+        <div className="inventory-access-audit" aria-label="取货停靠点审计">
+          <strong>取货停靠点审计</strong>
+          <span>可验证 {accessAudit.eligible_location_count}</span>
+          <span>待人工审核 {accessAudit.review_required_location_count}</span>
+          <span>当前不可映射 {accessAudit.unmappable_location_count}</span>
+          <span>已保存 {accessAudit.configured_mapping_count}</span>
+        </div>
+      ) : null}
 
       {summary ? (
         <div className="inventory-summary-grid">
@@ -249,9 +294,73 @@ export function StorageInventoryPanel({
               </div>
             ) : detail.access_mapping.status === 'topology_version_mismatch' ? (
               <p className="inventory-warning">停靠点映射对应旧拓扑版本，需要重新校验。</p>
+            ) : detail.access_mapping.status === 'invalid' ? (
+              <p className="inventory-warning">已保存停靠点不再合法：{detail.access_mapping.validation_message}</p>
             ) : (
               <p className="inventory-warning">尚未配置合法 CTU 取货停靠点，不能生成取货路径。</p>
             )}
+
+            <section className="inventory-access-review" aria-label="候选停靠点审核">
+              <h4>候选 CTU 停靠点</h4>
+              <p className="muted-copy">候选只来自真实 road Cell；红色库位本身不会成为车辆终点。</p>
+              {accessCandidatesLoading ? <p className="muted-copy">正在审计真实道路…</p> : null}
+              {accessCandidatesError ? <p className="inventory-warning">候选读取失败：{accessCandidatesError}</p> : null}
+              {accessCandidates ? (
+                <>
+                  <p className="inventory-access-counts">
+                    可验证 {accessCandidates.eligible_count} · 待审核 {accessCandidates.review_required_count} · 已拒绝 {accessCandidates.rejected_count}
+                  </p>
+                  {accessCandidates.eligible_count + accessCandidates.review_required_count === 0 ? (
+                    <p className="inventory-warning">当前拓扑没有可保存候选。请补充真实 CTU road、库区归属和取货面语义，不能用最近道路代替。</p>
+                  ) : null}
+                  <div className="inventory-access-candidates">
+                    {accessCandidates.candidates.map((candidate) => (
+                      <button
+                        type="button"
+                        key={candidate.access_cell_id}
+                        className={selectedAccessCellId === candidate.access_cell_id ? 'active' : ''}
+                        onClick={() => {
+                          onSelectAccessCandidate?.(candidate.access_cell_id)
+                          onLocateAccessCell?.(candidate.access_cell_id)
+                        }}
+                      >
+                        <span>{candidate.access_cell_id}</span>
+                        <small>
+                          {candidate.status === 'eligible' ? '可验证' : candidate.status === 'review_required' ? '待人工审核' : '不可用'}
+                          {' · '}距离 {candidate.distance_cells ?? '—'} 格
+                        </small>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : null}
+              {selectedCandidate ? (
+                <div className={`inventory-candidate-review is-${selectedCandidate.status}`}>
+                  <strong>{selectedCandidate.access_cell_id}</strong>
+                  <ul>{selectedCandidate.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                  {selectedCandidate.status !== 'rejected' ? (
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={reviewConfirmed}
+                        onChange={(event) => setReviewConfirmed(event.target.checked)}
+                      />
+                      我已核对货架取货面、道路归属和现场通行空间
+                    </label>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={selectedCandidate.status === 'rejected' || !reviewConfirmed || configureAccessMutation.isPending}
+                    onClick={() => configureAccessMutation.mutate(selectedCandidate.access_cell_id)}
+                  >
+                    {configureAccessMutation.isPending ? '正在校验保存…' : '审核并保存正式映射'}
+                  </button>
+                  {configureAccessMutation.data ? <p className="inventory-access-ok" role="status">正式映射已保存。</p> : null}
+                  {configureAccessMutation.isError ? <p className="inventory-warning">保存失败：{String(configureAccessMutation.error)}</p> : null}
+                </div>
+              ) : null}
+            </section>
           </>
         ) : (
           <p className="inventory-warning">库位详情加载失败：{String(detailQuery.error)}</p>

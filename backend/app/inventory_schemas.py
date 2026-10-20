@@ -36,9 +36,10 @@ class AccessMapping(BaseModel):
     topology_id: str
     storage_node_id: str
     access_cell_id: str | None = None
-    status: Literal["configured", "unconfigured", "topology_version_mismatch"]
+    status: Literal["configured", "unconfigured", "topology_version_mismatch", "invalid"]
     source: str | None = None
     validated_at: str | None = None
+    validation_message: str | None = None
 
 
 class StorageLocationInventory(BaseModel):
@@ -137,6 +138,64 @@ class AccessMappingRequest(BaseModel):
     topology_id: str = Field(min_length=1)
     access_cell_id: str = Field(min_length=1)
     source: str = Field(default="manual", min_length=1)
+    reviewed: bool = False
+
+
+class AccessCandidate(BaseModel):
+    topology_id: str
+    topology_version: str
+    storage_node_id: str
+    access_cell_id: str
+    floor: str
+    row: int | None
+    col: int | None
+    zone_id: str | None
+    distance_cells: int | None
+    status: Literal["eligible", "review_required", "rejected"]
+    reason_codes: list[str]
+    reasons: list[str]
+
+
+class AccessCandidateList(BaseModel):
+    topology_id: str
+    topology_version: str
+    storage_node_id: str
+    eligible_count: int = Field(ge=0)
+    review_required_count: int = Field(ge=0)
+    rejected_count: int = Field(ge=0)
+    candidates: list[AccessCandidate]
+
+
+class AccessCandidateAudit(BaseModel):
+    topology_id: str
+    topology_version: str
+    storage_location_count: int = Field(ge=0)
+    eligible_location_count: int = Field(ge=0)
+    review_required_location_count: int = Field(ge=0)
+    unmappable_location_count: int = Field(ge=0)
+    configured_mapping_count: int = Field(ge=0)
+    invalid_mapping_count: int = Field(ge=0)
+    reason_counts: dict[str, int]
+
+
+class StorageAccessPathRequest(BaseModel):
+    topology_id: str = Field(min_length=1)
+    storage_node_id: str = Field(min_length=1)
+    start_cell_id: str = Field(min_length=1)
+    algorithm: Literal["astar", "dijkstra"] = "astar"
+
+
+class StorageAccessPathResult(BaseModel):
+    topology_id: str
+    topology_version: str
+    storage_node_id: str
+    access_cell_id: str
+    algorithm: Literal["astar", "dijkstra"]
+    path_cells: list[dict]
+    total_distance: int = Field(ge=0)
+    total_cost: float = Field(ge=0)
+    visited_nodes: int = Field(ge=0)
+    execution_status: Literal["planning_preview_only"]
 
 
 # Reserved contracts for C-INV-2/C-INV-3. They are intentionally not exposed as

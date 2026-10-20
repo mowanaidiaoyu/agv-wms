@@ -26,6 +26,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     inventoryMode,
     selectedInventoryNodeId,
     onInventoryNodeSelect,
+    accessCandidates,
+    selectedAccessCellId,
+    onAccessCandidateSelect,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -41,6 +44,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     inventoryMode?: boolean
     selectedInventoryNodeId?: string | null
     onInventoryNodeSelect?: (storageNodeId: string) => void
+    accessCandidates?: Array<{ access_cell_id: string }>
+    selectedAccessCellId?: string | null
+    onAccessCandidateSelect?: (accessCellId: string) => void
   }) => (
     <div>
       <div
@@ -60,6 +66,8 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-camera-target={cameraActionRequest?.targetWorld?.join(',') ?? ''}
         data-inventory-mode={inventoryMode ? 'true' : 'false'}
         data-selected-inventory-node={selectedInventoryNodeId ?? ''}
+        data-access-candidates={accessCandidates?.map((candidate) => candidate.access_cell_id).join(',') ?? ''}
+        data-selected-access-cell={selectedAccessCellId ?? ''}
       />
       <button
         type="button"
@@ -67,6 +75,7 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         onClick={() => onRoadCellSelect?.({ id: 'cell-r3-c3', floor: '1F', row: 3, col: 3, type: 'road', component_id: 'component-1' })}
       >mock road cell</button>
       <button type="button" data-testid="mock-storage-node" onClick={() => onInventoryNodeSelect?.('storage-a')}>mock storage node</button>
+      <button type="button" data-testid="mock-access-candidate" onClick={() => onAccessCandidateSelect?.('cell-r1-c1')}>mock access candidate</button>
     </div>
   ),
 }))
@@ -80,6 +89,10 @@ vi.mock('../lib/api', () => ({
     initializeSyntheticInventory: vi.fn(),
     previewSyntheticInventorySupplement: vi.fn(),
     supplementSyntheticInventory: vi.fn(),
+    getStorageAccessAudit: vi.fn(),
+    getStorageAccessCandidates: vi.fn(),
+    configureStorageAccessMapping: vi.fn(),
+    planStorageAccessPath: vi.fn(),
   },
 }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
@@ -302,6 +315,20 @@ beforeEach(() => {
     topology_id: topology.id, eligible_location_count: 0, requested_location_count: 100,
     estimated_insert_count: 0, fill_all: false,
     before: { topology_id: topology.id, storage_location_count: 1, stocked_location_count: 1, positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0, sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10, data_sources: ['synthetic_demo'] },
+  })
+  vi.mocked(api.getStorageAccessAudit).mockResolvedValue({
+    topology_id: topology.id, topology_version: topology.meta.version,
+    storage_location_count: 1, eligible_location_count: 1, review_required_location_count: 0,
+    unmappable_location_count: 0, configured_mapping_count: 1, invalid_mapping_count: 0, reason_counts: {},
+  })
+  vi.mocked(api.getStorageAccessCandidates).mockResolvedValue({
+    topology_id: topology.id, topology_version: topology.meta.version, storage_node_id: 'storage-a',
+    eligible_count: 1, review_required_count: 0, rejected_count: 0,
+    candidates: [{
+      topology_id: topology.id, topology_version: topology.meta.version, storage_node_id: 'storage-a',
+      access_cell_id: 'cell-r1-c1', floor: '1F', row: 1, col: 1, zone_id: 'zone-ctu', distance_cells: 1,
+      status: 'eligible', reason_codes: ['REAL_CTU_ROAD'], reasons: ['真实可通行 CTU road Cell。'],
+    }],
   })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
@@ -630,6 +657,11 @@ describe('PathDemoPage', () => {
     expect(await screen.findByText('标准紧固件套装')).toBeInTheDocument()
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-inventory-node', 'storage-a')
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '0.5,0.5,0.5')
+    await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-access-candidates', 'cell-r1-c1'))
+
+    fireEvent.click(screen.getByTestId('mock-access-candidate'))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-access-cell', 'cell-r1-c1')
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')
 
     fireEvent.click(screen.getByRole('button', { name: '查看停靠点' }))
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')

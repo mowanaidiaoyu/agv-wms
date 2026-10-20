@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 
+from .storage_access import evaluate_access_candidate
+
 
 DEFAULT_FLOOR = "1F"
 DEVICE_NODE_TYPES = {"ctu_robot", "shuttle_robot"}
@@ -253,31 +255,21 @@ def validate_topology_business_rules(
     if access_mappings is not None:
         mapping_lookup = {mapping.get("storage_node_id"): mapping for mapping in access_mappings}
         topology_version = str(topology.get("meta", {}).get("version", "unknown"))
-        road_positions = {
-            (_floor(cell.get("floor")), int(cell["row"]), int(cell["col"])): cell
-            for cell in cells
-            if cell.get("type") == "road" and cell.get("walkable", True)
-        }
         for storage in storages:
             storage_id = storage["id"]
             mapping = mapping_lookup.get(storage_id)
             if not mapping:
                 add("accessibility", "warning", "ACCESS_UNCONFIGURED", f"库位 {storage_id} 尚未配置取货停靠点。", "node", storage_id)
                 continue
-            access_cell = cell_lookup.get(mapping.get("access_cell_id"))
             if mapping.get("topology_version") != topology_version:
                 add("accessibility", "error", "ACCESS_VERSION_MISMATCH", f"库位 {storage_id} 的停靠点映射对应旧拓扑版本。", "node", storage_id)
-            elif not access_cell:
-                add("accessibility", "error", "ACCESS_CELL_MISSING", f"库位 {storage_id} 的停靠点 {mapping.get('access_cell_id')} 不存在。", "node", storage_id)
-            elif access_cell.get("type") != "road" or not access_cell.get("walkable", True):
-                add("accessibility", "error", "ACCESS_CELL_NOT_ROAD", f"库位 {storage_id} 的停靠点不是可通行道路。", "node", storage_id)
             else:
-                storage_pos = (_floor(storage.get("floor")), int(storage["row"]), int(storage["col"]))
-                access_pos = (_floor(access_cell.get("floor")), int(access_cell["row"]), int(access_cell["col"]))
-                if storage_pos[0] != access_pos[0] or abs(storage_pos[1] - access_pos[1]) + abs(storage_pos[2] - access_pos[2]) != 1:
-                    add("accessibility", "error", "ACCESS_NOT_ADJACENT", f"库位 {storage_id} 的停靠点与库位不相邻。", "node", storage_id)
-                elif not any((access_pos[0], access_pos[1] + dr, access_pos[2] + dc) in road_positions for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1))):
-                    add("accessibility", "error", "ACCESS_DISCONNECTED", f"库位 {storage_id} 的停靠点未连接到道路网络。", "node", storage_id)
+                evaluation = evaluate_access_candidate(topology, storage_id, str(mapping.get("access_cell_id") or ""))
+                if evaluation["status"] == "rejected":
+                    code = evaluation["reason_codes"][0] if evaluation["reason_codes"] else "ACCESS_INVALID"
+                    add("accessibility", "error", code, f"库位 {storage_id} 的停靠点无效：{'；'.join(evaluation['reasons'])}", "node", storage_id)
+                elif evaluation["status"] == "review_required" and mapping.get("source") != "manual_verified":
+                    add("accessibility", "error", "ACCESS_REVIEW_REQUIRED", f"库位 {storage_id} 的候选停靠点尚未完成人工审核。", "node", storage_id)
 
     errors = [issue["message"] for issue in issues if issue["severity"] == "error"]
     warnings = [issue["message"] for issue in issues if issue["severity"] == "warning"]
