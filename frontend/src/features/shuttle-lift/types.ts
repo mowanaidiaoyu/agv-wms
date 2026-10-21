@@ -304,6 +304,26 @@ export interface ShuttleMultiPlanResponse {
   }
   unresolved_conflicts: Array<Record<string, unknown>>
   failure_reason: string | null
+  failure: {
+    vehicle_id: string | null
+    failure_code:
+      | 'invalid_vehicle_count'
+      | 'duplicate_vehicle_id'
+      | 'invalid_priority'
+      | 'invalid_planning_request'
+      | 'initial_occupancy_conflict'
+      | 'duplicate_terminal_destination'
+      | 'terminal_geometry_conflict'
+      | 'search_limit_exceeded'
+      | 'unreachable_track'
+      | 'reservation_conflict_unresolved'
+      | 'configuration_mismatch'
+    expanded_states: number | null
+    max_expanded_states: number | null
+    planning_time_ms: number
+    failure_reason: string
+    details: Record<string, unknown>
+  } | null
   vehicle_initial_config: ShuttleMultiVehicleRequest[]
   lift_initial_state: Record<string, ShuttleLevel>
   time_contract: Record<string, unknown>

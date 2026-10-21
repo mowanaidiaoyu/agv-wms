@@ -446,6 +446,15 @@
   background: #111827;
   color: #e2e8f0;
 }
+.shuttle-custom-list .shuttle-field-error select {
+  border-color: #fb7185;
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.35);
+}
+.shuttle-inline-error {
+  color: #fda4af;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .shuttle-timeline { padding: 10px; border: 1px solid #273449; border-radius: 9px; }
 .shuttle-timeline input { width: 100%; }
 .shuttle-timeline span { color: #67e8f9; font-variant-numeric: tabular-nums; }

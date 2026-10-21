@@ -13,6 +13,7 @@ from app.services.shuttle_multi_planner import (
     ShuttleMultiPlanningError,
     _candidate_conflict,
     _track_action,
+    _validate_inputs,
     build_shuttle_multi_scenarios,
     plan_shuttle_multi,
     validate_shuttle_multi_plan,
@@ -83,6 +84,84 @@ def execute(
 
 def scenario(scenarios: list[dict], scenario_id: str) -> dict:
     return next(item for item in scenarios if item["scenario_id"] == scenario_id)
+
+
+def custom_vehicle(
+    vehicle_id: str, start: str, goal: str, priority: int, algorithm: str = "astar"
+) -> dict:
+    return {
+        "vehicle_id": vehicle_id,
+        "start_track_node_id": start,
+        "target_track_node_id": goal,
+        "priority": priority,
+        "algorithm": algorithm,
+    }
+
+
+def test_duplicate_persistent_terminal_is_rejected_before_space_time_search(
+    monkeypatch: pytest.MonkeyPatch, topology: dict, graph: dict, validation: dict
+):
+    vehicles = [
+        custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L4-r100-c51", 1),
+        custom_vehicle("SHUTTLE-02", "L1-r100-c35", "L4-r100-c51", 2),
+    ]
+
+    def must_not_search(*_args, **_kwargs):
+        raise AssertionError("space-time search must not run for duplicate persistent terminals")
+
+    monkeypatch.setattr("app.services.shuttle_multi_planner._search_vehicle", must_not_search)
+    with pytest.raises(ShuttleMultiPlanningError) as caught:
+        execute(topology, graph, validation, vehicles)
+    assert caught.value.failure_code == "duplicate_terminal_destination"
+    assert caught.value.details == {
+        "track_node_id": "L4-r100-c51",
+        "vehicle_ids": ["SHUTTLE-01", "SHUTTLE-02"],
+        "goal_occupancy": "persistent",
+    }
+
+
+def test_three_vehicle_duplicate_terminal_names_all_involved_vehicles(
+    topology: dict, graph: dict, validation: dict
+):
+    vehicles = [
+        custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L4-r100-c51", 1),
+        custom_vehicle("SHUTTLE-02", "L1-r100-c35", "L4-r100-c51", 2),
+        custom_vehicle("SHUTTLE-03", "L4-r100-c7", "L1-r100-c51", 3, "dijkstra"),
+    ]
+    with pytest.raises(ShuttleMultiPlanningError) as caught:
+        execute(topology, graph, validation, vehicles)
+    assert caught.value.failure_code == "duplicate_terminal_destination"
+    assert caught.value.expanded_states is None
+    assert caught.value.details["vehicle_ids"] == ["SHUTTLE-01", "SHUTTLE-02"]
+
+
+def test_same_row_column_on_different_levels_is_not_a_duplicate_terminal(
+    graph: dict, validation: dict
+):
+    vehicles = [
+        custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L1-r100-c51", 1),
+        custom_vehicle("SHUTTLE-02", "L2-r100-c7", "L2-r100-c51", 2),
+    ]
+    _validate_inputs(graph, validation["lifts"], vehicles, options())
+
+
+def test_distinct_terminal_nodes_with_overlapping_vehicle_boxes_are_rejected(
+    graph: dict, validation: dict
+):
+    overlapping = deepcopy(graph)
+    first_goal = overlapping["L1-r100-c51"]
+    second_goal = overlapping["L2-r100-c51"]
+    second_goal["world_x"] = first_goal["world_x"] + 0.25
+    second_goal["world_y"] = first_goal["world_y"]
+    second_goal["world_z"] = first_goal["world_z"]
+    vehicles = [
+        custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L1-r100-c51", 1),
+        custom_vehicle("SHUTTLE-02", "L2-r100-c7", "L2-r100-c51", 2),
+    ]
+    with pytest.raises(ShuttleMultiPlanningError) as caught:
+        _validate_inputs(overlapping, validation["lifts"], vehicles, options())
+    assert caught.value.failure_code == "terminal_geometry_conflict"
+    assert caught.value.details["track_node_ids"] == ["L1-r100-c51", "L2-r100-c51"]
 
 
 @pytest.mark.parametrize("vehicle_count", [2, 3, 4])
@@ -395,12 +474,13 @@ def test_non_lift_track_node_never_allows_a_cross_level_transition(
         {"vehicle_id": "SHUTTLE-01", "start_track_node_id": "L1-r100-c31", "target_track_node_id": "L4-r100-c31", "priority": 1, "algorithm": "astar"},
         {"vehicle_id": "SHUTTLE-02", "start_track_node_id": "L2-r98-c31", "target_track_node_id": "L3-r102-c31", "priority": 2, "algorithm": "astar"},
     ]
-    with pytest.raises(ShuttleMultiPlanningError, match="no safe plan"):
+    with pytest.raises(ShuttleMultiPlanningError, match="no legal ShuttleGraph route") as unreachable:
         plan_shuttle_multi(
             graph, lifts, vehicles, options(max_time_steps=80),
             topology_id=topology["id"], topology_version=topology["meta"]["version"],
             topology_revision=validation["topology_revision"], config_revision=validation["config_revision"],
         )
+    assert unreachable.value.failure_code == "unreachable_track"
 
 
 def test_one_unavailable_lift_reroutes_all_cross_level_work_to_the_other(
@@ -425,12 +505,33 @@ def test_search_limits_and_invalid_nodes_fail_without_an_unsafe_partial_plan(
     topology: dict, graph: dict, validation: dict, scenarios: list[dict]
 ):
     vehicles = scenario(scenarios, "lift-conflict")["vehicle_requests"]
-    with pytest.raises(ShuttleMultiPlanningError, match="max_expanded_states"):
+    with pytest.raises(ShuttleMultiPlanningError, match="max_expanded_states") as limited:
         execute(topology, graph, validation, vehicles, max_expanded_states=100)
+    assert limited.value.failure_code == "search_limit_exceeded"
+    assert limited.value.vehicle_id
+    assert limited.value.expanded_states == 101
+    assert limited.value.max_expanded_states == 100
     invalid = deepcopy(vehicles)
     invalid[0]["start_track_node_id"] = "L1-r0-c0"
-    with pytest.raises(ShuttleMultiPlanningError, match="non-traversable ShuttleGraph node"):
+    with pytest.raises(ShuttleMultiPlanningError, match="non-traversable ShuttleGraph node") as unreachable:
         execute(topology, graph, validation, invalid)
+    assert unreachable.value.failure_code == "unreachable_track"
+
+
+def test_user_candidate_three_vehicle_configuration_plans_within_existing_limit(
+    topology: dict, graph: dict, validation: dict
+):
+    vehicles = [
+        custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L4-r100-c51", 1),
+        custom_vehicle("SHUTTLE-02", "L1-r100-c35", "L4-r100-c43", 2),
+        custom_vehicle("SHUTTLE-03", "L4-r100-c7", "L1-r100-c51", 3, "dijkstra"),
+    ]
+    result = execute(topology, graph, validation, vehicles)
+    assert result["status"] == "planning_success"
+    assert [vehicle["visited_states"] for vehicle in result["vehicles"]] == [430, 15011, 74050]
+    assert max(vehicle["visited_states"] for vehicle in result["vehicles"]) < options()["max_expanded_states"]
+    assert result["safety_validation"]["safe"] is True
+    assert result["metrics"]["unresolved_conflict_count"] == 0
 
 
 def test_priority_order_and_repeated_plans_are_deterministic(
@@ -568,7 +669,39 @@ def test_api_rejects_stale_topology_or_config_without_reusing_a_plan(
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
     assert "Topology revision mismatch" in response.json()["failure_reason"]
+    assert response.json()["failure"]["failure_code"] == "configuration_mismatch"
     assert response.json()["vehicles"] == []
+
+
+def test_multi_api_returns_structured_duplicate_terminal_failure_without_partial_plan(
+    monkeypatch: pytest.MonkeyPatch, topology: dict, validation: dict
+):
+    class FakeRepository:
+        def get_topology(self, topology_id: str):
+            return {"id": topology["id"], "name": topology["name"], "payload": topology}
+
+    monkeypatch.setattr(shuttle_api, "repo", FakeRepository())
+    response = TestClient(app).post(
+        "/api/v1/shuttle/plan-multi",
+        json={
+            "topology_id": topology["id"],
+            "topology_revision": validation["topology_revision"],
+            "shuttle_config_revision": validation["config_revision"],
+            "coordinate_contract_version": "shuttle-internal-levels-v1",
+            "vehicle_requests": [
+                custom_vehicle("SHUTTLE-01", "L1-r100-c7", "L4-r100-c51", 1),
+                custom_vehicle("SHUTTLE-02", "L1-r100-c35", "L4-r100-c51", 2),
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["vehicles"] == []
+    assert body["failure"]["failure_code"] == "duplicate_terminal_destination"
+    assert body["failure"]["expanded_states"] is None
+    assert body["failure"]["details"]["track_node_id"] == "L4-r100-c51"
+    assert body["failure"]["planning_time_ms"] >= 0
 
 
 def test_original_single_shuttle_astar_and_dijkstra_still_match(graph: dict, validation: dict):

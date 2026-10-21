@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, HTTPException, Query
 
 from ..services.runtime import repo
@@ -146,6 +148,7 @@ def get_shuttle_multi_scenarios(topology_id: str = Query(min_length=1)):
 
 @router.post("/plan-multi", response_model=ShuttleMultiPlanResponse)
 def create_shuttle_multi_plan(request: ShuttleMultiPlanRequest):
+    started = time.perf_counter()
     record, graph, validation = _context(request.topology_id)
     topology_version = str(record["payload"].get("meta", {}).get("version", "unknown"))
     vehicles = [vehicle.model_dump() for vehicle in request.vehicle_requests]
@@ -172,6 +175,14 @@ def create_shuttle_multi_plan(request: ShuttleMultiPlanRequest):
             vehicles=vehicles,
             options=options,
             reason=mismatch,
+            started=started,
+            failure_code="configuration_mismatch",
+            failure_details={
+                "request_topology_revision": request.topology_revision,
+                "current_topology_revision": validation["topology_revision"],
+                "request_shuttle_config_revision": request.shuttle_config_revision,
+                "current_shuttle_config_revision": validation["config_revision"],
+            },
         )
     try:
         return plan_shuttle_multi(
@@ -193,4 +204,10 @@ def create_shuttle_multi_plan(request: ShuttleMultiPlanRequest):
             vehicles=vehicles,
             options=options,
             reason=str(exc),
+            started=started,
+            failure_code=exc.failure_code,
+            vehicle_id=exc.vehicle_id,
+            expanded_states=exc.expanded_states,
+            max_expanded_states=exc.max_expanded_states,
+            failure_details=exc.details,
         )

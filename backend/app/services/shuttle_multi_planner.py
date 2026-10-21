@@ -18,7 +18,22 @@ DEFAULT_TIME_STEP_SECONDS = 0.25
 
 
 class ShuttleMultiPlanningError(ValueError):
-    pass
+    def __init__(
+        self,
+        reason: str,
+        *,
+        failure_code: str = "invalid_planning_request",
+        vehicle_id: str | None = None,
+        expanded_states: int | None = None,
+        max_expanded_states: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(reason)
+        self.failure_code = failure_code
+        self.vehicle_id = vehicle_id
+        self.expanded_states = expanded_states
+        self.max_expanded_states = max_expanded_states
+        self.details = details or {}
 
 
 @dataclass
@@ -467,7 +482,12 @@ def _search_vehicle(
         expanded += 1
         if expanded > int(options["max_expanded_states"]):
             raise ShuttleMultiPlanningError(
-                f"Vehicle {vehicle['vehicle_id']} exceeded max_expanded_states={options['max_expanded_states']}"
+                f"Vehicle {vehicle['vehicle_id']} exceeded max_expanded_states={options['max_expanded_states']}. "
+                "The configured search limit was reached before a safe path was found; this does not prove global infeasibility.",
+                failure_code="search_limit_exceeded",
+                vehicle_id=str(vehicle["vehicle_id"]),
+                expanded_states=expanded,
+                max_expanded_states=int(options["max_expanded_states"]),
             )
         current = graph[node_id]
         if node_id == goal_id and _goal_is_safe(current, tick, reserved, safety_distance):
@@ -535,7 +555,11 @@ def _search_vehicle(
             )
 
     raise ShuttleMultiPlanningError(
-        f"Vehicle {vehicle['vehicle_id']} found no safe plan within max_time_steps={options['max_time_steps']}"
+        f"Vehicle {vehicle['vehicle_id']} found no safe plan within max_time_steps={options['max_time_steps']}",
+        failure_code="reservation_conflict_unresolved",
+        vehicle_id=str(vehicle["vehicle_id"]),
+        expanded_states=expanded,
+        details={"max_time_steps": int(options["max_time_steps"])},
     )
 
 
@@ -759,23 +783,61 @@ def _validate_inputs(
     options: dict[str, Any],
 ) -> None:
     if not 2 <= len(vehicles) <= min(4, int(options["max_vehicles"])):
-        raise ShuttleMultiPlanningError("Shuttle multi planning requires between 2 and 4 vehicles")
+        raise ShuttleMultiPlanningError(
+            "Shuttle multi planning requires between 2 and 4 vehicles",
+            failure_code="invalid_vehicle_count",
+        )
     ids = [str(vehicle["vehicle_id"]) for vehicle in vehicles]
     if len(ids) != len(set(ids)):
-        raise ShuttleMultiPlanningError("vehicle_id values must be unique")
+        raise ShuttleMultiPlanningError(
+            "vehicle_id values must be unique",
+            failure_code="duplicate_vehicle_id",
+        )
     for vehicle in vehicles:
+        try:
+            priority = int(vehicle["priority"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ShuttleMultiPlanningError(
+                f"Vehicle {vehicle.get('vehicle_id', '')} has an invalid priority",
+                failure_code="invalid_priority",
+                vehicle_id=str(vehicle.get("vehicle_id", "")),
+            ) from exc
+        if not 1 <= priority <= 100:
+            raise ShuttleMultiPlanningError(
+                f"Vehicle {vehicle['vehicle_id']} priority must be between 1 and 100",
+                failure_code="invalid_priority",
+                vehicle_id=str(vehicle["vehicle_id"]),
+            )
         if vehicle["algorithm"] not in {"astar", "dijkstra"}:
-            raise ShuttleMultiPlanningError(f"Unsupported algorithm: {vehicle['algorithm']}")
+            raise ShuttleMultiPlanningError(
+                f"Unsupported algorithm: {vehicle['algorithm']}",
+                failure_code="invalid_planning_request",
+                vehicle_id=str(vehicle["vehicle_id"]),
+            )
         for field_name in ("start_track_node_id", "target_track_node_id"):
             node_id = str(vehicle[field_name])
             if node_id not in graph or not graph[node_id].get("traversable"):
                 raise ShuttleMultiPlanningError(
-                    f"Vehicle {vehicle['vehicle_id']} references a non-traversable ShuttleGraph node: {node_id}"
+                    f"Vehicle {vehicle['vehicle_id']} references a non-traversable ShuttleGraph node: {node_id}",
+                    failure_code="unreachable_track",
+                    vehicle_id=str(vehicle["vehicle_id"]),
+                    details={"track_node_id": node_id, "endpoint": field_name},
+                )
+            if int(graph[node_id].get("shuttle_level", 0)) not in (1, 2, 3, 4):
+                raise ShuttleMultiPlanningError(
+                    f"Vehicle {vehicle['vehicle_id']} references a node with an invalid Shuttle level: {node_id}",
+                    failure_code="unreachable_track",
+                    vehicle_id=str(vehicle["vehicle_id"]),
+                    details={"track_node_id": node_id, "endpoint": field_name},
                 )
     available_lift_ids = {str(lift["lift_id"]) for lift in lifts if lift.get("state", "idle") != "unavailable"}
     for lift_id in available_lift_ids:
         if lift_id not in options["lift_initial_levels"]:
-            raise ShuttleMultiPlanningError(f"Missing offline initial cabin level for {lift_id}")
+            raise ShuttleMultiPlanningError(
+                f"Missing offline initial cabin level for {lift_id}",
+                failure_code="invalid_planning_request",
+                details={"lift_id": lift_id},
+            )
     safety_distance = math.hypot(
         float(options["vehicle_length_cells"]), float(options["vehicle_width_cells"])
     ) + float(options["safety_margin_cells"])
@@ -784,7 +846,66 @@ def _validate_inputs(
         for second in vehicles[first_index + 1 :]:
             second_node = graph[second["start_track_node_id"]]
             if math.dist(_position(first_node), _position(second_node)) < safety_distance - 1e-9:
-                raise ShuttleMultiPlanningError("Initial Shuttle geometry violates the safety distance")
+                raise ShuttleMultiPlanningError(
+                    "Initial Shuttle geometry violates the safety distance",
+                    failure_code="initial_occupancy_conflict",
+                    details={
+                        "vehicle_ids": [str(first["vehicle_id"]), str(second["vehicle_id"])],
+                        "track_node_ids": [str(first["start_track_node_id"]), str(second["start_track_node_id"])],
+                    },
+                )
+
+    destinations: dict[str, list[str]] = {}
+    for vehicle in vehicles:
+        destinations.setdefault(str(vehicle["target_track_node_id"]), []).append(str(vehicle["vehicle_id"]))
+    for node_id, vehicle_ids in destinations.items():
+        if len(vehicle_ids) > 1:
+            raise ShuttleMultiPlanningError(
+                f"Vehicles {', '.join(vehicle_ids)} share terminal destination {node_id}. "
+                "The current goal occupancy rule is persistent; choose distinct legal destinations.",
+                failure_code="duplicate_terminal_destination",
+                details={
+                    "track_node_id": node_id,
+                    "vehicle_ids": vehicle_ids,
+                    "goal_occupancy": "persistent",
+                },
+            )
+
+    for first_index, first in enumerate(vehicles):
+        first_node = graph[first["target_track_node_id"]]
+        for second in vehicles[first_index + 1 :]:
+            second_node = graph[second["target_track_node_id"]]
+            if math.dist(_position(first_node), _position(second_node)) < safety_distance - 1e-9:
+                raise ShuttleMultiPlanningError(
+                    f"Terminal vehicle geometry overlaps for {first['vehicle_id']} and {second['vehicle_id']}",
+                    failure_code="terminal_geometry_conflict",
+                    details={
+                        "vehicle_ids": [str(first["vehicle_id"]), str(second["vehicle_id"])],
+                        "track_node_ids": [str(first["target_track_node_id"]), str(second["target_track_node_id"])],
+                        "safety_distance_cells": safety_distance,
+                        "world_distance": math.dist(_position(first_node), _position(second_node)),
+                    },
+                )
+
+    for vehicle in vehicles:
+        spatial = plan_shuttle_path(
+            graph,
+            lifts,
+            str(vehicle["start_track_node_id"]),
+            str(vehicle["target_track_node_id"]),
+            str(vehicle["algorithm"]),
+        )
+        if spatial["result_status"] != "success":
+            raise ShuttleMultiPlanningError(
+                f"Vehicle {vehicle['vehicle_id']} has no legal ShuttleGraph route: {spatial['failure_reason']}",
+                failure_code="unreachable_track",
+                vehicle_id=str(vehicle["vehicle_id"]),
+                expanded_states=int(spatial.get("visited_states", 0)),
+                details={
+                    "start_track_node_id": str(vehicle["start_track_node_id"]),
+                    "target_track_node_id": str(vehicle["target_track_node_id"]),
+                },
+            )
 
 
 def plan_shuttle_multi(
@@ -977,6 +1098,11 @@ def failed_shuttle_multi_response(
     options: dict[str, Any],
     reason: str,
     started: float | None = None,
+    failure_code: str = "invalid_planning_request",
+    vehicle_id: str | None = None,
+    expanded_states: int | None = None,
+    max_expanded_states: int | None = None,
+    failure_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     elapsed_ms = (time.perf_counter() - started) * 1000.0 if started else 0.0
     safety = {
@@ -1034,6 +1160,15 @@ def failed_shuttle_multi_response(
         "safety_validation": safety,
         "unresolved_conflicts": [],
         "failure_reason": reason,
+        "failure": {
+            "vehicle_id": vehicle_id,
+            "failure_code": failure_code,
+            "expanded_states": expanded_states,
+            "max_expanded_states": max_expanded_states,
+            "planning_time_ms": elapsed_ms,
+            "failure_reason": reason,
+            "details": failure_details or {},
+        },
         "vehicle_initial_config": vehicles,
         "lift_initial_state": options.get("lift_initial_levels", {}),
         "time_contract": {

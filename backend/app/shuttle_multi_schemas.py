@@ -9,6 +9,19 @@ from .shuttle_lift_schemas import ShuttleAlgorithm, ShuttleTrackNode
 
 ShuttleLevel = Literal[1, 2, 3, 4]
 ShuttleMultiStatus = Literal["planning_success", "failed", "unsafe"]
+ShuttleMultiFailureCode = Literal[
+    "invalid_vehicle_count",
+    "duplicate_vehicle_id",
+    "invalid_priority",
+    "invalid_planning_request",
+    "initial_occupancy_conflict",
+    "duplicate_terminal_destination",
+    "terminal_geometry_conflict",
+    "search_limit_exceeded",
+    "unreachable_track",
+    "reservation_conflict_unresolved",
+    "configuration_mismatch",
+]
 ShuttleEventType = Literal[
     "track_node_conflict_detected",
     "edge_swap_conflict_detected",
@@ -177,6 +190,16 @@ class ShuttleSafetyValidation(BaseModel):
     safe: bool
 
 
+class ShuttleMultiFailure(BaseModel):
+    vehicle_id: str | None = None
+    failure_code: ShuttleMultiFailureCode
+    expanded_states: int | None = Field(default=None, ge=0)
+    max_expanded_states: int | None = Field(default=None, ge=1)
+    planning_time_ms: float = Field(ge=0)
+    failure_reason: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ShuttleMultiPlanResponse(BaseModel):
     planning_id: str
     topology_id: str
@@ -192,6 +215,7 @@ class ShuttleMultiPlanResponse(BaseModel):
     safety_validation: ShuttleSafetyValidation
     unresolved_conflicts: list[dict[str, Any]] = Field(default_factory=list)
     failure_reason: str | None = None
+    failure: ShuttleMultiFailure | None = None
     vehicle_initial_config: list[ShuttleVehicleRequest]
     lift_initial_state: dict[str, ShuttleLevel]
     time_contract: dict[str, Any]

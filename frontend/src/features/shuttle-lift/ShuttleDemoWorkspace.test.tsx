@@ -88,7 +88,7 @@ const multiPlan: ShuttleMultiPlanResponse = {
   })),
   events: [{ event_id: 'event-1', simulation_time_seconds: 0.25, vehicle_ids: ['SHUTTLE-01', 'SHUTTLE-02'], event_type: 'track_node_conflict_detected', resource_id: null, track_node_id: tracks[1].track_node_id, details: {}, resolution_status: 'candidate_rejected' }],
   metrics: { requested_vehicle_count: 2, planned_vehicle_count: 2, makespan_seconds: 2, total_wait_time_seconds: 0.25, average_wait_time_seconds: 0.125, detected_track_node_conflicts: 1, detected_edge_swap_conflicts: 0, detected_geometric_conflicts: 0, lift_resource_contentions: 0, lift_a_usage_count: 0, lift_b_usage_count: 0, lift_a_occupied_seconds: 0, lift_b_occupied_seconds: 0, alternate_lift_selections: 0, replans_used: 0, unresolved_conflict_count: 0, planning_time_ms: 2 },
-  safety_validation: { node_conflicts: 0, edge_conflicts: 0, geometric_conflicts: 0, lift_resource_conflicts: 0, timing_violations: 0, safe: true }, unresolved_conflicts: [], failure_reason: null, vehicle_initial_config: multiVehicleRequests, lift_initial_state: { 'shuttle-lift-a': 1, 'shuttle-lift-b': 1 }, time_contract: { time_step_seconds: 0.25 },
+  safety_validation: { node_conflicts: 0, edge_conflicts: 0, geometric_conflicts: 0, lift_resource_conflicts: 0, timing_violations: 0, safe: true }, unresolved_conflicts: [], failure_reason: null, failure: null, vehicle_initial_config: multiVehicleRequests, lift_initial_state: { 'shuttle-lift-a': 1, 'shuttle-lift-b': 1 }, time_contract: { time_step_seconds: 0.25 },
 }
 
 function renderWorkspace(onMode = vi.fn(), onDemoMode = vi.fn(), demoMode: 'shuttle_single' | 'shuttle_multi_preset' | 'shuttle_multi_custom' = 'shuttle_single') {
@@ -349,5 +349,53 @@ describe('ShuttleDemoWorkspace', () => {
     const request = vi.mocked(api.planShuttleMulti).mock.calls[0][0]
     expect(request.vehicle_requests.find((vehicle) => vehicle.vehicle_id === 'SHUTTLE-01')?.algorithm).toBe('astar')
     expect(request.vehicle_requests.find((vehicle) => vehicle.vehicle_id === 'SHUTTLE-02')?.algorithm).toBe('dijkstra')
+  })
+
+  it('marks every repeated terminal near its vehicle and blocks the request until corrected', async () => {
+    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_custom')
+    await screen.findByText('车辆配置（2/4）')
+
+    fireEvent.change(screen.getByLabelText('SHUTTLE-02 终点层'), { target: { value: '4' } })
+
+    const duplicateMessage = /SHUTTLE-01 与 SHUTTLE-02 均选择 L4-r100-c51/
+    await waitFor(() => expect(screen.getAllByText(duplicateMessage)).toHaveLength(3))
+    expect(screen.getByLabelText('SHUTTLE-01 终点')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByLabelText('SHUTTLE-02 终点')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('button', { name: '开始多车规划' })).toBeDisabled()
+    expect(api.planShuttleMulti).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('SHUTTLE-02 终点'), { target: { value: 'L4-r100-c19' } })
+
+    await waitFor(() => expect(screen.queryByText(duplicateMessage)).not.toBeInTheDocument())
+    expect(screen.getByLabelText('SHUTTLE-01 终点')).toHaveAttribute('aria-invalid', 'false')
+    expect(screen.getByRole('button', { name: '开始多车规划' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+    await waitFor(() => expect(api.planShuttleMulti).toHaveBeenCalledTimes(1))
+  })
+
+  it('shows a structured search limit explanation and removes an obsolete playable plan', async () => {
+    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    await screen.findByRole('option', { name: '场景 A：分层无冲突并行运行' })
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+    await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-multi-plan', 'shuttle-multi-test'))
+
+    vi.mocked(api.planShuttleMulti).mockResolvedValueOnce({
+      ...multiPlan,
+      planning_id: 'failed-plan',
+      status: 'failed',
+      vehicles: [],
+      events: [],
+      failure_reason: 'Vehicle SHUTTLE-02 exceeded max_expanded_states=400000',
+      failure: {
+        vehicle_id: 'SHUTTLE-02', failure_code: 'search_limit_exceeded', expanded_states: 400001,
+        max_expanded_states: 400000, planning_time_ms: 1250,
+        failure_reason: 'Vehicle SHUTTLE-02 exceeded max_expanded_states=400000', details: {},
+      },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+
+    expect(await screen.findByText(/SHUTTLE-02：当前搜索配置下未找到安全路径，已达到状态展开上限/)).toHaveTextContent('400001/400000 状态')
+    expect(screen.getByText(/这不等于已经证明全局无解/)).toBeInTheDocument()
+    expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-multi-plan', '')
   })
 })

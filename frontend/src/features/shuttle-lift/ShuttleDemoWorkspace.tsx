@@ -36,19 +36,48 @@ function makeCustomVehicles(nodes: ShuttleTrackNode[]): ShuttleDraft[] {
     { vehicle_id: 'SHUTTLE-02', start_track_node_id: values[2], target_track_node_id: values[3], start_level: 2, target_level: 3, priority: 2, algorithm: 'astar' },
   ]
 }
-function validateCustomVehicles(vehicles: ShuttleDraft[], lookup: Map<string, ShuttleTrackNode>) {
-  if (vehicles.length < 2 || vehicles.length > 4) return '自定义多车数量必须为 2～4 辆。'
-  if (new Set(vehicles.map((vehicle) => vehicle.vehicle_id.trim())).size !== vehicles.length) return '车辆 ID 必须唯一。'
-  if (new Set(vehicles.map((vehicle) => vehicle.start_track_node_id)).size !== vehicles.length) return '多辆车不能占用相同起点。'
+type CustomVehicleValidation = { error: string; targetErrors: string[] }
+
+function validateCustomVehicles(vehicles: ShuttleDraft[], lookup: Map<string, ShuttleTrackNode>): CustomVehicleValidation {
+  const targetErrors = vehicles.map(() => '')
+  if (vehicles.length < 2 || vehicles.length > 4) return { error: '自定义多车数量必须为 2～4 辆。', targetErrors }
+  if (new Set(vehicles.map((vehicle) => vehicle.vehicle_id.trim())).size !== vehicles.length) return { error: '车辆 ID 必须唯一。', targetErrors }
+  if (new Set(vehicles.map((vehicle) => vehicle.start_track_node_id)).size !== vehicles.length) return { error: '多辆车不能占用相同起点。', targetErrors }
   for (const vehicle of vehicles) {
     const start = lookup.get(vehicle.start_track_node_id)
     const target = lookup.get(vehicle.target_track_node_id)
-    if (!vehicle.vehicle_id.trim()) return '车辆 ID 不能为空。'
-    if (!start || !target) return `${vehicle.vehicle_id} 的起点或终点不是当前真实 ShuttleGraph 节点。`
-    if (start.shuttle_level !== vehicle.start_level || target.shuttle_level !== vehicle.target_level) return `${vehicle.vehicle_id} 的层级与轨道节点不一致。`
-    if (vehicle.start_track_node_id === vehicle.target_track_node_id) return `${vehicle.vehicle_id} 的起点和终点不能相同。`
+    if (!vehicle.vehicle_id.trim()) return { error: '车辆 ID 不能为空。', targetErrors }
+    if (!start || !target) return { error: `${vehicle.vehicle_id} 的起点或终点不是当前真实 ShuttleGraph 节点。`, targetErrors }
+    if (start.shuttle_level !== vehicle.start_level || target.shuttle_level !== vehicle.target_level) return { error: `${vehicle.vehicle_id} 的层级与轨道节点不一致。`, targetErrors }
+    if (vehicle.start_track_node_id === vehicle.target_track_node_id) return { error: `${vehicle.vehicle_id} 的起点和终点不能相同。`, targetErrors }
   }
-  return ''
+  const destinations = new Map<string, number[]>()
+  vehicles.forEach((vehicle, index) => destinations.set(vehicle.target_track_node_id, [...(destinations.get(vehicle.target_track_node_id) ?? []), index]))
+  for (const [trackNodeId, indexes] of destinations) {
+    if (indexes.length < 2) continue
+    const vehicleIds = indexes.map((index) => vehicles[index].vehicle_id)
+    const message = `${vehicleIds.join(' 与 ')} 均选择 ${trackNodeId}。当前车辆到达后持续占用终点，请为这些车辆选择不同的合法终点。`
+    indexes.forEach((index) => { targetErrors[index] = message })
+  }
+  return { error: targetErrors.find(Boolean) ?? '', targetErrors }
+}
+
+function multiFailureMessage(next: ShuttleMultiPlanResponse) {
+  const failure = next.failure
+  if (!failure) return next.failure_reason ?? '多车规划失败。'
+  if (failure.failure_code === 'duplicate_terminal_destination') {
+    const vehicleIds = Array.isArray(failure.details.vehicle_ids) ? failure.details.vehicle_ids.join(' 与 ') : '多辆四向车'
+    const trackNodeId = typeof failure.details.track_node_id === 'string' ? failure.details.track_node_id : '同一终点'
+    return `${vehicleIds} 均选择 ${trackNodeId}。当前车辆到达后持续占用终点，请为这些车辆选择不同的合法终点。`
+  }
+  if (failure.failure_code === 'terminal_geometry_conflict') return `不同终点的最终车体安全包围盒重叠。${failure.failure_reason}`
+  if (failure.failure_code === 'search_limit_exceeded') {
+    const states = failure.expanded_states === null || failure.max_expanded_states === null ? '' : `（${failure.expanded_states}/${failure.max_expanded_states} 状态）`
+    return `${failure.vehicle_id ?? '车辆'}：当前搜索配置下未找到安全路径，已达到状态展开上限${states}。这不等于已经证明全局无解。`
+  }
+  if (failure.failure_code === 'unreachable_track') return `${failure.vehicle_id ?? '车辆'}：真实轨道不可达。${failure.failure_reason}`
+  if (failure.failure_code === 'reservation_conflict_unresolved') return `${failure.vehicle_id ?? '车辆'}：时空预约冲突未能解决。${failure.failure_reason}`
+  return failure.failure_reason
 }
 function eventTitle(event: ShuttlePlanningEvent) {
   const labels: Record<ShuttlePlanningEvent['event_type'], string> = {
@@ -106,7 +135,8 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
     () => isPreset ? activeScenario?.vehicle_requests ?? [] : customVehicles,
     [activeScenario, customVehicles, isPreset],
   )
-  const customValidationError = demoMode === 'shuttle_multi_custom' ? validateCustomVehicles(customVehicles, trackLookup) : ''
+  const customValidation = demoMode === 'shuttle_multi_custom' ? validateCustomVehicles(customVehicles, trackLookup) : { error: '', targetErrors: [] }
+  const customValidationError = customValidation.error
 
   const invalidatePlan = () => {
     requestRef.current += 1
@@ -170,13 +200,13 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
     if (next.topology_id !== topologyId || next.topology_version !== topologyVersion) return '多车结果与当前拓扑版本不一致，已拒绝播放。'
     if (next.topology_revision !== levelsQuery.data?.topology_revision || next.shuttle_config_revision !== FOUR_LEVEL_CONFIG_REVISION) return '多车结果使用了失效的拓扑或 Shuttle 配置版本。'
     if (next.coordinate_contract_version !== INTERNAL_HEIGHT_CONTRACT_REVISION || !next.planning_algorithm_version) return '多车结果缺少受支持的坐标或算法版本。'
-    if (next.status !== 'planning_success') return next.failure_reason ?? '多车规划失败。'
+    if (next.status !== 'planning_success') return multiFailureMessage(next)
     if (!next.safety_validation.safe || next.metrics.unresolved_conflict_count > 0 || next.unresolved_conflicts.length) return '最终安全校验仍有残留冲突，已拒绝播放。'
     return ''
   }
   const requestPlan = async () => {
     const sequence = requestRef.current + 1
-    requestRef.current = sequence; setPlanning(true); setError(''); setSelectedEvent(null)
+    requestRef.current = sequence; setPlanning(true); setError(''); setSelectedEvent(null); setSinglePlan(null); setMultiPlan(null); playback.reset()
     try {
       if (isSingle) {
         const next = await api.planShuttlePath({ topology_id: topologyId, start_track_node: selectedStartNodeId, start_level: startLevel, end_track_node: selectedEndNodeId, end_level: endLevel, algorithm })
@@ -221,8 +251,8 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
             <label>终点轨道节点<select aria-label="四向车终点轨道节点" value={selectedEndNodeId} disabled={!endNodes.length} onChange={(event) => { setEndNodeId(event.target.value); invalidatePlan() }}>{!selectedEndNodeId ? <option value="">当前层无可用轨道节点</option> : null}{endNodes.map((node) => <option key={node.track_node_id}>{node.track_node_id}</option>)}</select></label></> : null}
           {isPreset ? <label>预设场景<select aria-label="四向车预设场景" value={scenarioId} disabled={!scenariosQuery.data} onChange={(event) => { setScenarioId(event.target.value as ScenarioId); invalidatePlan() }}>{scenariosQuery.data?.scenarios.map((scenario) => <option key={scenario.scenario_id} value={scenario.scenario_id}>{scenario.name}</option>)}</select><small>{activeScenario?.description}</small></label> : null}
           {demoMode === 'shuttle_multi_custom' ? <section className="shuttle-custom-list" aria-label="自定义四向车配置"><div className="shuttle-panel-heading"><strong>车辆配置（{customVehicles.length}/4）</strong><button className="ghost-button" type="button" disabled={customVehicles.length >= 4} onClick={addVehicle}>添加车辆</button></div>
-            {customVehicles.map((vehicle) => <fieldset key={vehicle.vehicle_id} className={selectedShuttleId === vehicle.vehicle_id ? 'is-selected' : ''} onClick={() => setSelectedShuttleId(vehicle.vehicle_id)}><legend>{vehicle.vehicle_id}</legend><label>车辆 ID<input aria-label={`${vehicle.vehicle_id} 车辆 ID`} value={vehicle.vehicle_id} onChange={(event) => { const nextId = event.target.value; setCustomVehicles((current) => current.map((item) => item.vehicle_id === vehicle.vehicle_id ? { ...item, vehicle_id: nextId } : item)); if (selectedShuttleId === vehicle.vehicle_id) setSelectedShuttleId(nextId); invalidatePlan() }} /></label><div className="shuttle-level-grid"><label>起点层<select aria-label={`${vehicle.vehicle_id} 起点层`} value={vehicle.start_level} onChange={(event) => { const level = Number(event.target.value) as ShuttleLevel; updateCustom(vehicle.vehicle_id, { start_level: level, start_track_node_id: preferredNode(tracks, level, `L${level}-r100-c7`) }) }}>{SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}</select></label><label>终点层<select aria-label={`${vehicle.vehicle_id} 终点层`} value={vehicle.target_level} onChange={(event) => { const level = Number(event.target.value) as ShuttleLevel; updateCustom(vehicle.vehicle_id, { target_level: level, target_track_node_id: preferredNode(tracks, level, `L${level}-r100-c51`, true) }) }}>{SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}</select></label></div>
-              <label>起点<select aria-label={`${vehicle.vehicle_id} 起点`} value={vehicle.start_track_node_id} onChange={(event) => updateCustom(vehicle.vehicle_id, { start_track_node_id: event.target.value })}>{nodesAtLevel(tracks, vehicle.start_level).map((node) => <option key={node.track_node_id}>{node.track_node_id}</option>)}</select></label><label>终点<select aria-label={`${vehicle.vehicle_id} 终点`} value={vehicle.target_track_node_id} onChange={(event) => updateCustom(vehicle.vehicle_id, { target_track_node_id: event.target.value })}>{nodesAtLevel(tracks, vehicle.target_level).map((node) => <option key={node.track_node_id}>{node.track_node_id}</option>)}</select></label><div className="shuttle-level-grid"><label>优先级<input aria-label={`${vehicle.vehicle_id} 优先级`} type="number" min={1} max={100} value={vehicle.priority} onChange={(event) => updateCustom(vehicle.vehicle_id, { priority: Math.max(1, Math.min(100, Number(event.target.value) || 1)) })} /></label><label>路径算法<select aria-label={`${vehicle.vehicle_id} 路径算法`} value={vehicle.algorithm} onChange={(event) => updateCustom(vehicle.vehicle_id, { algorithm: event.target.value as PathDemoAlgorithm })}><option value="astar">A*</option><option value="dijkstra">Dijkstra</option></select></label></div><button className="ghost-button danger" type="button" disabled={customVehicles.length <= 2} onClick={() => { const next = customVehicles.filter((item) => item.vehicle_id !== vehicle.vehicle_id); setCustomVehicles(next); if (selectedShuttleId === vehicle.vehicle_id) setSelectedShuttleId(next[0]?.vehicle_id ?? ''); invalidatePlan() }}>删除车辆</button></fieldset>)}
+            {customVehicles.map((vehicle, vehicleIndex) => <fieldset key={vehicle.vehicle_id} className={selectedShuttleId === vehicle.vehicle_id ? 'is-selected' : ''} onClick={() => setSelectedShuttleId(vehicle.vehicle_id)}><legend>{vehicle.vehicle_id}</legend><label>车辆 ID<input aria-label={`${vehicle.vehicle_id} 车辆 ID`} value={vehicle.vehicle_id} onChange={(event) => { const nextId = event.target.value; setCustomVehicles((current) => current.map((item) => item.vehicle_id === vehicle.vehicle_id ? { ...item, vehicle_id: nextId } : item)); if (selectedShuttleId === vehicle.vehicle_id) setSelectedShuttleId(nextId); invalidatePlan() }} /></label><div className="shuttle-level-grid"><label>起点层<select aria-label={`${vehicle.vehicle_id} 起点层`} value={vehicle.start_level} onChange={(event) => { const level = Number(event.target.value) as ShuttleLevel; updateCustom(vehicle.vehicle_id, { start_level: level, start_track_node_id: preferredNode(tracks, level, `L${level}-r100-c7`) }) }}>{SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}</select></label><label>终点层<select aria-label={`${vehicle.vehicle_id} 终点层`} value={vehicle.target_level} onChange={(event) => { const level = Number(event.target.value) as ShuttleLevel; updateCustom(vehicle.vehicle_id, { target_level: level, target_track_node_id: preferredNode(tracks, level, `L${level}-r100-c51`, true) }) }}>{SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}</select></label></div>
+              <label>起点<select aria-label={`${vehicle.vehicle_id} 起点`} value={vehicle.start_track_node_id} onChange={(event) => updateCustom(vehicle.vehicle_id, { start_track_node_id: event.target.value })}>{nodesAtLevel(tracks, vehicle.start_level).map((node) => <option key={node.track_node_id}>{node.track_node_id}</option>)}</select></label><label className={customValidation.targetErrors[vehicleIndex] ? 'shuttle-field-error' : ''}>终点<select aria-label={`${vehicle.vehicle_id} 终点`} aria-invalid={Boolean(customValidation.targetErrors[vehicleIndex])} value={vehicle.target_track_node_id} onChange={(event) => updateCustom(vehicle.vehicle_id, { target_track_node_id: event.target.value })}>{nodesAtLevel(tracks, vehicle.target_level).map((node) => <option key={node.track_node_id}>{node.track_node_id}</option>)}</select>{customValidation.targetErrors[vehicleIndex] ? <small className="shuttle-inline-error" role="alert">{customValidation.targetErrors[vehicleIndex]}</small> : null}</label><div className="shuttle-level-grid"><label>优先级<input aria-label={`${vehicle.vehicle_id} 优先级`} type="number" min={1} max={100} value={vehicle.priority} onChange={(event) => updateCustom(vehicle.vehicle_id, { priority: Math.max(1, Math.min(100, Number(event.target.value) || 1)) })} /></label><label>路径算法<select aria-label={`${vehicle.vehicle_id} 路径算法`} value={vehicle.algorithm} onChange={(event) => updateCustom(vehicle.vehicle_id, { algorithm: event.target.value as PathDemoAlgorithm })}><option value="astar">A*</option><option value="dijkstra">Dijkstra</option></select></label></div><button className="ghost-button danger" type="button" disabled={customVehicles.length <= 2} onClick={() => { const next = customVehicles.filter((item) => item.vehicle_id !== vehicle.vehicle_id); setCustomVehicles(next); if (selectedShuttleId === vehicle.vehicle_id) setSelectedShuttleId(next[0]?.vehicle_id ?? ''); invalidatePlan() }}>删除车辆</button></fieldset>)}
             {customValidationError ? <p className="path-demo-error">{customValidationError}</p> : null}</section> : null}
           {!isSingle ? <details className="shuttle-advanced-config"><summary>高级参数</summary><span>时间片：{String(multiPlan?.time_contract.time_step_seconds ?? '由后端默认配置')} s</span><span>车辆上限：4</span><span>规划、安全距离及搜索边界由现有多车服务统一校验；前端不改写预约语义。</span></details> : null}
         </section> : null}
