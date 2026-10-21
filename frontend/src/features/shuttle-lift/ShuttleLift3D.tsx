@@ -2,8 +2,16 @@ import { Html, Line } from '@react-three/drei'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { InstancedMesh, Object3D } from 'three'
 import { SHUTTLE_TRACK_DECK_THICKNESS } from '../../lib/topology3d'
-import type { ShuttleLift, ShuttlePlaybackSample, ShuttleTrackNode, ShuttleVisualizationState } from './types'
+import type {
+  ShuttleLift,
+  ShuttleLiftPlaybackState,
+  ShuttleMultiPlaybackSample,
+  ShuttlePlaybackSample,
+  ShuttleTrackNode,
+  ShuttleVisualizationState,
+} from './types'
 import { shuttleLiftPlatformY } from './shuttlePlayback'
+import { SHUTTLE_MULTI_COLORS } from './shuttleMultiPlayback'
 import {
   SHUTTLE_ENDPOINT_MARKER_OFFSET,
   SHUTTLE_PATH_LINE_OFFSET,
@@ -60,13 +68,27 @@ function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) 
     </group>
   )
 }
-function LiftModel({ lift, entrances, sample, selected }: { lift: ShuttleLift; entrances: ShuttleTrackNode[]; sample: ShuttlePlaybackSample | null; selected: boolean }) {
+function LiftModel({
+  lift,
+  entrances,
+  sample,
+  playbackState,
+  selected,
+}: {
+  lift: ShuttleLift
+  entrances: ShuttleTrackNode[]
+  sample: ShuttlePlaybackSample | null
+  playbackState?: ShuttleLiftPlaybackState
+  selected: boolean
+}) {
   const entranceNodes = Object.values(lift.level_entrances)
-  const active = sample?.liftId === lift.lift_id && ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift'].includes(sample.phase)
+  const active = playbackState
+    ? playbackState.status !== 'idle'
+    : sample?.liftId === lift.lift_id && ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift'].includes(sample.phase)
   const levelYs = entrances.map((node) => node.world_y)
   const baseY = Math.min(...levelYs)
   const topY = Math.max(...levelYs)
-  const platformY = shuttleLiftPlatformY(sample, lift.lift_id, baseY)
+  const platformY = playbackState?.platformY ?? shuttleLiftPlatformY(sample, lift.lift_id, baseY)
   const shaft = shuttleLiftShaftBounds(levelYs)
   const entrance = entrances[0]
   if (!entrance || !shaft || !Number.isFinite(baseY) || !Number.isFinite(topY)) return null
@@ -84,18 +106,30 @@ function LiftModel({ lift, entrances, sample, selected }: { lift: ShuttleLift; e
         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={active ? 0.75 : 0.28} metalness={0.42} />
       </mesh>
       <Html position={[0, topY + 0.85, 0]} center distanceFactor={18} style={{ pointerEvents: 'none' }}>
-        <span className={`shuttle-lift-label ${active ? 'is-active' : ''}`}>{lift.label} · {entranceNodes.length} 层</span>
+        <span className={`shuttle-lift-label ${active ? 'is-active' : ''}`}>
+          {lift.label} · {playbackState ? `L${playbackState.currentLevel}` : `${entranceNodes.length} 层`}
+          {playbackState?.status === 'repositioning_empty' ? ' · 空载回程' : ''}
+          {playbackState?.occupantVehicleId ? ` · ${playbackState.occupantVehicleId}` : ''}
+        </span>
       </Html>
     </group>
   )
 }
 
-function ShuttleVehicle({ sample }: { sample: ShuttlePlaybackSample }) {
+function ShuttleVehicle({
+  sample,
+  color = '#14b8a6',
+  selected = false,
+}: {
+  sample: ShuttlePlaybackSample | ShuttleMultiPlaybackSample
+  color?: string
+  selected?: boolean
+}) {
   return (
     <group position={sample.world} rotation={[0, sample.headingRadians, 0]}>
       <mesh castShadow>
         <boxGeometry args={[0.92, 0.22, 0.82]} />
-        <meshStandardMaterial color="#14b8a6" emissive="#0f766e" emissiveIntensity={0.45} metalness={0.38} roughness={0.4} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={selected ? 0.72 : 0.4} metalness={0.38} roughness={0.4} />
       </mesh>
       <mesh position={[0, 0.16, 0]} castShadow>
         <boxGeometry args={[0.66, 0.12, 0.56]} />
@@ -113,10 +147,67 @@ function ShuttleVehicle({ sample }: { sample: ShuttlePlaybackSample }) {
       )))}
       <mesh position={[0, -0.2, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[0.48, 0.6, 28]} />
-        <meshBasicMaterial color="#2dd4bf" transparent opacity={0.75} />
+        <meshBasicMaterial color={selected ? '#f8fafc' : color} transparent opacity={selected ? 0.95 : 0.7} />
       </mesh>
       <Html position={[0, 0.72, 0]} center distanceFactor={14} style={{ pointerEvents: 'none' }}>
-        <span className="shuttle-vehicle-label">SHUTTLE-01 · L{sample.shuttleLevel}</span>
+        <span className={`shuttle-vehicle-label ${selected ? 'is-selected' : ''}`}>{sample.vehicleId} · L{sample.shuttleLevel}</span>
+      </Html>
+    </group>
+  )
+}
+
+function ShuttleMultiPaths({ state }: { state: ShuttleVisualizationState }) {
+  const lookup = useMemo(() => new Map(state.tracks.map((node) => [node.track_node_id, node])), [state.tracks])
+  if (!state.multiPlan || state.multiPlan.status !== 'planning_success') return null
+  return (
+    <group>
+      {state.multiPlan.vehicles.flatMap((vehicle, vehicleIndex) => vehicle.path.slice(1).map((nodeId, index) => {
+        const from = lookup.get(vehicle.path[index])
+        const to = lookup.get(nodeId)
+        if (!from || !to) return null
+        const vertical = from.shuttle_level !== to.shuttle_level
+        return (
+          <Line
+            key={`${vehicle.vehicle_id}:${from.track_node_id}:${to.track_node_id}`}
+            points={[
+              [from.world_x, from.world_y + SHUTTLE_PATH_LINE_OFFSET, from.world_z],
+              [to.world_x, to.world_y + SHUTTLE_PATH_LINE_OFFSET, to.world_z],
+            ]}
+            color={vertical ? '#facc15' : SHUTTLE_MULTI_COLORS[vehicleIndex % SHUTTLE_MULTI_COLORS.length]}
+            lineWidth={vertical ? 4 : 2.4}
+            dashed={vertical}
+            dashSize={0.22}
+            gapSize={0.12}
+          />
+        )
+      }))}
+      {state.multiPlan.vehicles.flatMap((vehicle, index) => [
+        <mesh key={`${vehicle.vehicle_id}:start`} position={[vehicle.start.world_x, vehicle.start.world_y + SHUTTLE_ENDPOINT_MARKER_OFFSET, vehicle.start.world_z]}>
+          <sphereGeometry args={[0.13, 12, 8]} />
+          <meshBasicMaterial color={SHUTTLE_MULTI_COLORS[index % SHUTTLE_MULTI_COLORS.length]} />
+        </mesh>,
+        <mesh key={`${vehicle.vehicle_id}:goal`} position={[vehicle.destination.world_x, vehicle.destination.world_y + SHUTTLE_ENDPOINT_MARKER_OFFSET, vehicle.destination.world_z]}>
+          <sphereGeometry args={[0.13, 12, 8]} />
+          <meshBasicMaterial color="#ef4444" />
+        </mesh>,
+      ])}
+    </group>
+  )
+}
+
+function ShuttleEventMarker({ state }: { state: ShuttleVisualizationState }) {
+  const node = state.selectedEvent?.track_node_id
+    ? state.tracks.find((track) => track.track_node_id === state.selectedEvent?.track_node_id)
+    : null
+  if (!node) return null
+  return (
+    <group position={[node.world_x, node.world_y + 0.12, node.world_z]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.55, 0.76, 32]} />
+        <meshBasicMaterial color="#ef4444" transparent opacity={0.9} />
+      </mesh>
+      <Html position={[0, 0.62, 0]} center distanceFactor={16} style={{ pointerEvents: 'none' }}>
+        <span className="shuttle-conflict-label">潜在冲突 · 已避让 · {node.track_node_id}</span>
       </Html>
     </group>
   )
@@ -168,17 +259,28 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
   return (
     <group>
       <ShuttleTrackInstances state={state} />
-      <ShuttlePath state={state} />
+      {state.multiPlan ? <ShuttleMultiPaths state={state} /> : <ShuttlePath state={state} />}
+      <ShuttleEventMarker state={state} />
       {state.lifts.map((lift) => (
         <LiftModel
           key={lift.lift_id}
           lift={lift}
           entrances={Object.values(lift.level_entrances).map((nodeId) => trackLookup.get(nodeId)).filter((node): node is ShuttleTrackNode => Boolean(node))}
           sample={state.sample}
+          playbackState={state.liftStates?.find((item) => item.liftId === lift.lift_id)}
           selected={state.selectedLiftId === lift.lift_id}
         />
       ))}
-      {state.sample ? <ShuttleVehicle sample={state.sample} /> : null}
+      {state.multiSamples?.length
+        ? state.multiSamples.map((sample, index) => (
+          <ShuttleVehicle
+            key={sample.vehicleId}
+            sample={sample}
+            color={SHUTTLE_MULTI_COLORS[index % SHUTTLE_MULTI_COLORS.length]}
+            selected={state.selectedShuttleId === sample.vehicleId}
+          />
+        ))
+        : state.sample ? <ShuttleVehicle sample={state.sample} selected /> : null}
     </group>
   )
 }

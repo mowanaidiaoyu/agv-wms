@@ -3,7 +3,7 @@ import { Activity, Bot, BrainCircuit, LayoutDashboard, Map, PlayCircle, Route as
 import { NavLink } from 'react-router-dom'
 
 const items = [
-  { to: '/path-demo', label: '单车轨迹演示', icon: RouteIcon },
+  { to: '/path-demo', label: '路径规划演示', icon: RouteIcon },
   { to: '/', label: '总控驾驶舱', icon: LayoutDashboard },
   { to: '/topology', label: '拓扑编辑器', icon: Map },
   { to: '/scenario', label: '场景配置台', icon: Bot },

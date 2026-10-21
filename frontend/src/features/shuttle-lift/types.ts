@@ -179,6 +179,109 @@ export interface ShuttleMultiPlanRequest {
   planning_options?: ShuttleMultiPlanningOptions
 }
 
+export interface ShuttleTimedTrajectorySample {
+  time_step: number
+  time_seconds: number
+  world_x: number
+  world_y: number
+  world_z: number
+  track_node_id: string | null
+  action: 'start' | 'wait' | 'turn' | 'move' | 'lift_enter' | 'lift' | 'lift_exit'
+  lift_id: string | null
+  edge_from: string | null
+  edge_to: string | null
+}
+
+export interface ShuttleMultiWaitInterval {
+  track_node_id: string
+  start_time_seconds: number
+  end_time_seconds: number
+  duration_seconds: number
+  reason: 'track_reservation' | 'lift_resource' | 'turn'
+}
+
+export interface ShuttleMultiLiftUsage {
+  lift_id: string
+  vehicle_id: string
+  entry_level: ShuttleLevel
+  exit_level: ShuttleLevel
+  request_time_seconds: number
+  reposition_start_seconds: number
+  reposition_end_seconds: number
+  enter_start_seconds: number
+  transfer_start_seconds: number
+  transfer_end_seconds: number
+  exit_end_seconds: number
+  initial_cabin_level: ShuttleLevel
+  final_cabin_level: ShuttleLevel
+  used_as_alternate: boolean
+  reservation_status: 'reserved'
+}
+
+export interface ShuttleMultiVehicleResult {
+  vehicle_id: string
+  priority: number
+  algorithm: PathDemoAlgorithm
+  start: ShuttleTrackNode
+  destination: ShuttleTrackNode
+  path: string[]
+  timed_trajectory: ShuttleTimedTrajectorySample[]
+  wait_intervals: ShuttleMultiWaitInterval[]
+  lift_usage: ShuttleMultiLiftUsage[]
+  arrival_time_seconds: number
+  wait_time_seconds: number
+  horizontal_distance_cells: number
+  visited_states: number
+  planning_status: 'planned'
+}
+
+export type ShuttlePlanningEventType =
+  | 'track_node_conflict_detected'
+  | 'edge_swap_conflict_detected'
+  | 'geometric_conflict_detected'
+  | 'lift_requested'
+  | 'lift_reservation_denied'
+  | 'lift_reserved'
+  | 'lift_reposition_started'
+  | 'lift_reposition_completed'
+  | 'vehicle_wait_started'
+  | 'vehicle_wait_completed'
+  | 'lift_entered'
+  | 'lift_transfer_started'
+  | 'lift_transfer_completed'
+  | 'lift_exited'
+
+export interface ShuttlePlanningEvent {
+  event_id: string
+  simulation_time_seconds: number
+  vehicle_ids: string[]
+  event_type: ShuttlePlanningEventType
+  resource_id: string | null
+  track_node_id: string | null
+  details: Record<string, unknown>
+  resolution_status: 'candidate_rejected' | 'resolved_by_wait' | 'reserved' | 'completed'
+}
+
+export interface ShuttleMultiMetrics {
+  requested_vehicle_count: number
+  planned_vehicle_count: number
+  makespan_seconds: number
+  total_wait_time_seconds: number
+  average_wait_time_seconds: number
+  detected_track_node_conflicts: number
+  detected_edge_swap_conflicts: number
+  detected_geometric_conflicts: number
+  lift_resource_contentions: number
+  lift_a_usage_count: number
+  lift_b_usage_count: number
+  lift_a_occupied_seconds: number
+  lift_b_occupied_seconds: number
+  alternate_lift_selections: number
+  replans_used: number
+  unresolved_conflict_count: number
+  planning_time_ms: number
+}
+
 export interface ShuttleMultiPlanResponse {
   planning_id: string
   topology_id: string
@@ -188,50 +291,9 @@ export interface ShuttleMultiPlanResponse {
   coordinate_contract_version: 'shuttle-internal-levels-v1'
   planning_algorithm_version: string
   status: 'planning_success' | 'failed' | 'unsafe'
-  vehicles: Array<{
-    vehicle_id: string
-    priority: number
-    algorithm: PathDemoAlgorithm
-    start: ShuttleTrackNode
-    destination: ShuttleTrackNode
-    path: string[]
-    timed_trajectory: Array<{
-      time_step: number
-      time_seconds: number
-      world_x: number
-      world_y: number
-      world_z: number
-      track_node_id: string | null
-      action: 'start' | 'wait' | 'turn' | 'move' | 'lift_enter' | 'lift' | 'lift_exit'
-      lift_id: string | null
-      edge_from: string | null
-      edge_to: string | null
-    }>
-    wait_intervals: Array<{
-      track_node_id: string
-      start_time_seconds: number
-      end_time_seconds: number
-      duration_seconds: number
-      reason: 'track_reservation' | 'lift_resource' | 'turn'
-    }>
-    lift_usage: Array<Record<string, string | number | boolean>>
-    arrival_time_seconds: number
-    wait_time_seconds: number
-    horizontal_distance_cells: number
-    visited_states: number
-    planning_status: 'planned'
-  }>
-  events: Array<{
-    event_id: string
-    simulation_time_seconds: number
-    vehicle_ids: string[]
-    event_type: string
-    resource_id: string | null
-    track_node_id: string | null
-    details: Record<string, unknown>
-    resolution_status: string
-  }>
-  metrics: Record<string, number>
+  vehicles: ShuttleMultiVehicleResult[]
+  events: ShuttlePlanningEvent[]
+  metrics: ShuttleMultiMetrics
   safety_validation: {
     node_conflicts: number
     edge_conflicts: number
@@ -272,7 +334,7 @@ export type ShuttleMotionPhase =
   | 'arrived'
 
 export interface ShuttlePlaybackSample {
-  vehicleId: 'SHUTTLE-01'
+  vehicleId: string
   topologyId: string
   trackNodeId: string
   shuttleLevel: ShuttleLevel
@@ -287,10 +349,45 @@ export interface ShuttlePlaybackSample {
   playbackStatus: PlaybackStatus
 }
 
+export type ShuttleMultiMotionPhase =
+  | 'not_started'
+  | 'turning'
+  | 'moving_track'
+  | 'waiting_traffic'
+  | 'waiting_lift'
+  | 'entering_lift'
+  | 'moving_up'
+  | 'moving_down'
+  | 'exiting_lift'
+  | 'arrived'
+
+export interface ShuttleMultiPlaybackSample extends Omit<ShuttlePlaybackSample, 'phase'> {
+  phase: ShuttleMultiMotionPhase
+  accumulatedWaitSeconds: number
+  arrivalTimeSeconds: number
+}
+
+export interface ShuttleLiftPlaybackState {
+  liftId: string
+  platformY: number
+  currentLevel: ShuttleLevel
+  targetLevel: ShuttleLevel | null
+  direction: 'up' | 'down' | 'idle'
+  status: 'idle' | 'repositioning_empty' | 'reserved' | 'entering' | 'occupied' | 'exiting'
+  occupantVehicleId: string | null
+  reservationStartSeconds: number | null
+  reservationEndSeconds: number | null
+}
+
 export interface ShuttleVisualizationState {
   tracks: ShuttleTrackNode[]
   lifts: ShuttleLift[]
   plan: ShuttlePlanResponse | null
   sample: ShuttlePlaybackSample | null
+  multiPlan?: ShuttleMultiPlanResponse | null
+  multiSamples?: ShuttleMultiPlaybackSample[]
+  liftStates?: ShuttleLiftPlaybackState[]
+  selectedShuttleId?: string | null
+  selectedEvent?: ShuttlePlanningEvent | null
   selectedLiftId: string | null
 }

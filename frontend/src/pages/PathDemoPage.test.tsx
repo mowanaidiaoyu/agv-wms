@@ -104,6 +104,8 @@ vi.mock('../lib/api', () => ({
     getShuttleTracks: vi.fn(),
     getShuttleLifts: vi.fn(),
     planShuttlePath: vi.fn(),
+    getShuttleMultiScenarios: vi.fn(),
+    planShuttleMulti: vi.fn(),
   },
 }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
@@ -379,6 +381,14 @@ beforeEach(() => {
   vi.mocked(api.getShuttleLifts).mockResolvedValue({
     topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1', planning_enabled: true, lifts: [], warnings: [],
   })
+  vi.mocked(api.getShuttleMultiScenarios).mockResolvedValue({
+    topology_id: topology.id, topology_revision: '2.0.0:hash', shuttle_config_revision: 'shuttle-4l-lift-v2', coordinate_contract_version: 'shuttle-internal-levels-v1',
+    scenarios: [
+      { scenario_id: 'parallel', name: '场景 A：分层无冲突并行运行', description: '并行', vehicle_requests: [], evidence: {} },
+      { scenario_id: 'track-conflict', name: '场景 B：同层交叉轨道竞争', description: '交叉', vehicle_requests: [], evidence: {} },
+      { scenario_id: 'lift-conflict', name: '场景 C：Lift-A 资源竞争', description: '提升机', vehicle_requests: [], evidence: {} },
+    ],
+  })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
   vi.mocked(pathDemoApi.multiScenarios).mockResolvedValue(multiScenarios)
@@ -388,39 +398,29 @@ describe('PathDemoPage', () => {
   it('opens the unified planning page on the Shuttle workspace by default without a secondary CTU entry', async () => {
     renderDefaultPage()
 
-    expect(await screen.findByText('四向车四层轨道与双提升机演示')).toBeInTheDocument()
+    expect(await screen.findByText('四向车单车 / 多车统一路径规划工作台')).toBeInTheDocument()
     expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_single')
-    expect(screen.getByRole('option', { name: 'CTU 单车轨迹' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'CTU 预设多车场景（A/B/C）' })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: 'CTU 自定义多车（1–6 辆）' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '四向车单车轨迹（同层 / 跨层）' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '四向车预设多车（A/B/C）' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '四向车自定义多车（2–4 辆）' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /CTU/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
     expect(screen.queryByRole('tablist', { name: '车辆类型' })).not.toBeInTheDocument()
     expect(pathDemoApi.options).not.toHaveBeenCalled()
   })
 
-  it('switches directly among Shuttle, CTU single, preset, and custom panels while retaining valid CTU input', async () => {
+  it('switches directly among the three Shuttle panels without exposing a redundant CTU entry', async () => {
     renderDefaultPage()
     const mode = await screen.findByLabelText('演示模式')
 
-    fireEvent.change(mode, { target: { value: 'ctu_single' } })
-    expect(await screen.findByLabelText('起点（可行驶道路）')).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
-    const scenario = await screen.findByRole('combobox', { name: '冲突演示场景' })
-    await waitFor(() => expect(scenario).toHaveValue('parallel'))
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
-    expect(await screen.findByText('车辆配置（3/6）')).toBeInTheDocument()
+    fireEvent.change(mode, { target: { value: 'shuttle_multi_preset' } })
+    const shuttleScenario = await screen.findByLabelText('四向车预设场景')
+    await waitFor(() => expect(shuttleScenario).toHaveValue('parallel'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_multi_custom' } })
+    expect(await screen.findByText('车辆配置（2/4）')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '添加车辆' }))
-    expect(await screen.findByText('车辆配置（4/6）')).toBeInTheDocument()
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_single' } })
-    expect(await screen.findByText('四层真实轨道 · 双提升机')).toBeInTheDocument()
-    expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_single')
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
-    expect(await screen.findByText('车辆配置（4/6）')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
+    expect(await screen.findByText('车辆配置（3/4）')).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /CTU/ })).not.toBeInTheDocument()
   })
 
   it('leaves the loading state and renders 666 after the topology request succeeds with Shuttle mode installed', async () => {
@@ -458,21 +458,14 @@ describe('PathDemoPage', () => {
     expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
   })
 
-  it('isolates Shuttle API failures from the loaded topology and original planning workspace', async () => {
+  it('isolates Shuttle API failures from the loaded topology', async () => {
     vi.mocked(api.getShuttleLevels).mockRejectedValueOnce(new Error('shuttle unavailable'))
     vi.mocked(api.getShuttleTracks).mockRejectedValueOnce(new Error('shuttle unavailable'))
     vi.mocked(api.getShuttleLifts).mockRejectedValueOnce(new Error('shuttle unavailable'))
-    renderPage()
+    renderDefaultPage()
     await screen.findByTestId('path-demo-scene')
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_single' } })
     expect(await screen.findByText(/shuttle unavailable/)).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
-
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_single' } })
-    expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
-    expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
-    expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
   })
 
   it('shares the current custom vehicle DTO with the algorithm lab store', async () => {
