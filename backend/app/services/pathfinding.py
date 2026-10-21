@@ -102,6 +102,57 @@ def build_occupied_lookup(topology: dict[str, Any]) -> set[tuple[str, int, int]]
     return occupied
 
 
+def storage_entry_dirs(topology: dict[str, Any]) -> dict[tuple[str, int, int], set[tuple[int, int]]]:
+    """库位格允许的进入方向：只能从货架长方形（区域）的长边进入。
+
+    竖向长条（高 > 宽，如 666 的 1 列 17 层货架）：长边在左右两侧，只允许水平进入；
+    横向长条（宽 > 高）：长边在上下两侧，只允许竖直进入；正方形区域长宽一致，不限制。
+    返回 {(floor,row,col): {(d_row,d_col), ...}}。"""
+    zones = {zone["id"]: zone for zone in topology.get("zones", [])}
+    result: dict[tuple[str, int, int], set[tuple[int, int]]] = {}
+    for node in topology.get("nodes", []):
+        if node.get("type") != "storage":
+            continue
+        zone = zones.get(node.get("zoneId"))
+        if zone is None:
+            continue
+        width = int(zone.get("width", 0))
+        height = int(zone.get("height", 0))
+        if height > width:
+            dirs = {(0, -1), (0, 1)}
+        elif width > height:
+            dirs = {(-1, 0), (1, 0)}
+        else:
+            continue
+        result[node_position(node)] = dirs
+    return result
+
+
+def serviceable_storage_cells(topology: dict[str, Any]) -> set[tuple[str, int, int]]:
+    """可被 CTU 取货的库位格：至少有一个允许进入方向的相邻格是空地。
+
+    2 列宽的竖向货架，内侧列左右两侧都是库位或网格边界，实际无法从长边进入；
+    这类库位不应参与任务生成，否则会产生永远无法完成的取货任务。
+    """
+    walkable = build_walkable_lookup(topology)
+    occupied = build_occupied_lookup(topology)
+    entry_dirs = storage_entry_dirs(topology)
+    result: set[tuple[str, int, int]] = set()
+    for node in topology.get("nodes", []):
+        if node.get("type") != "storage":
+            continue
+        pos = node_position(node)
+        # 正方形区域没有长/短边约束，四个方向都可进入。
+        dirs = entry_dirs.get(pos, {(-1, 0), (1, 0), (0, -1), (0, 1)})
+        floor, row, col = pos
+        for d_row, d_col in dirs:
+            nxt = (floor, row + d_row, col + d_col)
+            if nxt in walkable and nxt not in occupied:
+                result.add(pos)
+                break
+    return result
+
+
 def build_node_lookup(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {node["id"]: node for node in topology.get("nodes", [])}
 
@@ -153,6 +204,7 @@ def shortest_path(
         return []
 
     walkable = build_walkable_lookup(topology)
+    goal_entry_dirs: set[tuple[int, int]] | None = None
     if avoid_storage or extra_blocked:
         # CTU 规则：没有被放置任何物品的格子才可以通行；库位/输送带不能穿行。
         # extra_blocked 用于运行时绕行：把其它设备当前占用的格临时视为障碍。
@@ -161,6 +213,9 @@ def shortest_path(
         if avoid_storage:
             occupied = build_occupied_lookup(topology)
             walkable = {pos: cell for pos, cell in walkable.items() if pos not in occupied}
+            # 取货终点是库位时，只允许从货架长边进入（禁止从长方形短边/端头进入）。
+            if goal in occupied:
+                goal_entry_dirs = storage_entry_dirs(topology).get(goal)
         if extra_blocked:
             walkable = {pos: cell for pos, cell in walkable.items() if pos not in extra_blocked}
         walkable.update(endpoints)
@@ -182,6 +237,9 @@ def shortest_path(
             nxt = (current[0], current[1] + d_row, current[2] + d_col)
             nxt_cell = walkable.get(nxt)
             if nxt_cell is None:
+                continue
+            if nxt == goal and goal_entry_dirs is not None and (d_row, d_col) not in goal_entry_dirs:
+                # 短边（端头）进入库位取货不被允许。
                 continue
 
             move_cost = float(nxt_cell.get("cost", 1.0))

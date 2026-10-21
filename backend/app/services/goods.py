@@ -41,18 +41,35 @@ def load_catalog() -> dict[str, Any]:
     return {"version": 1, "skus": []}
 
 
-def ctu_zone_ids(topology: dict[str, Any]) -> set[str]:
-    """收集拓扑里所有 `type == "ctu"` 的 zone id。
+def ctu_storage_nodes(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    """CTU 货架里的库位节点。
 
-    真实 666 拓扑的 CTU 库被拆成多个 1 宽列区：`zone-ctu`、`zone-ctu-2` …
-    `zone-ctu-147`。只用精确 id `zone-ctu` 只能拿到其中一列（24 个库位），
-    必须按 zone 类型把全部列区都纳入，才能覆盖完整库位数据。
+    优先按 `zoneId` 归属 CTU 区域；旧数据里库位没有（或指向已删除的）zoneId 时，
+    按位置是否落在 CTU 区域矩形内识别。拓扑里没有 CTU 区域时返回空——
+    货架已删除，残留的 storage 节点不应再产出货物。
     """
-    ids = {zone["id"] for zone in topology.get("zones", []) if zone.get("type") == "ctu"}
-    if ids:
-        return ids
-    # 没有 zone 类型信息的老拓扑回退到约定 id。
-    return {"zone-ctu"}
+    zones = topology.get("zones", [])
+    ctu_zones = [zone for zone in zones if zone.get("type") == "ctu"]
+    if not ctu_zones:
+        return []
+    ctu_ids = {zone["id"] for zone in ctu_zones}
+    all_zone_ids = {zone["id"] for zone in zones}
+    nodes = [node for node in topology.get("nodes", []) if node.get("type") == "storage"]
+
+    def inside_ctu_zone(node: dict[str, Any]) -> bool:
+        row = int(node["row"])
+        col = int(node["col"])
+        return any(
+            zone["y"] <= row < zone["y"] + zone["height"] and zone["x"] <= col < zone["x"] + zone["width"]
+            for zone in ctu_zones
+        )
+
+    return [
+        node
+        for node in nodes
+        if node.get("zoneId") in ctu_ids
+        or (node.get("zoneId") not in all_zone_ids and inside_ctu_zone(node))
+    ]
 
 
 def build_inventory(
@@ -62,8 +79,8 @@ def build_inventory(
 ) -> list[dict[str, Any]]:
     """把商品目录确定性地分配到当前拓扑的 CTU 库位上。
 
-    每个 CTU storage/buffer 节点 × 1..17 层 = 一个库位槽；空则回退到全部
-    storage/buffer 节点（与 simulation._seed_tasks 的 ctu_sources 回退一致）。
+    每个 CTU storage 节点 × 1..17 层 = 一个库位槽；只认 CTU 货架里的库位，
+    货架删除后残留的无归属 storage 节点不再产出货物。
     """
     if catalog is None:
         catalog = load_catalog()
@@ -71,11 +88,7 @@ def build_inventory(
     if not skus:
         return []
 
-    nodes = topology.get("nodes", [])
-    ctu_zones = ctu_zone_ids(topology)
-    ctu_sources = [node for node in nodes if node["type"] == "storage" and node.get("zoneId") in ctu_zones]
-    if not ctu_sources:
-        ctu_sources = [node for node in nodes if node["type"] == "storage"]
+    ctu_sources = ctu_storage_nodes(topology)
     if not ctu_sources:
         return []
 

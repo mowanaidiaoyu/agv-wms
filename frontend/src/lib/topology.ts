@@ -1401,8 +1401,25 @@ function translateSlotLiftKeys(
 
 export function removeZone(topology: TopologyPayload, zoneId: string): TopologyPayload {
   const next = cloneTopology(topology)
+  const removed = next.zones.find((zone) => zone.id === zoneId)
   const keepZoneIds = new Set(next.zones.filter((zone) => zone.id !== zoneId).map((zone) => zone.id))
   next.zones = next.zones.filter((zone) => zone.id !== zoneId)
+  // CTU 区域画出来时会自动生成「一格一库位」的 storage 节点；删区域时一并删掉这些库位，
+  // 否则货架已删除、库位节点还在，3D 场景仍会按库存把货物画在原位置。
+  // 旧数据里的库位可能没有 zoneId，此时按位置是否落在被删区域矩形内判断。
+  // 其它类型节点（如 CTU 车）只清空 zoneId，不随区域删除。
+  const insideRemovedCtu = (node: TopologyNode) =>
+    removed?.type === 'ctu' &&
+    node.row >= removed.y &&
+    node.row < removed.y + removed.height &&
+    node.col >= removed.x &&
+    node.col < removed.x + removed.width
+  next.nodes = next.nodes.filter((node) => {
+    if (node.type !== 'storage') return true
+    if (node.zoneId === zoneId) return false
+    const unowned = node.zoneId == null || !keepZoneIds.has(node.zoneId)
+    return !(unowned && insideRemovedCtu(node))
+  })
   next.cells = next.cells.map((cell) => (cell.zoneId === zoneId ? { ...cell, zoneId: null } : cell))
   next.nodes = next.nodes.map((node) => (node.zoneId === zoneId ? { ...node, zoneId: null } : node))
   // 若某 zone 引用的 zoneId 已被删，改空。

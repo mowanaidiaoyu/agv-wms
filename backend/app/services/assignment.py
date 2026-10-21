@@ -15,7 +15,13 @@ class AssignmentInput:
     score: float
 
 
-def task_cost(robot: dict[str, Any], task: dict[str, Any], topology: dict[str, Any], path_policy: str) -> float:
+def task_cost(
+    robot: dict[str, Any],
+    task: dict[str, Any],
+    topology: dict[str, Any],
+    path_policy: str,
+    extra_blocked: set[tuple[str, int, int]] | None = None,
+) -> float:
     source_cell = task.get("sourceCellId")
     if not source_cell:
         return 9999.0
@@ -29,7 +35,14 @@ def task_cost(robot: dict[str, Any], task: dict[str, Any], topology: dict[str, A
             path_policy,
         )
     else:
-        path = shortest_path(topology, robot["currentCellId"], source_cell, path_policy, avoid_storage=True)
+        path = shortest_path(
+            topology,
+            robot["currentCellId"],
+            source_cell,
+            path_policy,
+            avoid_storage=True,
+            extra_blocked=extra_blocked,
+        )
     if not path:
         return 9999.0
     battery_penalty = max(0.0, 50.0 - robot["battery"]) * 0.05
@@ -42,6 +55,7 @@ def greedy_assign(
     tasks: list[dict[str, Any]],
     topology: dict[str, Any],
     path_policy: str,
+    extra_blocked: set[tuple[str, int, int]] | None = None,
 ) -> list[tuple[str, str]]:
     available = [robot for robot in robots if robot["status"] == "idle"]
     remaining = [task for task in tasks if task["status"] == "pending"]
@@ -52,7 +66,7 @@ def greedy_assign(
             for task in remaining:
                 if robot["type"] != task["robotType"]:
                     continue
-                score = task_cost(robot, task, topology, path_policy)
+                score = task_cost(robot, task, topology, path_policy, extra_blocked)
                 candidate = AssignmentInput(robot, task, score)
                 if best is None or candidate.score < best.score:
                     best = candidate
@@ -69,6 +83,7 @@ def hungarian_assign(
     tasks: list[dict[str, Any]],
     topology: dict[str, Any],
     path_policy: str,
+    extra_blocked: set[tuple[str, int, int]] | None = None,
 ) -> list[tuple[str, str]]:
     idle_robots = [robot for robot in robots if robot["status"] == "idle"]
     pending_tasks = [task for task in tasks if task["status"] == "pending"]
@@ -81,7 +96,7 @@ def hungarian_assign(
     for row_index, robot in enumerate(idle_robots):
         for col_index, task in enumerate(compatible_tasks):
             if robot["type"] == task["robotType"]:
-                matrix[row_index][col_index] = task_cost(robot, task, topology, path_policy)
+                matrix[row_index][col_index] = task_cost(robot, task, topology, path_policy, extra_blocked)
 
     indexes = Munkres().compute(matrix)
     matches: list[tuple[str, str]] = []
@@ -97,7 +112,8 @@ def assign_tasks(
     tasks: list[dict[str, Any]],
     topology: dict[str, Any],
     path_policy: str,
+    extra_blocked: set[tuple[str, int, int]] | None = None,
 ) -> list[tuple[str, str]]:
     if policy == "hungarian":
-        return hungarian_assign(robots, tasks, topology, path_policy)
-    return greedy_assign(robots, tasks, topology, path_policy)
+        return hungarian_assign(robots, tasks, topology, path_policy, extra_blocked)
+    return greedy_assign(robots, tasks, topology, path_policy, extra_blocked)

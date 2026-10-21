@@ -107,6 +107,44 @@ def test_build_inventory_no_ctu_nodes_empty():
     assert build_inventory(topology, CATALOG) == []
 
 
+def test_build_inventory_ignores_orphan_storage_when_rack_deleted():
+    # 删除 CTU 货架后残留的无归属 storage 节点不应再产出货物。
+    topology = {
+        **TOPOLOGY,
+        "zones": [{"id": "zone-port", "label": "Port", "type": "port", "x": 0, "y": 0, "width": 1, "height": 1}],
+        "nodes": [
+            {"id": "orphan", "type": "storage", "row": 0, "col": 0, "zoneId": None, "capacity": 17, "label": "残留库位"},
+        ],
+    }
+    assert build_inventory(topology, CATALOG) == []
+
+
+def test_build_inventory_accepts_legacy_storage_without_zone_id_inside_rack():
+    # 旧数据库位没有 zoneId：位置落在 CTU 货架矩形内仍算库位，架外的忽略。
+    topology = {
+        **TOPOLOGY,
+        "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 1, "height": 1}],
+        "nodes": [
+            {"id": "legacy", "type": "storage", "row": 0, "col": 0, "zoneId": None, "capacity": 17, "label": "旧库位"},
+            {"id": "outside", "type": "storage", "row": 1, "col": 1, "capacity": 17, "label": "架外库位"},
+        ],
+    }
+    inventory = build_inventory(topology, CATALOG)
+    assert {slot["nodeId"] for slot in inventory} == {"legacy"}
+
+
+def test_seed_tasks_no_ctu_tasks_when_no_ctu_zone():
+    topology = {
+        **TOPOLOGY,
+        "zones": [{"id": "zone-port", "label": "Port", "type": "port", "x": 1, "y": 0, "width": 1, "height": 1}],
+        "nodes": [
+            {"id": "orphan", "type": "storage", "row": 0, "col": 0, "zoneId": None, "capacity": 17, "label": "残留库位"},
+        ],
+    }
+    tasks = _service()._seed_tasks(topology, SCENARIO)
+    assert [task for task in tasks if task["robotType"] == "ctu"] == []
+
+
 def test_sample_order_lines_carry_sku_and_stay_within_inventory():
     inventory = build_inventory(TOPOLOGY, CATALOG)
     rng = random.Random(7)

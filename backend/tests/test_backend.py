@@ -92,6 +92,36 @@ def test_shortest_path_ctu_avoids_storage_cells():
     assert "cell-r0-c1" not in ids[1:-1]
 
 
+def test_ctu_storage_entry_only_from_rack_long_side():
+    # 竖向 1×3 的 CTU 货架：长边在左右，只能从左右进入，不能从上下端头（短边）进入。
+    topology = {
+        **TOPOLOGY,
+        "grid": {"rows": 5, "cols": 5, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [{"id": "zone-rack", "label": "Rack", "type": "ctu", "x": 2, "y": 0, "width": 1, "height": 3}],
+        "cells": [],
+        "nodes": [
+            {"id": "storage-a", "type": "storage", "floor": "1F", "row": 0, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "A"},
+            {"id": "storage-b", "type": "storage", "floor": "1F", "row": 1, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "B"},
+            {"id": "storage-c", "type": "storage", "floor": "1F", "row": 2, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "C"},
+        ],
+    }
+    # 从正下方（短边）出发取底层库位：必须绕到左右长边后再进入
+    path = shortest_path(topology, "cell-r3-c2", "cell-r2-c2", "astar", avoid_storage=True)
+    ids = [cell["id"] for cell in path]
+    assert ids[-1] == "cell-r2-c2"
+    assert ids[-2] in {"cell-r2-c1", "cell-r2-c3"}
+
+    # 左右长边都被挡住时，禁止改从短边进入 => 无路可走
+    blocked_sides = {
+        **topology,
+        "cells": [
+            {"id": "cell-r2-c1", "row": 2, "col": 1, "type": "blocked", "walkable": False, "cost": 1.0},
+            {"id": "cell-r2-c3", "row": 2, "col": 3, "type": "blocked", "walkable": False, "cost": 1.0},
+        ],
+    }
+    assert shortest_path(blocked_sides, "cell-r3-c2", "cell-r2-c2", "astar", avoid_storage=True) == []
+
+
 def test_shortest_path_extra_blocked_reroutes_ctu_around_occupied_cell():
     # 回归：CTU 头对头死锁时的绕行。extra_blocked 把其它设备当前占用的格临时视为障碍，
     # 从 r0c0 到 r0c2 的直线被 r0c1 挡住时，应绕行下方一行而不是穿行被占格。
@@ -308,6 +338,26 @@ def test_seed_tasks_multiline_orders():
         assert all(1 <= line["layer"] <= CTU_RACK_LAYERS for line in lines)
         assert task["picked"] == 0
         assert task["currentLineIndex"] == 0
+
+
+def test_seed_tasks_never_share_one_storage_slot():
+    # 同一库位槽（nodeId + layer）只能派一单，否则两台车会抢同一格形成对头死锁。
+    service = _service()
+    tasks = service._seed_tasks(TOPOLOGY, SCENARIO)
+    keys = [(line["nodeId"], line["layer"]) for task in tasks for line in task["lines"]]
+    assert keys
+    assert len(keys) == len(set(keys))
+
+
+def test_step_off_port_moves_finished_robot_off_entry():
+    service = _service()
+    runtime = service._create_runtime("test-step-off", TOPOLOGY, SCENARIO, record_events=False)
+    robot = runtime.state["robots"][0]
+    robot["currentCellId"] = "cell-r5-c6"
+    robot["lastCellId"] = "cell-r4-c6"
+    robot["path"] = ["cell-r5-c6"]
+    service._step_off_port(runtime, robot, None)
+    assert robot["currentCellId"] == "cell-r4-c6"
 
 
 def test_robot_carry_capacity():

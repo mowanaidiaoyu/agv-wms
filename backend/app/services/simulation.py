@@ -12,13 +12,16 @@ from fastapi import WebSocket
 
 from ..core.repository import Repository
 from .assignment import assign_tasks
-from .goods import SKU_FIELDS, build_inventory, ctu_zone_ids, sample_order_lines
+from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes
 from .pathfinding import (
     build_node_lookup,
+    build_occupied_lookup,
     cell_id,
+    node_position,
     node_to_cell_id,
     parse_cell_id,
     port_entry_cell,
+    serviceable_storage_cells,
     shortest_path,
     shortest_path_shuttle,
     shuttle_rack_slots,
@@ -210,6 +213,7 @@ class SimulationService:
                     "currentRow": start_node["row"],
                     "currentCol": start_node["col"],
                     "currentLayer": 1,
+                    "lastCellId": None,
                     "status": "idle",
                     "battery": robot["battery"],
                     "path": [start_cell],
@@ -277,14 +281,53 @@ class SimulationService:
     def _seed_tasks(self, topology: dict[str, Any], scenario: dict[str, Any], inventory: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if inventory is None:
             inventory = build_inventory(topology)
-        nodes = topology["nodes"]
         order_gen = scenario.get("orderGenerator") or {}
         rng = random.Random(scenario.get("seed", 0))
 
-        ctu_sources = [node["id"] for node in nodes if node["type"] == "storage" and node.get("zoneId") in ctu_zone_ids(topology)]
-        if not ctu_sources:
-            ctu_sources = [node["id"] for node in nodes if node["type"] == "storage"]
+        # 只从「长边有可通行空格」的库位生成取货任务：
+        # 2 列宽货架的内侧列没有可进入的长边，生成任务会永远无法完成，导致机器人空等。
+        serviceable = serviceable_storage_cells(topology)
+        ctu_sources = [
+            node["id"]
+            for node in ctu_storage_nodes(topology)
+            if node_position(node) in serviceable
+        ]
+        ctu_source_ids = set(ctu_sources)
         shuttle_sources = shuttle_rack_slots(topology)
+
+        # 一个库位槽（nodeId + layer）只有一箱货：同一槽派两单会让两台车抢同一格，
+        # 后到的一台永远进不去，形成对头死锁。
+        slot_pool = [slot for slot in inventory if slot.get("nodeId") in ctu_source_ids]
+        rng.shuffle(slot_pool)
+        used_slots: set[tuple[str, int]] = set()
+
+        def take_lines(count: int) -> list[dict[str, Any]]:
+            lines: list[dict[str, Any]] = []
+            while slot_pool and len(lines) < count:
+                slot = slot_pool.pop()
+                key = (slot["nodeId"], int(slot["layer"]))
+                if key in used_slots:
+                    continue
+                used_slots.add(key)
+                line: dict[str, Any] = {"nodeId": slot["nodeId"], "layer": key[1]}
+                for field in SKU_FIELDS:
+                    if slot.get(field) not in (None, ""):
+                        line[field] = slot[field]
+                lines.append(line)
+            if lines or not ctu_sources:
+                return lines
+            # 无库存（商品目录缺失）时按库位×层随机回退，同样排除已派出的槽。
+            fallback = [
+                (node_id, layer)
+                for node_id in ctu_sources
+                for layer in range(1, CTU_RACK_LAYERS + 1)
+                if (node_id, layer) not in used_slots
+            ]
+            rng.shuffle(fallback)
+            for node_id, layer in fallback[:count]:
+                used_slots.add((node_id, layer))
+                lines.append({"nodeId": node_id, "layer": layer})
+            return lines
 
         port_zones = [zone for zone in topology["zones"] if zone.get("type") == "port"]
         delivery_cells = [port_entry_cell(topology, zone) for zone in port_zones]
@@ -300,17 +343,11 @@ class SimulationService:
 
         tasks: list[dict[str, Any]] = []
         for index in range(max_orders):
-            if not ctu_sources:
-                break
             delivery = delivery_cells[index % len(delivery_cells)]
             line_count = rng.randint(lines_min, lines_max)
-            lines = sample_order_lines(inventory, line_count, rng)
+            lines = take_lines(line_count)
             if not lines:
-                # 无库存（目录缺失/无 CTU 库位）时回退到随机 nodeId/layer。
-                lines = [
-                    {"nodeId": ctu_sources[rng.randrange(len(ctu_sources))], "layer": rng.randint(1, CTU_RACK_LAYERS)}
-                    for _ in range(line_count)
-                ]
+                break
             tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, delivery, False, 2))
 
         for index in range(6):
@@ -439,6 +476,28 @@ class SimulationService:
                 robot["phaseLabel"] = "设备故障"
                 robot["currentTaskId"] = None
                 robot["path"] = [robot["currentCellId"]]
+                # 故障设备停在原地后，它占的格子就是永久障碍：其它设备的剩余路径
+                # 如果穿过该格，要么绕开，要么把任务退回重新分配，否则会一直 blocked。
+                failed_pos = parse_cell_id(robot["currentCellId"])
+                for other in runtime.state["robots"]:
+                    if other["id"] == target_id or other["failed"] or not other["currentTaskId"]:
+                        continue
+                    other_task = find_task(runtime.state["tasks"], other["currentTaskId"])
+                    if other_task is None or robot["currentCellId"] not in other["path"][1:]:
+                        continue
+                    retry = shortest_path(
+                        runtime.topology,
+                        other["currentCellId"],
+                        other["targetCellId"],
+                        runtime.scenario["pathPolicy"],
+                        avoid_storage=True,
+                        extra_blocked={failed_pos},
+                    )
+                    if retry and len(retry) > 1:
+                        other["path"] = [cell["id"] for cell in retry]
+                        other["pathLayers"] = [1] * len(other["path"])
+                        continue
+                    self._release_task(runtime, other, other_task, reason="通道被故障设备占用")
                 self._emit_alert(
                     runtime,
                     tick,
@@ -460,12 +519,30 @@ class SimulationService:
         if not delivery:
             return
         inventory = runtime.state.get("inventory") or []
-        lines = sample_order_lines(inventory, 1, random.Random())
-        if not lines:
-            source_node = self._first_node(runtime.topology, {"storage"})
-            if not source_node:
-                return
-            lines = [{"nodeId": source_node, "layer": random.randint(1, CTU_RACK_LAYERS)}]
+        serviceable = serviceable_storage_cells(runtime.topology)
+        source_ids = {
+            node["id"]
+            for node in ctu_storage_nodes(runtime.topology)
+            if node_position(node) in serviceable
+        }
+        used_slots = {
+            (line.get("nodeId"), int(line.get("layer", 1)))
+            for task in runtime.state["tasks"]
+            for line in task.get("lines", [])
+        }
+        candidates = [
+            slot
+            for slot in inventory
+            if slot.get("nodeId") in source_ids and (slot["nodeId"], int(slot["layer"])) not in used_slots
+        ]
+        if not candidates:
+            return
+        slot = random.choice(candidates)
+        line: dict[str, Any] = {"nodeId": slot["nodeId"], "layer": int(slot["layer"])}
+        for field in SKU_FIELDS:
+            if slot.get(field) not in (None, ""):
+                line[field] = slot[field]
+        lines = [line]
         task = self._build_task(
             runtime.topology,
             f"task-urgent-{tick}",
@@ -485,14 +562,25 @@ class SimulationService:
         if not pending:
             return
         pending.sort(key=lambda task: (task["priority"], task["id"]))
-        matches = assign_tasks(runtime.scenario["dispatchPolicy"], runtime.state["robots"], pending, runtime.topology, runtime.scenario["pathPolicy"])
+        # 故障设备停在原地，占的格子对其它设备不可通行：寻路和代价计算都要排除。
+        failed_cells = {
+            parse_cell_id(robot["currentCellId"]) for robot in runtime.state["robots"] if robot["failed"]
+        }
+        matches = assign_tasks(
+            runtime.scenario["dispatchPolicy"],
+            runtime.state["robots"],
+            pending,
+            runtime.topology,
+            runtime.scenario["pathPolicy"],
+            failed_cells,
+        )
         for robot_id, task_id in matches:
             robot = next(item for item in runtime.state["robots"] if item["id"] == robot_id)
             task = find_task(runtime.state["tasks"], task_id)
             if task is None:
                 continue
             phase = "pickup_from_ctu" if task["mode"] == "direct" else "pickup_from_shuttle"
-            if not self._robot_path_to(runtime, robot, task["sourceCellId"], task["sourceLayer"]):
+            if not self._robot_path_to(runtime, robot, task["sourceCellId"], task["sourceLayer"], failed_cells):
                 continue
             robot["currentTaskId"] = task_id
             robot["status"] = "moving"
@@ -525,7 +613,7 @@ class SimulationService:
 
             path = robot["path"]
             if len(path) <= 1:
-                self._advance_robot_phase(runtime, robot, task)
+                self._advance_robot_phase(runtime, robot, task, occupied_cells)
                 continue
 
             path_layers = robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(path)
@@ -539,15 +627,21 @@ class SimulationService:
                 robot["waitTicks"] += 1
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
                 occupied_cells.add(current_cell_id)
-                # 连续等待后仍无法前进：CTU 尝试绕开其它设备重新寻路，化解头对头死锁。
+                blocker = next((item for item in movable if item["currentCellId"] == next_cell_id), None)
+                # 连续等待后仍无法前进：CTU 先绕开其它设备重新寻路，绕不开再处理头对头死锁。
                 if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_ctu(runtime, robot, occupied_cells):
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                        robot["phaseLabel"] = task["phaseLabel"]
+                    elif self._clear_head_on(runtime, robot, blocker, occupied_cells):
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
                 continue
 
             robot["status"] = "moving"
+            robot["lastCellId"] = current_cell_id
             robot["currentCellId"] = next_cell_id
             robot["currentNode"] = next_cell_id
             floor, row, col = parse_cell_id(next_cell_id)
@@ -565,7 +659,7 @@ class SimulationService:
             self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]})
 
             if len(robot["path"]) <= 1:
-                self._advance_robot_phase(runtime, robot, task)
+                self._advance_robot_phase(runtime, robot, task, occupied_cells)
 
     def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
         """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
@@ -588,6 +682,89 @@ class SimulationService:
         robot["targetCellId"] = target
         return True
 
+    def _clear_head_on(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        blocker: dict[str, Any] | None,
+        occupied_cells: set[str],
+    ) -> bool:
+        """头对头死锁：两台车互相把对方当前格当作下一格时，让其中一台后退一格再绕行。"""
+        if blocker is None or blocker["status"] in {"failed", "idle"}:
+            return False
+        blocker_path = blocker.get("path") or []
+        if len(blocker_path) <= 1 or blocker_path[1] != robot["currentCellId"]:
+            return False
+        # 先让想进对方格子的这台后退；它退不了再让对向那台后退。
+        if self._yield_one_cell(runtime, robot, occupied_cells):
+            return True
+        return self._yield_one_cell(runtime, blocker, occupied_cells)
+
+    def _yield_one_cell(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+        """后退到上一格，并从那里重新规划到原目标；退不了或规划失败返回 False。"""
+        last = robot.get("lastCellId")
+        if not last or last == robot["currentCellId"] or last in occupied_cells:
+            return False
+        # 不能退进货位/输送带格（上一格是刚取完货的库位时会出现）。
+        if parse_cell_id(last) in build_occupied_lookup(runtime.topology):
+            return False
+        target = robot.get("targetCellId")
+        if not target:
+            return False
+        blocked = {parse_cell_id(cell) for cell in occupied_cells}
+        path_cells = shortest_path(
+            runtime.topology,
+            last,
+            target,
+            runtime.scenario["pathPolicy"],
+            avoid_storage=True,
+            extra_blocked=blocked,
+        )
+        if not path_cells or len(path_cells) <= 1:
+            return False
+        occupied_cells.discard(robot["currentCellId"])
+        robot["lastCellId"] = robot["currentCellId"]
+        robot["currentCellId"] = last
+        robot["currentNode"] = last
+        floor, row, col = parse_cell_id(last)
+        robot["currentFloor"] = floor
+        robot["currentRow"] = row
+        robot["currentCol"] = col
+        robot["path"] = [cell["id"] for cell in path_cells]
+        robot["pathLayers"] = [1] * len(robot["path"])
+        occupied_cells.add(last)
+        self._record_event(
+            runtime,
+            runtime.state["tick"],
+            "robot_position",
+            {"robotId": robot["id"], "cellId": last, "floor": floor, "row": row, "col": col, "layer": robot.get("currentLayer", 1), "status": "yielding"},
+        )
+        return True
+
+    def _release_task(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], *, reason: str) -> None:
+        """任务无法继续时退回待分配，并让设备回到空闲，避免永久 blocked。"""
+        tick = runtime.state["tick"]
+        robot["currentTaskId"] = None
+        robot["status"] = "idle"
+        robot["phaseLabel"] = f"待命 / {reason}"
+        robot["path"] = [robot["currentCellId"]]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        robot["load"] = 0
+        robot["carrying"] = []
+        robot["waitTicks"] = 0
+        task["status"] = "pending"
+        task["phase"] = "pending_assignment"
+        task["phaseLabel"] = self._phase_label(task["phase"])
+        task["assignedRobotId"] = None
+        task["etaTicks"] = 0
+        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "status": task["status"], "robotId": robot["id"], "reason": reason},
+        )
+
     def _transfer_goods_to_robot(self, runtime: RunRuntime, robot: dict[str, Any], line: dict[str, Any]) -> None:
         """CTU 取到一箱：把该库位槽从库存移除，并把货物挂到机器人 carrying，前端据此把货箱从库位移到车上。"""
         node_id = line.get("nodeId")
@@ -601,7 +778,13 @@ class SimulationService:
                 del inventory[index]
                 return
 
-    def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+    def _advance_robot_phase(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        occupied_cells: set[str] | None = None,
+    ) -> None:
         tick = runtime.state["tick"]
         if task["phase"] == "pickup_from_ctu":
             capacity = robot.get("capacity", ROBOT_CARRY_CAPACITY["ctu"])
@@ -655,9 +838,52 @@ class SimulationService:
                 runtime.metrics["urgentOrdersHandled"] += 1
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+            # 交付完成后退回一格，别把空车停在输送线出入口堵住后面的车。
+            self._step_off_port(runtime, robot, occupied_cells)
             return
 
-    def _robot_path_to(self, runtime: RunRuntime, robot: dict[str, Any], target_cell_id: str, target_layer: int | None = None) -> bool:
+    def _step_off_port(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str] | None) -> None:
+        """交付后如果正停在 port 出入口格，退回进入口前的格子。"""
+        port_cells = {
+            port_entry_cell(runtime.topology, zone)
+            for zone in runtime.topology.get("zones", [])
+            if zone.get("type") == "port"
+        }
+        current = robot["currentCellId"]
+        back = robot.get("lastCellId")
+        if current not in port_cells or not back or back == current:
+            return
+        if back in {item["currentCellId"] for item in runtime.state["robots"]}:
+            return
+        if parse_cell_id(back) in build_occupied_lookup(runtime.topology):
+            return
+        robot["lastCellId"] = current
+        robot["currentCellId"] = back
+        robot["currentNode"] = back
+        floor, row, col = parse_cell_id(back)
+        robot["currentFloor"] = floor
+        robot["currentRow"] = row
+        robot["currentCol"] = col
+        robot["path"] = [back]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        if occupied_cells is not None:
+            occupied_cells.discard(current)
+            occupied_cells.add(back)
+        self._record_event(
+            runtime,
+            runtime.state["tick"],
+            "robot_position",
+            {"robotId": robot["id"], "cellId": back, "floor": floor, "row": row, "col": col, "layer": robot.get("currentLayer", 1), "status": "idle"},
+        )
+
+    def _robot_path_to(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        target_cell_id: str,
+        target_layer: int | None = None,
+        extra_blocked: set[tuple[str, int, int]] | None = None,
+    ) -> bool:
         """计算并写入 robot 的 path/pathLayers/target；CTU 走自由网格寻路，四向车走巷道+电梯寻路。"""
         if robot["type"] == "shuttle":
             layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
@@ -675,12 +901,18 @@ class SimulationService:
             robot["pathLayers"] = [state_layer for _, _, state_layer in path3d]
             robot["targetLayer"] = layer
         else:
+            if extra_blocked is None:
+                # 故障设备停下的格子对其它设备不可通行，所有后续路段都要绕开。
+                extra_blocked = {
+                    parse_cell_id(item["currentCellId"]) for item in runtime.state["robots"] if item["failed"]
+                }
             path_cells = shortest_path(
                 runtime.topology,
                 robot["currentCellId"],
                 target_cell_id,
                 runtime.scenario["pathPolicy"],
                 avoid_storage=True,
+                extra_blocked=extra_blocked,
             )
             if not path_cells:
                 return False
@@ -783,9 +1015,6 @@ class SimulationService:
             "completed": "已完成",
         }
         return mapping.get(phase, phase)
-
-    def _first_node(self, topology: dict[str, Any], node_types: set[str], *, fallback: str = "") -> str:
-        return next((node["id"] for node in topology["nodes"] if node["type"] in node_types), fallback)
 
     async def _broadcast_tick(self, runtime: RunRuntime) -> None:
         tick = runtime.state["tick"]
