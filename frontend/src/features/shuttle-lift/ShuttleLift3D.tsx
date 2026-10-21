@@ -195,24 +195,6 @@ function ShuttleMultiPaths({ state }: { state: ShuttleVisualizationState }) {
   )
 }
 
-function ShuttleEventMarker({ state }: { state: ShuttleVisualizationState }) {
-  const node = state.selectedEvent?.track_node_id
-    ? state.tracks.find((track) => track.track_node_id === state.selectedEvent?.track_node_id)
-    : null
-  if (!node) return null
-  return (
-    <group position={[node.world_x, node.world_y + 0.12, node.world_z]}>
-      <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.55, 0.76, 32]} />
-        <meshBasicMaterial color="#ef4444" transparent opacity={0.9} />
-      </mesh>
-      <Html position={[0, 0.62, 0]} center distanceFactor={16} style={{ pointerEvents: 'none' }}>
-        <span className="shuttle-conflict-label">潜在冲突 · 已避让 · {node.track_node_id}</span>
-      </Html>
-    </group>
-  )
-}
-
 function ShuttlePath({ state }: { state: ShuttleVisualizationState }) {
   const lookup = useMemo(() => new Map(state.tracks.map((node) => [node.track_node_id, node])), [state.tracks])
   if (!state.plan || state.plan.result_status !== 'success') return null
@@ -260,7 +242,6 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
     <group>
       <ShuttleTrackInstances state={state} />
       {state.multiPlan ? <ShuttleMultiPaths state={state} /> : <ShuttlePath state={state} />}
-      <ShuttleEventMarker state={state} />
       {state.lifts.map((lift) => (
         <LiftModel
           key={lift.lift_id}

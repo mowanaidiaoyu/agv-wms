@@ -461,11 +461,9 @@
 .shuttle-advanced-config { display: grid; gap: 5px; padding: 8px; border: 1px solid #273449; border-radius: 8px; color: #94a3b8; font-size: 11px; }
 .shuttle-advanced-config summary { cursor: pointer; color: #cbd5e1; }
 .shuttle-vehicle-status-list,
-.shuttle-event-panel,
 .shuttle-lift-status { display: grid; gap: 7px; }
 .shuttle-vehicle-status-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .shuttle-vehicle-status-list button,
-.shuttle-event-panel button,
 .shuttle-lift-status > div {
   display: grid;
   gap: 3px;
@@ -477,22 +475,8 @@
   text-align: left;
   font-size: 11px;
 }
-.shuttle-vehicle-status-list button.is-selected,
-.shuttle-event-panel button.is-selected { border-color: #22d3ee; background: rgba(8, 47, 73, 0.55); }
-.shuttle-event-panel h3 { margin: 4px 0; color: #e2e8f0; font-size: 14px; }
-.shuttle-event-panel button strong { color: #86efac; }
+.shuttle-vehicle-status-list button.is-selected { border-color: #22d3ee; background: rgba(8, 47, 73, 0.55); }
 .shuttle-lift-status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.shuttle-conflict-label {
-  display: block;
-  padding: 4px 7px;
-  border: 1px solid #ef4444;
-  border-radius: 999px;
-  color: #fecaca;
-  background: rgba(69, 10, 10, 0.9);
-  font-size: 10px;
-  font-weight: 800;
-  white-space: nowrap;
-}
 .shuttle-contract-card {
   display: grid;
   gap: 5px;

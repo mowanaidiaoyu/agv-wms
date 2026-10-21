@@ -8,7 +8,6 @@ import type {
   ShuttleMultiPlanResponse,
   ShuttleMultiPlaybackSample,
   ShuttleMultiVehicleResult,
-  ShuttlePlanningEvent,
   ShuttleTimedTrajectorySample,
   ShuttleTrackNode,
 } from './types'
@@ -224,20 +223,6 @@ export function sampleShuttleLiftStates(
       reservationStartSeconds: null, reservationEndSeconds: null,
     }
   })
-}
-
-export function eventDisplay(event: ShuttlePlanningEvent) {
-  const candidate = ['track_node_conflict_detected', 'edge_swap_conflict_detected', 'geometric_conflict_detected'].includes(event.event_type)
-  return {
-    candidate,
-    resultLabel: candidate && event.resolution_status === 'candidate_rejected'
-      ? '潜在冲突 · 已避让'
-      : event.resolution_status === 'resolved_by_wait'
-        ? '已通过等待解决'
-        : event.resolution_status === 'reserved'
-          ? '资源已预约'
-          : '已完成',
-  }
 }
 
 export const shuttleMultiMotionLabel: Record<ShuttleMultiPlaybackSample['phase'], string> = {

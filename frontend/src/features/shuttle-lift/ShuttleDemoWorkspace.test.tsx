@@ -23,7 +23,6 @@ vi.mock('../path-demo/PathDemo3DScene', () => ({
       data-multi-plan={shuttleVisualization?.multiPlan?.planning_id ?? ''}
       data-multi-samples={shuttleVisualization?.multiSamples?.length ?? 0}
       data-selected-shuttle={shuttleVisualization?.selectedShuttleId ?? ''}
-      data-selected-event={shuttleVisualization?.selectedEvent?.event_id ?? ''}
       data-camera-mode={cameraViewMode}
       data-camera-action={cameraActionRequest?.type ?? ''}
       data-camera-target={cameraActionRequest?.targetWorld?.join(',') ?? ''}
@@ -86,7 +85,7 @@ const multiPlan: ShuttleMultiPlanResponse = {
     ],
     wait_intervals: index ? [{ track_node_id: request.start_track_node_id, start_time_seconds: 0, end_time_seconds: 0.25, duration_seconds: 0.25, reason: 'track_reservation' as const }] : [], lift_usage: [], arrival_time_seconds: 2, wait_time_seconds: index ? 0.25 : 0, horizontal_distance_cells: 2, visited_states: 8, planning_status: 'planned' as const,
   })),
-  events: [{ event_id: 'event-1', simulation_time_seconds: 0.25, vehicle_ids: ['SHUTTLE-01', 'SHUTTLE-02'], event_type: 'track_node_conflict_detected', resource_id: null, track_node_id: tracks[1].track_node_id, details: {}, resolution_status: 'candidate_rejected' }],
+  events: [{ event_id: 'event-1', simulation_time_seconds: 0.25, vehicle_ids: ['SHUTTLE-01', 'SHUTTLE-02'], event_type: 'track_node_conflict_detected', resource_id: null, track_node_id: tracks[1].track_node_id, details: { winner_vehicle_id: 'SHUTTLE-01' }, resolution_status: 'candidate_rejected' }],
   metrics: { requested_vehicle_count: 2, planned_vehicle_count: 2, makespan_seconds: 2, total_wait_time_seconds: 0.25, average_wait_time_seconds: 0.125, detected_track_node_conflicts: 1, detected_edge_swap_conflicts: 0, detected_geometric_conflicts: 0, lift_resource_contentions: 0, lift_a_usage_count: 0, lift_b_usage_count: 0, lift_a_occupied_seconds: 0, lift_b_occupied_seconds: 0, alternate_lift_selections: 0, replans_used: 0, unresolved_conflict_count: 0, planning_time_ms: 2 },
   safety_validation: { node_conflicts: 0, edge_conflicts: 0, geometric_conflicts: 0, lift_resource_conflicts: 0, timing_violations: 0, safe: true }, unresolved_conflicts: [], failure_reason: null, failure: null, vehicle_initial_config: multiVehicleRequests, lift_initial_state: { 'shuttle-lift-a': 1, 'shuttle-lift-b': 1 }, time_contract: { time_step_seconds: 0.25 },
 }
@@ -310,17 +309,32 @@ describe('ShuttleDemoWorkspace', () => {
       topology_id: topology.id, topology_revision: '2.0.0:hash', vehicle_requests: multiVehicleRequests,
     })))
     expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-multi-plan', 'shuttle-multi-test')
-    expect(screen.getByText('潜在冲突 · 已避让')).toBeInTheDocument()
+    expect(screen.getByText('成功（零残留冲突）')).toBeInTheDocument()
+    expect(screen.getByText('2 / 2')).toBeInTheDocument()
   })
 
-  it('seeks and pauses the unified clock when an event is selected', async () => {
+  it('keeps the unified clock but omits event cards and raw diagnostic JSON', async () => {
     renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
     await screen.findByRole('option', { name: '场景 A：分层无冲突并行运行' })
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
-    const event = await screen.findByRole('button', { name: /轨道节点竞争/ })
-    fireEvent.click(event)
-    expect(screen.getByLabelText('统一仿真时间轴')).toHaveValue('0')
-    expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-selected-event', 'event-1')
+    const timeline = await screen.findByLabelText('统一仿真时间轴')
+    expect(timeline).toBeEnabled()
+    expect(timeline).toHaveAttribute('max', '2')
+    expect(screen.queryByText('规划与避让事件')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /轨道节点竞争/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/winner_vehicle_id/)).not.toBeInTheDocument()
+  })
+
+  it('keeps preset A/B/C plannable after removing the event log UI', async () => {
+    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    await screen.findByRole('option', { name: '场景 C：Lift-A 资源竞争' })
+    const selector = screen.getByLabelText('四向车预设场景')
+    for (const [callCount, scenarioValue] of ['parallel', 'track-conflict', 'lift-conflict'].entries()) {
+      fireEvent.change(selector, { target: { value: scenarioValue } })
+      fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
+      await waitFor(() => expect(api.planShuttleMulti).toHaveBeenCalledTimes(callCount + 1))
+    }
+    expect(screen.queryByText('规划与避让事件')).not.toBeInTheDocument()
   })
 
   it('keeps the selected Shuttle stable and supports config/sidebar collapsing', async () => {

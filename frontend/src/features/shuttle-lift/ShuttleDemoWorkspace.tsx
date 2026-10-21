@@ -8,10 +8,10 @@ import type { PathDemoMode } from '../path-demo/PathDemoModeSelect'
 import type { CameraActionRequest, CameraViewMode } from '../path-demo/cameraControls'
 import { usePathPlayback } from '../path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../path-demo/types'
-import { eventDisplay, sampleAllShuttleVehicles, sampleShuttleLiftStates, shuttleMultiCameraSample, shuttleMultiMotionLabel } from './shuttleMultiPlayback'
+import { sampleAllShuttleVehicles, sampleShuttleLiftStates, shuttleMultiCameraSample, shuttleMultiMotionLabel } from './shuttleMultiPlayback'
 import { sampleShuttlePlan, SHUTTLE_VEHICLE_CENTER_HEIGHT, shuttleCameraSample, shuttleMotionLabel } from './shuttlePlayback'
 import { useShuttleWorkspaceStore } from './shuttleWorkspaceStore'
-import type { ShuttleLevel, ShuttleMultiPlanResponse, ShuttleMultiVehicleRequest, ShuttlePlanResponse, ShuttlePlanningEvent, ShuttleTrackNode } from './types'
+import type { ShuttleLevel, ShuttleMultiPlanResponse, ShuttleMultiVehicleRequest, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
 const PathDemo3DScene = lazy(() => import('../path-demo/PathDemo3DScene').then((module) => ({ default: module.PathDemo3DScene })))
 type WorkspaceMode = 'planning' | 'inventory'
@@ -79,13 +79,6 @@ function multiFailureMessage(next: ShuttleMultiPlanResponse) {
   if (failure.failure_code === 'reservation_conflict_unresolved') return `${failure.vehicle_id ?? '车辆'}：时空预约冲突未能解决。${failure.failure_reason}`
   return failure.failure_reason
 }
-function eventTitle(event: ShuttlePlanningEvent) {
-  const labels: Record<ShuttlePlanningEvent['event_type'], string> = {
-    track_node_conflict_detected: '轨道节点竞争', edge_swap_conflict_detected: '相向边竞争', geometric_conflict_detected: '几何安全距离竞争', lift_requested: '申请提升机', lift_reservation_denied: '提升机预约被占用', lift_reserved: '提升机已预约', lift_reposition_started: '提升机空载调位开始', lift_reposition_completed: '提升机空载调位完成', vehicle_wait_started: '车辆开始等待', vehicle_wait_completed: '车辆结束等待', lift_entered: '车辆进入提升机', lift_transfer_started: '跨层运行开始', lift_transfer_completed: '跨层运行完成', lift_exited: '车辆驶出提升机',
-  }
-  return labels[event.event_type]
-}
-
 export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyChange, onWorkspaceModeChange, demoMode, onDemoModeChange }: {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
@@ -116,7 +109,6 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
   const [scenarioId, setScenarioId] = useState<ScenarioId>('parallel')
   const [customVehicles, setCustomVehicles] = useState<ShuttleDraft[]>([])
   const [selectedShuttleId, setSelectedShuttleId] = useState('SHUTTLE-01')
-  const [selectedEvent, setSelectedEvent] = useState<ShuttlePlanningEvent | null>(null)
   const [planning, setPlanning] = useState(false)
   const [error, setError] = useState('')
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
@@ -140,13 +132,13 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
 
   const invalidatePlan = () => {
     requestRef.current += 1
-    setSinglePlan(null); setMultiPlan(null); setSelectedEvent(null); setError(''); setCameraViewMode('free')
+    setSinglePlan(null); setMultiPlan(null); setError(''); setCameraViewMode('free')
   }
   useEffect(() => {
     const nextDraft = useShuttleWorkspaceStore.getState().drafts[topologyId]
     const validDraft = nextDraft?.topologyVersion === topologyVersion ? nextDraft : null
     requestRef.current += 1
-    setSinglePlan(null); setMultiPlan(null); setSelectedEvent(null); setError(''); setPlanning(false); setCameraViewMode('free'); setCameraActionRequest(null); setSelectedLiftId(null); setRackXray(false)
+    setSinglePlan(null); setMultiPlan(null); setError(''); setPlanning(false); setCameraViewMode('free'); setCameraActionRequest(null); setSelectedLiftId(null); setRackXray(false)
     setStartLevel(validDraft?.startLevel ?? 1); setEndLevel(validDraft?.endLevel ?? 4); setStartNodeId(validDraft?.startNodeId ?? ''); setEndNodeId(validDraft?.endNodeId ?? ''); setAlgorithm(validDraft?.algorithm ?? 'astar'); setCustomVehicles([]); setStateTopologyId(topologyId)
   }, [topologyId, topologyVersion])
   useEffect(() => {
@@ -164,7 +156,7 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
   }, [activeVehicleRequests, multiPlan])
   useEffect(() => {
     requestRef.current += 1
-    setSinglePlan(null); setMultiPlan(null); setSelectedEvent(null); setError(''); setPlanning(false)
+    setSinglePlan(null); setMultiPlan(null); setError(''); setPlanning(false)
   }, [demoMode])
 
   const startNodes = nodesAtLevel(tracks, startLevel)
@@ -185,12 +177,6 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
     if (!entrance) return
     setSelectedLiftId(liftId); setCameraViewMode('free'); requestCamera('focus-point', [entrance.world_x, entrance.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT, entrance.world_z])
   }
-  const locateEvent = (event: ShuttlePlanningEvent) => {
-    setSelectedEvent(event); playback.seek(Math.max(0, event.simulation_time_seconds - 0.25))
-    const node = event.track_node_id ? trackLookup.get(event.track_node_id) : null
-    if (node) requestCamera('focus-point', [node.world_x, node.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT, node.world_z])
-    else if (event.resource_id?.startsWith('shuttle-lift-')) focusLift(event.resource_id)
-  }
   const contractRevisions = [levelsQuery.data?.config_revision, liftsQuery.data?.config_revision, ...trackQueries.map((query) => query.data?.config_revision)].filter(Boolean)
   const coordinateRevisions = [levelsQuery.data?.coordinate_contract_revision, liftsQuery.data?.coordinate_contract_revision, ...trackQueries.map((query) => query.data?.coordinate_contract_revision)].filter(Boolean)
   const settled = Boolean(levelsQuery.data && liftsQuery.data) && trackQueries.every((query) => query.isSuccess)
@@ -206,7 +192,7 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
   }
   const requestPlan = async () => {
     const sequence = requestRef.current + 1
-    requestRef.current = sequence; setPlanning(true); setError(''); setSelectedEvent(null); setSinglePlan(null); setMultiPlan(null); playback.reset()
+    requestRef.current = sequence; setPlanning(true); setError(''); setSinglePlan(null); setMultiPlan(null); playback.reset()
     try {
       if (isSingle) {
         const next = await api.planShuttlePath({ topology_id: topologyId, start_track_node: selectedStartNodeId, start_level: startLevel, end_track_node: selectedEndNodeId, end_level: endLevel, algorithm })
@@ -264,13 +250,12 @@ export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyCha
         <PathPlaybackController state={playback.state} canPlay={duration > 0} onStart={playback.start} onPause={playback.pause} onResume={playback.resume} onReset={playback.reset} onRateChange={playback.setRate} />
         <label className="shuttle-timeline">统一仿真时间轴<input aria-label="统一仿真时间轴" type="range" min={0} max={Math.max(duration, 0.25)} step={0.25} value={playback.state.elapsedSeconds} disabled={!duration} onChange={(event) => playback.seek(Number(event.target.value))} /><span>{playback.state.elapsedSeconds.toFixed(2)} / {duration.toFixed(2)} s</span></label>
         <section className="path-demo-camera-controls" aria-label="四向车视角控制"><div className="path-demo-camera-heading"><strong>视角控制</strong><span className={`path-demo-view-badge is-${cameraViewMode}`}>当前视角：{cameraViewMode === 'follow' ? '跟随' : '自由'}</span></div>{!isSingle ? <label>选择跟随车辆<select aria-label="选择跟随四向车" value={selectedShuttleId} disabled={!multiSamples.length} onChange={(event) => { setSelectedShuttleId(event.target.value); requestCamera(cameraViewMode === 'follow' ? 'switch-follow-target' : 'locate') }}>{multiPlan?.vehicles.map((vehicle) => <option key={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}</select></label> : null}<div className="path-demo-camera-buttons"><button className="ghost-button" type="button" disabled={!cameraSample} onClick={() => { setCameraViewMode('free'); requestCamera('locate') }}>定位四向车</button><button className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'} type="button" disabled={!cameraSample} onClick={() => setCameraViewMode((mode) => mode === 'follow' ? 'free' : 'follow')}>跟随四向车</button><button className="ghost-button" type="button" onClick={() => setCameraViewMode('free')}>自由视角</button><button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCamera('overview') }}>仓库全景</button><button className="ghost-button" type="button" disabled={!lifts.some((lift) => lift.lift_id === 'shuttle-lift-a')} onClick={() => focusLift('shuttle-lift-a')}>查看 Lift-A</button><button className="ghost-button" type="button" disabled={!lifts.some((lift) => lift.lift_id === 'shuttle-lift-b')} onClick={() => focusLift('shuttle-lift-b')}>查看 Lift-B</button><button className={rackXray ? 'accent-button' : 'ghost-button'} type="button" aria-pressed={rackXray} onClick={() => setRackXray((enabled) => !enabled)}>透视货架：{rackXray ? '开' : '关'}</button></div></section>
-        {multiPlan ? <><dl className="path-demo-stats shuttle-stats"><div><dt>规划安全</dt><dd>{multiPlan.safety_validation.safe ? '安全（零残留冲突）' : '不安全'}</dd></div><div><dt>成功车辆</dt><dd>{multiPlan.metrics.planned_vehicle_count} / {multiPlan.metrics.requested_vehicle_count}</dd></div><div><dt>Makespan</dt><dd>{multiPlan.metrics.makespan_seconds.toFixed(2)} s</dd></div><div><dt>总等待</dt><dd>{multiPlan.metrics.total_wait_time_seconds.toFixed(2)} s</dd></div><div><dt>平均等待</dt><dd>{multiPlan.metrics.average_wait_time_seconds.toFixed(2)} s</dd></div><div><dt>节点候选竞争</dt><dd>{multiPlan.metrics.detected_track_node_conflicts}</dd></div><div><dt>边交换候选竞争</dt><dd>{multiPlan.metrics.detected_edge_swap_conflicts}</dd></div><div><dt>几何候选风险</dt><dd>{multiPlan.metrics.detected_geometric_conflicts}</dd></div><div><dt>提升机竞争</dt><dd>{multiPlan.metrics.lift_resource_contentions}</dd></div><div><dt>最终残留冲突</dt><dd>{multiPlan.metrics.unresolved_conflict_count}</dd></div><div><dt>Lift-A 使用</dt><dd>{multiPlan.metrics.lift_a_usage_count} 次 / {multiPlan.metrics.lift_a_occupied_seconds.toFixed(2)} s</dd></div><div><dt>Lift-B 使用</dt><dd>{multiPlan.metrics.lift_b_usage_count} 次 / {multiPlan.metrics.lift_b_occupied_seconds.toFixed(2)} s</dd></div><div><dt>改选提升机</dt><dd>{multiPlan.metrics.alternate_lift_selections}</dd></div><div><dt>规划耗时</dt><dd>{multiPlan.metrics.planning_time_ms.toFixed(2)} ms</dd></div></dl>
+        {multiPlan ? <><dl className="path-demo-stats shuttle-stats"><div><dt>规划结果</dt><dd>{multiPlan.safety_validation.safe ? '成功（零残留冲突）' : '失败（存在残留冲突）'}</dd></div><div><dt>成功车辆</dt><dd>{multiPlan.metrics.planned_vehicle_count} / {multiPlan.metrics.requested_vehicle_count}</dd></div><div><dt>Makespan</dt><dd>{multiPlan.metrics.makespan_seconds.toFixed(2)} s</dd></div><div><dt>总等待</dt><dd>{multiPlan.metrics.total_wait_time_seconds.toFixed(2)} s</dd></div><div><dt>平均等待</dt><dd>{multiPlan.metrics.average_wait_time_seconds.toFixed(2)} s</dd></div><div><dt>最终未解决冲突</dt><dd>{multiPlan.metrics.unresolved_conflict_count}</dd></div><div><dt>Lift-A 使用</dt><dd>{multiPlan.metrics.lift_a_usage_count} 次 / {multiPlan.metrics.lift_a_occupied_seconds.toFixed(2)} s</dd></div><div><dt>Lift-B 使用</dt><dd>{multiPlan.metrics.lift_b_usage_count} 次 / {multiPlan.metrics.lift_b_occupied_seconds.toFixed(2)} s</dd></div></dl>
           <div className="shuttle-vehicle-status-list" aria-label="四向车实时状态">{multiPlan.vehicles.map((vehicle) => { const current = multiSamples.find((sample) => sample.vehicleId === vehicle.vehicle_id); return <button type="button" key={vehicle.vehicle_id} className={selectedShuttleId === vehicle.vehicle_id ? 'is-selected' : ''} onClick={() => setSelectedShuttleId(vehicle.vehicle_id)}><strong>{vehicle.vehicle_id}</strong><span>{current ? `L${current.shuttleLevel} · ${current.trackNodeId || '轨道区间'}` : '尚未开始'}</span><span>{current ? shuttleMultiMotionLabel[current.phase] : '尚未开始'}{current?.liftId ? ` · ${current.liftId}` : ''}</span><span>等待 {current?.accumulatedWaitSeconds.toFixed(2) ?? '0.00'} / {vehicle.wait_time_seconds.toFixed(2)} s</span><span>到达 {vehicle.arrival_time_seconds.toFixed(2)} s</span></button> })}</div>
-          <section className="shuttle-lift-status" aria-label="双提升机实时状态">{liftStates.map((lift) => <div key={lift.liftId}><strong>{lift.liftId === 'shuttle-lift-a' ? 'Lift-A' : 'Lift-B'}</strong><span>L{lift.currentLevel}{lift.targetLevel ? ` → L${lift.targetLevel}` : ''} · {lift.direction === 'up' ? '上行' : lift.direction === 'down' ? '下行' : '停止'}</span><span>{lift.status === 'repositioning_empty' ? '空载调位' : lift.status === 'occupied' ? `载运 ${lift.occupantVehicleId}` : lift.status === 'reserved' ? '已预约' : lift.status === 'entering' ? '车辆进入中' : lift.status === 'exiting' ? '车辆驶出中' : '空闲'}</span><span>预约：{lift.reservationStartSeconds === null ? '—' : `${lift.reservationStartSeconds.toFixed(2)}–${lift.reservationEndSeconds?.toFixed(2)} s`}</span></div>)}</section>
-          <section className="shuttle-event-panel" aria-label="规划与避让事件"><h3>规划与避让事件</h3>{multiPlan.events.length ? multiPlan.events.map((event) => { const display = eventDisplay(event); return <button type="button" className={selectedEvent?.event_id === event.event_id ? 'is-selected' : ''} key={event.event_id} onClick={() => locateEvent(event)}><span>{event.simulation_time_seconds.toFixed(2)} s · {eventTitle(event)}</span><span>{event.vehicle_ids.join(' / ') || '提升机资源'} · {event.track_node_id ?? event.resource_id ?? '—'}</span><strong>{display.resultLabel}</strong>{Object.keys(event.details).length ? <small>{JSON.stringify(event.details)}</small> : null}</button> }) : <p className="path-demo-note">本计划没有检测到竞争或等待事件。</p>}</section></> : <dl className="path-demo-stats shuttle-stats"><div><dt>当前轨道层</dt><dd>{singleSample ? `L${singleSample.shuttleLevel}` : `L${startLevel}`}</dd></div><div><dt>运行状态</dt><dd>{singleSample ? shuttleMotionLabel[singleSample.phase] : '待规划'}</dd></div><div><dt>使用提升机</dt><dd>{singlePlan?.chosen_lift ?? '—'}</dd></div><div><dt>水平距离</dt><dd>{singlePlan ? `${singlePlan.horizontal_distance_cells.toFixed(0)} 格` : '—'}</dd></div><div><dt>仿真时长</dt><dd>{singlePlan ? `${singlePlan.estimated_duration_seconds.toFixed(2)} s` : '—'}</dd></div></dl>}
+          <section className="shuttle-lift-status" aria-label="双提升机实时状态">{liftStates.map((lift) => <div key={lift.liftId}><strong>{lift.liftId === 'shuttle-lift-a' ? 'Lift-A' : 'Lift-B'}</strong><span>L{lift.currentLevel}{lift.targetLevel ? ` → L${lift.targetLevel}` : ''} · {lift.direction === 'up' ? '上行' : lift.direction === 'down' ? '下行' : '停止'}</span><span>{lift.status === 'repositioning_empty' ? '空载调位' : lift.status === 'occupied' ? `载运 ${lift.occupantVehicleId}` : lift.status === 'reserved' ? '已预约' : lift.status === 'entering' ? '车辆进入中' : lift.status === 'exiting' ? '车辆驶出中' : '空闲'}</span><span>预约：{lift.reservationStartSeconds === null ? '—' : `${lift.reservationStartSeconds.toFixed(2)}–${lift.reservationEndSeconds?.toFixed(2)} s`}</span></div>)}</section></> : <dl className="path-demo-stats shuttle-stats"><div><dt>当前轨道层</dt><dd>{singleSample ? `L${singleSample.shuttleLevel}` : `L${startLevel}`}</dd></div><div><dt>运行状态</dt><dd>{singleSample ? shuttleMotionLabel[singleSample.phase] : '待规划'}</dd></div><div><dt>使用提升机</dt><dd>{singlePlan?.chosen_lift ?? '—'}</dd></div><div><dt>水平距离</dt><dd>{singlePlan ? `${singlePlan.horizontal_distance_cells.toFixed(0)} 格` : '—'}</dd></div><div><dt>仿真时长</dt><dd>{singlePlan ? `${singlePlan.estimated_duration_seconds.toFixed(2)} s` : '—'}</dd></div></dl>}
         <details className="shuttle-contract-card"><summary><strong>四层真实轨道 · Lift-A / Lift-B</strong><span className={planningEnabled ? 'is-verified' : 'is-blocked'}> · 空间位置待人工复核</span></summary><span>轨道来源：slotAisles</span><span>配置版本：{levelsQuery.data?.config_revision ?? '读取中'}</span><span>坐标契约：{levelsQuery.data?.coordinate_contract_revision ?? '读取中'}</span><span>程序验证：{levelsQuery.data?.verification_status ?? '正在校验'}</span><span>运行时间来源：synthetic_demo</span><p>L1～L4 是 Shuttle 内部轨道层；单车路径、多车预约计划与已执行轨迹是不同对象。本工作台仅播放离线规划结果，不控制真实设备。</p></details>
       </>}
     </aside>
-    <div className="path-demo-viewport" aria-label="四向车四层轨道与双提升机 3D 演示"><Suspense fallback={<div className="path-demo-empty">正在加载四向车 3D 场景…</div>}><PathDemo3DScene topology={topologyRecord.payload} activeFloor="1F" trajectory={[]} sample={null} playbackStatus={playback.state.status} cameraViewMode={cameraViewMode} cameraActionRequest={cameraActionRequest} followedVehicleSample={cameraSample} shuttleVisualization={{ tracks, lifts, plan: singlePlan, sample: singleSample, multiPlan, multiSamples, liftStates, selectedShuttleId, selectedEvent, selectedLiftId }} shuttleRackXray={rackXray} /></Suspense></div>
+    <div className="path-demo-viewport" aria-label="四向车四层轨道与双提升机 3D 演示"><Suspense fallback={<div className="path-demo-empty">正在加载四向车 3D 场景…</div>}><PathDemo3DScene topology={topologyRecord.payload} activeFloor="1F" trajectory={[]} sample={null} playbackStatus={playback.state.status} cameraViewMode={cameraViewMode} cameraActionRequest={cameraActionRequest} followedVehicleSample={cameraSample} shuttleVisualization={{ tracks, lifts, plan: singlePlan, sample: singleSample, multiPlan, multiSamples, liftStates, selectedShuttleId, selectedLiftId }} shuttleRackXray={rackXray} /></Suspense></div>
   </div>
 }

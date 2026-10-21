@@ -408,6 +408,5 @@ export interface ShuttleVisualizationState {
   multiSamples?: ShuttleMultiPlaybackSample[]
   liftStates?: ShuttleLiftPlaybackState[]
   selectedShuttleId?: string | null
-  selectedEvent?: ShuttlePlanningEvent | null
   selectedLiftId: string | null
 }
