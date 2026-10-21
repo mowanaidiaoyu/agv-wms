@@ -29,7 +29,7 @@ import {
   type SceneTower,
 } from '../../lib/topology3d'
 import type { CellBox } from '../../lib/topology'
-import type { EditorObjectType, GoodsSlot, TopologyPayload } from '../../types'
+import type { EditorObjectType, GoodsSlot, TopologyPayload, ZoneType } from '../../types'
 import type { TopologySelection } from '../../store/useTopologyEditorStore'
 
 export type Topology3DSceneProps = {
@@ -37,6 +37,7 @@ export type Topology3DSceneProps = {
   goods?: GoodsSlot[]
   activeFloor: string
   activeTool: EditorObjectType
+  activeZoneType: ZoneType | null
   marquee: CellBox | null
   selection: TopologySelection
   onCellDown: (row: number, col: number) => void
@@ -104,6 +105,7 @@ function SceneContent({
   goodsBoxes,
   activeFloor,
   activeTool,
+  activeZoneType,
   marquee,
   selection,
   onCellDown,
@@ -115,6 +117,7 @@ function SceneContent({
   goodsBoxes: SceneBox[]
   activeFloor: string
   activeTool: EditorObjectType
+  activeZoneType: ZoneType | null
   marquee: CellBox | null
   selection: TopologySelection
   onCellDown: (row: number, col: number) => void
@@ -272,20 +275,38 @@ function SceneContent({
         </mesh>
       ) : null}
 
-      {/* 框选 / 拖区域预览：半透明填充 + 矩形描边（浮在场景上方，正在框选时清晰可见） */}
+      {/* 框选 / 拖区域预览：
+          - 批量框选：浮在场景上方，便于看清框住了哪些对象；
+          - 拖拽安置区域：贴在当前楼层格面上（关闭深度测试，被货架挡住也能看见），
+            以便按格子判断区域实际落在哪。 */}
       {marqueeCenter && marqueeFramePoints ? (
-        <group position={[marqueeCenter.x, spec.maxY + 0.9, marqueeCenter.z]}>
-          <mesh>
-            <boxGeometry args={[marqueeCenter.w, 0.06, marqueeCenter.d]} />
-            <meshBasicMaterial color="#22d3ee" transparent opacity={0.25} depthWrite={false} />
-          </mesh>
-          <lineSegments>
-            <bufferGeometry>
-              <bufferAttribute attach="attributes-position" args={[marqueeFramePoints, 3]} />
-            </bufferGeometry>
-            <lineBasicMaterial color="#67e8f9" />
-          </lineSegments>
-        </group>
+        activeZoneType ? (
+          <group position={[marqueeCenter.x, activeFloorY + 0.06, marqueeCenter.z]}>
+            <mesh renderOrder={10}>
+              <boxGeometry args={[marqueeCenter.w, 0.04, marqueeCenter.d]} />
+              <meshBasicMaterial color="#22d3ee" transparent opacity={0.3} depthWrite={false} depthTest={false} />
+            </mesh>
+            <lineSegments renderOrder={11}>
+              <bufferGeometry>
+                <bufferAttribute attach="attributes-position" args={[marqueeFramePoints, 3]} />
+              </bufferGeometry>
+              <lineBasicMaterial color="#67e8f9" depthTest={false} transparent opacity={0.95} />
+            </lineSegments>
+          </group>
+        ) : (
+          <group position={[marqueeCenter.x, spec.maxY + 0.9, marqueeCenter.z]}>
+            <mesh>
+              <boxGeometry args={[marqueeCenter.w, 0.06, marqueeCenter.d]} />
+              <meshBasicMaterial color="#22d3ee" transparent opacity={0.25} depthWrite={false} />
+            </mesh>
+            <lineSegments>
+              <bufferGeometry>
+                <bufferAttribute attach="attributes-position" args={[marqueeFramePoints, 3]} />
+              </bufferGeometry>
+              <lineBasicMaterial color="#67e8f9" />
+            </lineSegments>
+          </group>
+        )
       ) : null}
     </group>
   )
@@ -296,6 +317,7 @@ export default function Topology3DScene({
   goods,
   activeFloor,
   activeTool,
+  activeZoneType,
   marquee,
   selection,
   onCellDown,
@@ -321,6 +343,7 @@ export default function Topology3DScene({
         goodsBoxes={goodsBoxes}
         activeFloor={activeFloor}
         activeTool={activeTool}
+        activeZoneType={activeZoneType}
         marquee={marquee}
         selection={selection}
         onCellDown={onCellDown}

@@ -163,6 +163,7 @@ export function TopologyPage() {
   const selection = useTopologyEditorStore((state) => state.selection)
   const activeFloor = useTopologyEditorStore((state) => state.activeFloor)
   const activeTool = useTopologyEditorStore((state) => state.activeTool)
+  const activeZoneType = useTopologyEditorStore((state) => state.activeZoneType)
   const marquee = useTopologyEditorStore((state) => state.marquee)
   const loading = useTopologyEditorStore((state) => state.loading)
   const pointerDownAt = useTopologyEditorStore((state) => state.pointerDownAt)
@@ -260,6 +261,7 @@ export function TopologyPage() {
                     goods={goods}
                     activeFloor={activeFloor}
                     activeTool={activeTool}
+                    activeZoneType={activeZoneType}
                     marquee={marquee}
                     selection={selection}
                     onCellDown={pointerDownAt}

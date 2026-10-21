@@ -11,6 +11,7 @@ import {
   moveConveyorRun,
   paintCell,
   placeNode,
+  removeZone,
   setShuttleSlotLift,
   setShuttleSlotRemoved,
   shuttleSlotLift,
@@ -43,6 +44,44 @@ describe('slotNumberFor', () => {
     expect(slotNumberFor(robot.topology, robot.topology.nodes[0])).toBeNull()
     const storage = placeNode(base(), 'storage', 2, 2)!
     expect(slotNumberFor(storage.topology, storage.topology.nodes[0])).toBeNull()
+  })
+})
+
+describe('removeZone', () => {
+  it('删除 CTU 区域时一并移除该区域自动生成的库位节点', () => {
+    let t = createZone(base(), 'ctu', { row0: 0, col0: 0, row1: 1, col1: 1 })
+    const zoneId = t.zones[0].id
+    expect(t.nodes.filter((node) => node.type === 'storage' && node.zoneId === zoneId)).toHaveLength(4)
+
+    t = removeZone(t, zoneId)
+    expect(t.zones).toHaveLength(0)
+    expect(t.nodes.filter((node) => node.type === 'storage')).toHaveLength(0)
+  })
+
+  it('删除区域时按位置清掉旧数据里没有 zoneId 的库位', () => {
+    let t = createZone(base(), 'ctu', { row0: 0, col0: 0, row1: 1, col1: 1 })
+    const zoneId = t.zones[0].id
+    // 模拟旧数据：库位节点没有 zoneId，但位置在货架区域内
+    t = { ...t, nodes: t.nodes.map((node) => ({ ...node, zoneId: null })) }
+
+    t = removeZone(t, zoneId)
+    expect(t.zones).toHaveLength(0)
+    expect(t.nodes.filter((node) => node.type === 'storage')).toHaveLength(0)
+  })
+
+  it('删除区域保留其它类型节点，只清空其 zoneId', () => {
+    let t = createZone(base(), 'ctu', { row0: 0, col0: 0, row1: 1, col1: 1 })
+    const zoneId = t.zones[0].id
+    const placed = placeNode(t, 'ctu_robot', 0, 0)!
+    t = {
+      ...placed.topology,
+      nodes: placed.topology.nodes.map((node) => (node.type === 'ctu_robot' ? { ...node, zoneId } : node)),
+    }
+
+    t = removeZone(t, zoneId)
+    const robot = t.nodes.find((node) => node.type === 'ctu_robot')
+    expect(robot).toBeTruthy()
+    expect(robot?.zoneId).toBeNull()
   })
 })
 

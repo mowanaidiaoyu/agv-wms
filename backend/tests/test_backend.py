@@ -91,6 +91,36 @@ def test_shortest_path_ctu_avoids_storage_cells():
     assert "cell-r0-c1" not in ids[1:-1]
 
 
+def test_ctu_storage_entry_only_from_rack_long_side():
+    # 竖向 1×3 的 CTU 货架：长边在左右，只能从左右进入，不能从上下端头（短边）进入。
+    topology = {
+        **TOPOLOGY,
+        "grid": {"rows": 5, "cols": 5, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [{"id": "zone-rack", "label": "Rack", "type": "ctu", "x": 2, "y": 0, "width": 1, "height": 3}],
+        "cells": [],
+        "nodes": [
+            {"id": "storage-a", "type": "storage", "floor": "1F", "row": 0, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "A"},
+            {"id": "storage-b", "type": "storage", "floor": "1F", "row": 1, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "B"},
+            {"id": "storage-c", "type": "storage", "floor": "1F", "row": 2, "col": 2, "zoneId": "zone-rack", "capacity": 17, "label": "C"},
+        ],
+    }
+    # 从正下方（短边）出发取底层库位：必须绕到左右长边后再进入
+    path = shortest_path(topology, "cell-r3-c2", "cell-r2-c2", "astar", avoid_storage=True)
+    ids = [cell["id"] for cell in path]
+    assert ids[-1] == "cell-r2-c2"
+    assert ids[-2] in {"cell-r2-c1", "cell-r2-c3"}
+
+    # 左右长边都被挡住时，禁止改从短边进入 => 无路可走
+    blocked_sides = {
+        **topology,
+        "cells": [
+            {"id": "cell-r2-c1", "row": 2, "col": 1, "type": "blocked", "walkable": False, "cost": 1.0},
+            {"id": "cell-r2-c3", "row": 2, "col": 3, "type": "blocked", "walkable": False, "cost": 1.0},
+        ],
+    }
+    assert shortest_path(blocked_sides, "cell-r3-c2", "cell-r2-c2", "astar", avoid_storage=True) == []
+
+
 def test_shortest_path_extra_blocked_reroutes_ctu_around_occupied_cell():
     # 回归：CTU 头对头死锁时的绕行。extra_blocked 把其它设备当前占用的格临时视为障碍，
     # 从 r0c0 到 r0c2 的直线被 r0c1 挡住时，应绕行下方一行而不是穿行被占格。
@@ -182,7 +212,7 @@ def test_shortest_path_shuttle_uses_aisle_and_lift():
 def test_assignment():
     robots = [{"id": "r1", "type": "ctu", "status": "idle", "currentCellId": "cell-r1-c1", "battery": 100}]
     tasks = [{"id": "t1", "robotType": "ctu", "status": "pending", "sourceCellId": "cell-r1-c1", "sourceLayer": 1}]
-    assert assign_tasks(robots, tasks, TOPOLOGY) == [("r1", "t1")]
+    assert assign_tasks("greedy", robots, tasks, TOPOLOGY, "astar") == [("r1", "t1")]
 
 
 def test_topology_roundtrip():
@@ -253,6 +283,99 @@ def test_seed_tasks_multiline_orders():
         assert all(1 <= line["layer"] <= CTU_RACK_LAYERS for line in lines)
         assert task["picked"] == 0
         assert task["currentLineIndex"] == 0
+
+
+def test_seed_tasks_never_share_one_storage_slot():
+    # 同一库位槽（nodeId + layer）只能派一单，否则两台车会抢同一格形成对头死锁。
+    service = _service()
+    tasks = service._seed_tasks(TOPOLOGY, CONFIG)
+    keys = [(line["nodeId"], line["layer"]) for task in tasks for line in task["lines"]]
+    assert keys
+    assert len(keys) == len(set(keys))
+
+
+TWO_ROBOT_TOPOLOGY = {
+    "id": "two-robot-topology",
+    "name": "Two Robot Topology",
+    "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+    "grid": {"rows": 3, "cols": 3, "cellSize": 32, "originX": 0, "originY": 0},
+    "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 3}],
+    "cells": [],
+    "nodes": [
+        {"id": "r1", "type": "ctu_robot", "row": 1, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01"},
+        {"id": "r2", "type": "ctu_robot", "row": 1, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-02"},
+    ],
+}
+
+TWO_ROBOT_CONFIG = {
+    "id": "two-robot-config",
+    "topologyId": "two-robot-topology",
+    "robots": [
+        {"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True},
+        {"id": "r2", "type": "ctu", "startNode": "r2", "speed": 1.0, "battery": 100, "enabled": True},
+    ],
+    "orderGenerator": {"ratePerMinute": 1, "maxOrders": 0, "linesPerOrderMin": 1, "linesPerOrderMax": 1},
+    "dispatchPolicy": "greedy",
+    "pathPolicy": "astar",
+    "conveyorPolicy": {"releaseThreshold": 0.8, "fifo": True},
+    "faultInjection": {"robotFailureTick": None, "robotFailureId": None, "conveyorJammedTick": None, "conveyorCellId": None},
+    "seed": 1,
+    "durationTicks": 10,
+}
+
+
+def test_failed_robot_cell_is_treated_as_obstacle():
+    # 故障设备停在原地后，占的格不能出现在其它设备的路径里。
+    service = _service()
+    runtime = service._create_runtime("test-failed", TWO_ROBOT_TOPOLOGY, TWO_ROBOT_CONFIG)
+    r1, r2 = runtime.state["robots"]
+    r2["failed"] = True
+    r2["status"] = "failed"
+    r2["currentCellId"] = "cell-r1-c1"
+    r1["currentCellId"] = "cell-r1-c0"
+
+    assert service._robot_path_to(runtime, r1, "cell-r1-c2", 1)
+    assert "cell-r1-c1" not in r1["path"]
+    assert r1["path"][-1] == "cell-r1-c2"
+
+
+def test_head_on_deadlock_lets_one_robot_yield():
+    # 两台车互相把对方当前格当作下一格时，其中一台应后退一格并重新规划。
+    service = _service()
+    runtime = service._create_runtime("test-head-on", TWO_ROBOT_TOPOLOGY, TWO_ROBOT_CONFIG)
+    r1, r2 = runtime.state["robots"]
+    r1.update(
+        currentCellId="cell-r1-c1",
+        lastCellId="cell-r1-c0",
+        targetCellId="cell-r1-c2",
+        path=["cell-r1-c1", "cell-r1-c2"],
+        status="blocked",
+    )
+    r2.update(
+        currentCellId="cell-r1-c2",
+        lastCellId="cell-r1-c2",
+        targetCellId="cell-r1-c0",
+        path=["cell-r1-c2", "cell-r1-c1"],
+        status="blocked",
+    )
+    occupied = {"cell-r1-c1", "cell-r1-c2"}
+
+    assert service._clear_head_on(runtime, r1, r2, occupied) is True
+    assert r1["currentCellId"] == "cell-r1-c0"
+    assert r1["lastCellId"] == "cell-r1-c1"
+    assert r1["path"][0] == "cell-r1-c0"
+    assert r1["path"][-1] == "cell-r1-c2"
+
+
+def test_step_off_port_moves_finished_robot_off_entry():
+    service = _service()
+    runtime = service._create_runtime("test-step-off", TOPOLOGY, CONFIG)
+    robot = runtime.state["robots"][0]
+    robot["currentCellId"] = "cell-r5-c6"
+    robot["lastCellId"] = "cell-r4-c6"
+    robot["path"] = ["cell-r5-c6"]
+    service._step_off_port(runtime, robot, None)
+    assert robot["currentCellId"] == "cell-r4-c6"
 
 
 def test_robot_carry_capacity():

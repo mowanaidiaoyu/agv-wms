@@ -44,6 +44,8 @@ export function TopologyEditorToolbar() {
       setSaved(saved.payload, saved.id)
       setSelectedTopologyId(saved.id)
       await queryClient.invalidateQueries({ queryKey: ['topologies'] })
+      // 库内商品由后端按拓扑派生：保存后要重新拉取，否则增删货架后货物仍按旧库存显示。
+      await queryClient.invalidateQueries({ queryKey: ['goods', 'inventory'] })
       if (enterSimulationRef.current) {
         enterSimulationRef.current = false
         setSavingForSimulation(false)
