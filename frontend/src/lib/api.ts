@@ -251,7 +251,7 @@ export const api = {
   getShuttleLevels(topologyId: string) {
     return request<ShuttleTopologyLevelsResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/levels`)
   },
-  getShuttleTracks(topologyId: string, level?: 1 | 2 | 3) {
+  getShuttleTracks(topologyId: string, level?: 1 | 2 | 3 | 4) {
     const query = level ? `?level=${level}` : ''
     return request<ShuttleTracksResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/tracks${query}`)
   },

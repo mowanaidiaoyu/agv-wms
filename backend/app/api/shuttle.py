@@ -52,7 +52,7 @@ def get_shuttle_levels(topology_id: str):
 
 
 @router.get("/topologies/{topology_id}/tracks", response_model=ShuttleTracksResponse)
-def get_shuttle_tracks(topology_id: str, level: int | None = Query(default=None, ge=1, le=3)):
+def get_shuttle_tracks(topology_id: str, level: int | None = Query(default=None, ge=1, le=4)):
     _, graph, validation = _context(topology_id)
     nodes = [
         node for node in graph.values() if level is None or int(node["shuttle_level"]) == level

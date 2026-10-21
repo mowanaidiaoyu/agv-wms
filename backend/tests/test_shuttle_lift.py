@@ -28,7 +28,8 @@ from app.services.shuttle_topology import (
 
 ROOT = Path(__file__).resolve().parents[2]
 TOPOLOGY_PATH = ROOT / "docs" / "topologies" / "666.json"
-CONFIG_PATH = ROOT / "data" / "shuttle_configs" / "topology-6ceb4920.shuttle-v1.json"
+CONFIG_PATH = ROOT / "data" / "shuttle_configs" / "topology-6ceb4920.shuttle-v2.json"
+LEGACY_CONFIG_PATH = ROOT / "data" / "shuttle_configs" / "topology-6ceb4920.shuttle-v1.json"
 
 
 @pytest.fixture(scope="module")
@@ -47,21 +48,31 @@ def validation(topology: dict, graph: dict) -> dict:
     return validate_shuttle_configuration(topology, config, graph)
 
 
-def test_real_666_three_level_track_counts_and_unique_ids(graph: dict):
+def test_real_666_four_level_track_counts_and_unique_ids(graph: dict):
     assert level_summaries(graph) == [
         {"shuttle_level": 1, "node_count": 350, "component_count": 1, "component_sizes": [350]},
         {"shuttle_level": 2, "node_count": 348, "component_count": 1, "component_sizes": [348]},
         {"shuttle_level": 3, "node_count": 348, "component_count": 1, "component_sizes": [348]},
+        {"shuttle_level": 4, "node_count": 348, "component_count": 1, "component_sizes": [348]},
     ]
-    assert len(graph) == len(set(graph)) == 1046
+    assert len(graph) == len(set(graph)) == 1394
     assert graph["L1-r100-c19"]["world_y"] != graph["L2-r100-c19"]["world_y"]
+    assert graph["L4-r100-c19"]["world_y"] == pytest.approx(5.55)
 
 
-@pytest.mark.parametrize("level", [1, 2, 3])
+@pytest.mark.parametrize("level", [1, 2, 3, 4])
 def test_each_real_track_level_is_connected(graph: dict, level: int):
     components = connected_components(graph, level)
     assert len(components) == 1
     assert all(graph[node_id]["shuttle_level"] == level for node_id in components[0])
+
+
+def test_slot_aisle_bit3_maps_only_to_real_l4_nodes(topology: dict, graph: dict):
+    zone = next(item for item in topology["zones"] if item["id"] == "zone-shuttle")
+    assert zone["slotAisles"]["96,51"] & 0b1000
+    assert "L4-r96-c51" in graph
+    assert zone["slotAisles"]["96,43"] == 0b0001
+    assert "L4-r96-c43" not in graph
 
 
 def test_tracks_come_only_from_shuttle_slot_aisles(topology: dict, graph: dict):
@@ -83,14 +94,15 @@ def test_two_lifts_are_fixed_distinct_and_program_verified(validation: dict, gra
         assert lift["capacity"] == 1
         assert lift["timing_source"] == "synthetic_demo"
         assert lift["verification_status"] == "program_verified_pending_human"
-        for level in (1, 2, 3):
+        assert lift["supported_levels"] == [1, 2, 3, 4]
+        for level in (1, 2, 3, 4):
             node_id = track_node_id(level, lift["row"], lift["col"])
             assert lift["level_entrances"][f"L{level}"] == node_id
             assert lift["level_exits"][f"L{level}"] == node_id
             assert len(graph[node_id]["neighbors"]) >= 2
 
 
-def test_candidate_scan_uses_only_three_level_real_aisles(topology: dict, graph: dict):
+def test_candidate_scan_uses_only_four_level_real_aisles(topology: dict, graph: dict):
     candidates = scan_lift_candidates(topology, graph)
     keys = {(item["row"], item["col"], item["zone_id"]) for item in candidates}
     assert (100, 19, "zone-shuttle-3") in keys
@@ -108,7 +120,7 @@ def test_invalid_overlapping_lifts_are_rejected(topology: dict, graph: dict):
     assert any("overlaps" in warning for warning in result["warnings"])
 
 
-def test_lift_inside_rack_or_without_three_level_aisle_is_rejected(topology: dict, graph: dict):
+def test_lift_inside_rack_or_without_four_level_aisle_is_rejected(topology: dict, graph: dict):
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     config["lifts"][0].update({"zone_id": "zone-shuttle-3", "row": 100, "col": 3})
     result = validate_shuttle_configuration(topology, config, deepcopy(graph))
@@ -123,32 +135,50 @@ def test_non_lift_positions_never_receive_vertical_edges(graph: dict, validation
     assert {meta["lift"]["lift_id"] for meta in lift_edges} == {"shuttle-lift-a"}
 
 
-@pytest.mark.parametrize(
-    ("start", "end"),
-    [
-        ("L1-r100-c7", "L2-r100-c51"),
-        ("L2-r100-c7", "L3-r100-c51"),
-        ("L1-r100-c7", "L3-r100-c51"),
-        ("L3-r188-c7", "L2-r188-c51"),
-        ("L2-r188-c7", "L1-r188-c51"),
-        ("L3-r188-c7", "L1-r188-c51"),
-    ],
-)
-def test_all_six_cross_level_directions_are_plannable(graph: dict, validation: dict, start: str, end: str):
-    result = plan_shuttle_path(graph, validation["lifts"], start, end, "astar")
+@pytest.mark.parametrize("level", [1, 2, 3, 4])
+def test_same_level_routes_never_use_a_lift(graph: dict, validation: dict, level: int):
+    result = plan_shuttle_path(
+        graph,
+        validation["lifts"],
+        f"L{level}-r100-c7",
+        f"L{level}-r100-c51",
+        "astar",
+    )
     assert result["result_status"] == "success"
-    assert result["chosen_lift"] in {"shuttle-lift-a", "shuttle-lift-b"}
-    assert len(result["lift_transitions"]) == 1
-    assert result["lift_transitions"][0]["events"] == [
-        "enter_lift",
-        "lift_started",
-        "arrive_level",
-        "exit_lift",
-    ]
+    assert result["lift_transitions"] == []
+    assert result["chosen_lift"] is None
+
+
+@pytest.mark.parametrize(
+    ("source_level", "target_level"),
+    [(source, target) for source in (1, 2, 3, 4) for target in (1, 2, 3, 4) if source != target],
+)
+def test_all_twelve_cross_level_directions_are_plannable(
+    graph: dict,
+    validation: dict,
+    source_level: int,
+    target_level: int,
+):
+    start = f"L{source_level}-r100-c7"
+    end = f"L{target_level}-r100-c51"
+    astar = plan_shuttle_path(graph, validation["lifts"], start, end, "astar")
+    dijkstra = plan_shuttle_path(graph, validation["lifts"], start, end, "dijkstra")
+    for result in (astar, dijkstra):
+        assert result["result_status"] == "success"
+        assert result["chosen_lift"] in {"shuttle-lift-a", "shuttle-lift-b"}
+        assert len(result["lift_transitions"]) == 1
+        assert result["lift_transitions"][0]["events"] == [
+            "enter_lift",
+            "lift_started",
+            "arrive_level",
+            "exit_lift",
+        ]
+    assert astar["estimated_duration_seconds"] == pytest.approx(dijkstra["estimated_duration_seconds"])
+    assert astar["horizontal_distance_cells"] == pytest.approx(dijkstra["horizontal_distance_cells"])
 
 
 def test_astar_and_dijkstra_return_same_optimal_cost(graph: dict, validation: dict):
-    args = (graph, validation["lifts"], "L1-r100-c7", "L3-r100-c51")
+    args = (graph, validation["lifts"], "L1-r100-c7", "L4-r100-c51")
     astar = plan_shuttle_path(*args, "astar")
     dijkstra = plan_shuttle_path(*args, "dijkstra")
     assert astar["estimated_duration_seconds"] == pytest.approx(dijkstra["estimated_duration_seconds"])
@@ -157,10 +187,10 @@ def test_astar_and_dijkstra_return_same_optimal_cost(graph: dict, validation: di
 
 
 def test_lift_cost_uses_seconds_and_timeline_is_monotonic(graph: dict, validation: dict):
-    result = plan_shuttle_path(graph, validation["lifts"], "L1-r100-c7", "L3-r100-c51", "astar")
+    result = plan_shuttle_path(graph, validation["lifts"], "L1-r100-c7", "L4-r100-c51", "astar")
     transition = result["lift_transitions"][0]
     assert transition["lift_start_seconds"] - transition["enter_at_seconds"] == pytest.approx(1.0)
-    assert transition["arrive_level_seconds"] - transition["lift_start_seconds"] == pytest.approx(6.0)
+    assert transition["arrive_level_seconds"] - transition["lift_start_seconds"] == pytest.approx(9.0)
     assert transition["exit_at_seconds"] - transition["arrive_level_seconds"] == pytest.approx(1.0)
     arrivals = [node["arrival_seconds"] for node in result["path_nodes"]]
     assert arrivals == sorted(arrivals)
@@ -219,13 +249,28 @@ def test_versioned_configuration_reloads_without_mutating_666(tmp_path: Path, to
     before = hashlib.sha256(TOPOLOGY_PATH.read_bytes()).hexdigest()
     root = tmp_path / "shuttle_configs"
     root.mkdir()
-    target = root / "topology-6ceb4920.shuttle-v1.json"
+    target = root / "topology-6ceb4920.shuttle-v2.json"
     target.write_bytes(CONFIG_PATH.read_bytes())
     first = ShuttleConfigStore(root).load(topology["id"])
     second = ShuttleConfigStore(root).load(topology["id"])
     assert first == second
     assert first["source_topology_revision"] == topology_revision(topology)
     assert hashlib.sha256(TOPOLOGY_PATH.read_bytes()).hexdigest() == before
+
+
+def test_legacy_three_level_configuration_is_loaded_and_safely_derived_to_four_levels(
+    tmp_path: Path,
+    topology: dict,
+    graph: dict,
+):
+    root = tmp_path / "shuttle_configs"
+    root.mkdir()
+    (root / "topology-6ceb4920.shuttle-v1.json").write_bytes(LEGACY_CONFIG_PATH.read_bytes())
+    legacy = ShuttleConfigStore(root).load(topology["id"])
+    result = validate_shuttle_configuration(topology, legacy, deepcopy(graph))
+    assert result["planning_enabled"] is True
+    assert all(lift["supported_levels"] == [1, 2, 3, 4] for lift in result["lifts"])
+    assert all("L4" in lift["level_entrances"] for lift in result["lifts"])
 
 
 def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.MonkeyPatch, topology: dict):
@@ -239,11 +284,11 @@ def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.
     client = TestClient(app)
     levels = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/levels")
     assert levels.status_code == 200
-    assert [item["node_count"] for item in levels.json()["levels"]] == [350, 348, 348]
+    assert [item["node_count"] for item in levels.json()["levels"]] == [350, 348, 348, 348]
     lifts = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/lifts")
     assert lifts.status_code == 200
     assert [item["lift_id"] for item in lifts.json()["lifts"]] == ["shuttle-lift-a", "shuttle-lift-b"]
-    tracks = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/tracks?level=2")
+    tracks = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/tracks?level=4")
     assert tracks.status_code == 200
     assert len(tracks.json()["nodes"]) == 348
     planned = client.post(
@@ -252,8 +297,8 @@ def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.
             "topology_id": topology["id"],
             "start_track_node": "L1-r100-c7",
             "start_level": 1,
-            "end_track_node": "L3-r100-c51",
-            "end_level": 3,
+            "end_track_node": "L4-r100-c51",
+            "end_level": 4,
             "algorithm": "astar",
         },
     )
@@ -296,7 +341,7 @@ def test_shuttle_router_keeps_original_topology_and_path_demo_routes_available(
 
     shuttle = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/levels")
     assert shuttle.status_code == 200
-    assert [level["shuttle_level"] for level in shuttle.json()["levels"]] == [1, 2, 3]
+    assert [level["shuttle_level"] for level in shuttle.json()["levels"]] == [1, 2, 3, 4]
 
 
 def test_api_rejects_track_level_mismatch(monkeypatch: pytest.MonkeyPatch, topology: dict):

@@ -362,6 +362,10 @@ describe('PathDemoPage', () => {
     renderPage()
 
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
+    expect(within(screen.getByRole('tablist', { name: '工作台模式' })).getAllByRole('tab')).toHaveLength(2)
+    expect(screen.getByRole('tab', { name: '路径规划' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(screen.getByRole('tablist', { name: '车辆类型' })).getAllByRole('tab')).toHaveLength(2)
+    expect(screen.getByRole('tab', { name: 'CTU' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
@@ -396,11 +400,11 @@ describe('PathDemoPage', () => {
     renderPage()
     await screen.findByTestId('path-demo-scene')
 
-    fireEvent.click(screen.getByRole('tab', { name: '四向车跨层' }))
+    fireEvent.click(screen.getByRole('tab', { name: '四向车 Shuttle' }))
     expect(await screen.findByText(/shuttle unavailable/)).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
 
-    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
@@ -739,7 +743,7 @@ describe('PathDemoPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '查看停靠点' }))
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')
 
-    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    fireEvent.click(screen.getByRole('tab', { name: '路径规划' }))
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'false')
     expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
   })
@@ -753,7 +757,7 @@ describe('PathDemoPage', () => {
     fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('库存加载失败')
 
-    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    fireEvent.click(screen.getByRole('tab', { name: '路径规划' }))
     expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
   })
 

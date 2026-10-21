@@ -7,13 +7,16 @@ import type { CameraActionRequest, CameraViewMode } from '../path-demo/cameraCon
 import { usePathPlayback } from '../path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../path-demo/types'
 import { sampleShuttlePlan, shuttleCameraSample, shuttleMotionLabel } from './shuttlePlayback'
+import { useShuttleWorkspaceStore } from './shuttleWorkspaceStore'
 import type { ShuttleLevel, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
 const PathDemo3DScene = lazy(() =>
   import('../path-demo/PathDemo3DScene').then((module) => ({ default: module.PathDemo3DScene })),
 )
 
-type WorkspaceMode = 'planning' | 'inventory' | 'shuttle'
+type WorkspaceMode = 'planning' | 'inventory'
+type VehicleType = 'ctu' | 'shuttle'
+const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 
 function nodesAtLevel(nodes: ShuttleTrackNode[], level: ShuttleLevel) {
   return nodes.filter((node) => node.shuttle_level === level)
@@ -31,13 +34,19 @@ export function ShuttleDemoWorkspace({
   topologies,
   onTopologyChange,
   onWorkspaceModeChange,
+  onVehicleTypeChange,
 }: {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
   onTopologyChange: (topologyId: string) => void
   onWorkspaceModeChange: (mode: WorkspaceMode) => void
+  onVehicleTypeChange: (vehicleType: VehicleType) => void
 }) {
   const topologyId = topologyRecord.id
+  const topologyVersion = topologyRecord.payload.meta.version
+  const savedDraft = useShuttleWorkspaceStore.getState().drafts[topologyId]
+  const initialDraft = savedDraft?.topologyVersion === topologyVersion ? savedDraft : null
+  const saveDraft = useShuttleWorkspaceStore((state) => state.saveDraft)
   const levelsQuery = useQuery({
     queryKey: ['shuttle-levels', topologyId], queryFn: () => api.getShuttleLevels(topologyId),
   })
@@ -49,11 +58,12 @@ export function ShuttleDemoWorkspace({
   })
   const tracks = useMemo(() => tracksQuery.data?.nodes ?? [], [tracksQuery.data])
   const lifts = useMemo(() => liftsQuery.data?.lifts ?? [], [liftsQuery.data])
-  const [startLevel, setStartLevel] = useState<ShuttleLevel>(1)
-  const [endLevel, setEndLevel] = useState<ShuttleLevel>(3)
-  const [startNodeId, setStartNodeId] = useState('')
-  const [endNodeId, setEndNodeId] = useState('')
-  const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
+  const [startLevel, setStartLevel] = useState<ShuttleLevel>(initialDraft?.startLevel ?? 1)
+  const [endLevel, setEndLevel] = useState<ShuttleLevel>(initialDraft?.endLevel ?? 4)
+  const [startNodeId, setStartNodeId] = useState(initialDraft?.startNodeId ?? '')
+  const [endNodeId, setEndNodeId] = useState(initialDraft?.endNodeId ?? '')
+  const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>(initialDraft?.algorithm ?? 'astar')
+  const [stateTopologyId, setStateTopologyId] = useState(topologyId)
   const [plan, setPlan] = useState<ShuttlePlanResponse | null>(null)
   const [planning, setPlanning] = useState(false)
   const [error, setError] = useState('')
@@ -64,6 +74,8 @@ export function ShuttleDemoWorkspace({
   const cameraSequenceRef = useRef(0)
 
   useEffect(() => {
+    const nextDraft = useShuttleWorkspaceStore.getState().drafts[topologyId]
+    const validDraft = nextDraft?.topologyVersion === topologyVersion ? nextDraft : null
     requestRef.current += 1
     setPlan(null)
     setError('')
@@ -71,11 +83,18 @@ export function ShuttleDemoWorkspace({
     setCameraViewMode('free')
     setCameraActionRequest(null)
     setSelectedLiftId(null)
-    setStartLevel(1)
-    setEndLevel(3)
-    setStartNodeId('')
-    setEndNodeId('')
-  }, [topologyId])
+    setStartLevel(validDraft?.startLevel ?? 1)
+    setEndLevel(validDraft?.endLevel ?? 4)
+    setStartNodeId(validDraft?.startNodeId ?? '')
+    setEndNodeId(validDraft?.endNodeId ?? '')
+    setAlgorithm(validDraft?.algorithm ?? 'astar')
+    setStateTopologyId(topologyId)
+  }, [topologyId, topologyVersion])
+
+  useEffect(() => {
+    if (stateTopologyId !== topologyId) return
+    saveDraft(topologyId, { topologyVersion, startLevel, endLevel, startNodeId, endNodeId, algorithm })
+  }, [algorithm, endLevel, endNodeId, saveDraft, startLevel, startNodeId, stateTopologyId, topologyId, topologyVersion])
 
   useEffect(() => {
     if (!tracks.length) return
@@ -158,32 +177,35 @@ export function ShuttleDemoWorkspace({
             {topologies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
         </label>
-        <div className="path-demo-workspace-tabs is-three" role="tablist" aria-label="工作台模式">
-          <button type="button" role="tab" aria-selected={false} onClick={() => onWorkspaceModeChange('planning')}>轨迹规划</button>
-          <button type="button" role="tab" aria-selected={false} onClick={() => onWorkspaceModeChange('inventory')}>库存查看</button>
-          <button type="button" role="tab" aria-selected className="active">四向车跨层</button>
+        <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
+          <button type="button" role="tab" aria-selected className="active">路径规划</button>
+          <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); onWorkspaceModeChange('inventory') }}>库存查看</button>
+        </div>
+        <div className="path-demo-vehicle-type-tabs" role="tablist" aria-label="车辆类型">
+          <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); onVehicleTypeChange('ctu') }}>CTU</button>
+          <button type="button" role="tab" aria-selected className="active">四向车 Shuttle</button>
         </div>
 
         <section className="shuttle-contract-card" aria-label="四向车轨道契约">
-          <strong>三层真实轨道 · 双提升机</strong>
+          <strong>四层真实轨道 · 双提升机</strong>
           <span>数据：slotAisles · 配置：{levelsQuery.data?.config_revision ?? '读取中'}</span>
           <span className={planningEnabled ? 'is-verified' : 'is-blocked'}>
             {levelsQuery.data?.verification_status ?? '正在校验'}
           </span>
           <span>程序验证候选：{levelsQuery.data?.lift_candidate_count ?? '—'} 处</span>
-          <p>轨道层 L1/L2/L3 不等同于建筑楼层或 CTU 货架层。</p>
-          <p>原 3D 数据具备第 4 个货架层位，本 Gate 严格只规划 L1–L3，L4 不进入 ShuttleGraph。</p>
+          <p>轨道层 L1/L2/L3/L4 不等同于建筑楼层或 CTU 货架层。</p>
+          <p>每层轨道严格来自 slotAisles 的 bit0–bit3；跨层边仅由程序验证的 Lift-A / Lift-B 提供。</p>
         </section>
 
         <div className="shuttle-level-grid">
           <label>起点层
             <select aria-label="四向车起点层" value={startLevel} onChange={(event) => { setStartLevel(Number(event.target.value) as ShuttleLevel); invalidatePlan() }}>
-              {[1, 2, 3].map((level) => <option key={level} value={level}>L{level}</option>)}
+              {SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}
             </select>
           </label>
           <label>终点层
             <select aria-label="四向车终点层" value={endLevel} onChange={(event) => { setEndLevel(Number(event.target.value) as ShuttleLevel); invalidatePlan() }}>
-              {[1, 2, 3].map((level) => <option key={level} value={level}>L{level}</option>)}
+              {SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}
             </select>
           </label>
         </div>
@@ -203,7 +225,7 @@ export function ShuttleDemoWorkspace({
           </select>
         </label>
         <button className="accent-button path-demo-plan-button" type="button" disabled={!planningEnabled || planning || !startNodeId || !endNodeId} onClick={() => void requestPlan()}>
-          {planning ? '规划中…' : '规划跨层路径'}
+          {planning ? '规划中…' : startLevel === endLevel ? '规划同层路径' : '规划跨层路径'}
         </button>
         {queryError ? <p className="path-demo-error" role="alert">{String(queryError)}</p> : null}
         {error ? <p className="path-demo-error" role="alert">{error}</p> : null}
@@ -244,7 +266,7 @@ export function ShuttleDemoWorkspace({
         <p className="path-demo-note">提升机容量为 1；本 Gate 仅实现单车离线跨层回放，尚未实现多车提升机资源预约。</p>
       </aside>
 
-      <div className="path-demo-viewport" aria-label="四向车三层轨道与提升机 3D 演示">
+      <div className="path-demo-viewport" aria-label="四向车四层轨道与提升机 3D 演示">
         <Suspense fallback={<div className="path-demo-empty">正在加载四向车 3D 场景…</div>}>
           <PathDemo3DScene
             topology={topologyRecord.payload}

@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StoredRecord, TopologyPayload } from '../../types'
 import { api } from '../../lib/api'
 import { ShuttleDemoWorkspace } from './ShuttleDemoWorkspace'
-import type { ShuttleLift, ShuttlePlanResponse, ShuttleTrackNode } from './types'
+import { useShuttleWorkspaceStore } from './shuttleWorkspaceStore'
+import type { ShuttleLevel, ShuttleLift, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
 vi.mock('../../lib/api', () => ({ api: {
   getShuttleLevels: vi.fn(), getShuttleTracks: vi.fn(), getShuttleLifts: vi.fn(), planShuttlePath: vi.fn(),
@@ -27,52 +28,53 @@ const topology: TopologyPayload = {
   grid: { rows: 216, cols: 129, cellSize: 32, originX: 0, originY: 0 }, zones: [], cells: [], nodes: [], resources: [],
 }
 const record: StoredRecord<TopologyPayload> = { id: topology.id, name: topology.name, payload: topology }
-const makeNode = (level: 1 | 2 | 3, col: number): ShuttleTrackNode => ({
+const makeNode = (level: ShuttleLevel, col: number): ShuttleTrackNode => ({
   topology_id: topology.id, zone_id: 'zone-shuttle', track_node_id: `L${level}-r100-c${col}`,
   shuttle_level: level, row: 100, col, world_x: col, world_y: level * 1.4 - 0.05, world_z: 7,
   track_type: col === 19 ? 'lift_entry' : 'straight', traversable: true, neighbors: [],
 })
-const tracks = [1, 2, 3].flatMap((level) => [7, 19, 51].map((col) => makeNode(level as 1 | 2 | 3, col)))
+const tracks = [1, 2, 3, 4].flatMap((level) => [7, 19, 51].map((col) => makeNode(level as ShuttleLevel, col)))
 const lift: ShuttleLift = {
   lift_id: 'shuttle-lift-a', label: 'Lift-A', topology_id: topology.id,
   topology_revision: '2.0.0:hash', config_revision: 'v1', zone_id: 'zone-shuttle', row: 100, col: 19,
-  supported_levels: [1, 2, 3], level_entrances: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19' },
-  level_exits: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19' },
+  supported_levels: [1, 2, 3, 4], level_entrances: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19', L4: 'L4-r100-c19' },
+  level_exits: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19', L4: 'L4-r100-c19' },
   capacity: 1, enter_time_seconds: 1, travel_time_per_level_seconds: 3, exit_time_seconds: 1,
   timing_source: 'synthetic_demo', vehicle_type: 'shuttle', state: 'idle',
   verification_status: 'program_verified_pending_human', validation_evidence: ['real aisles'],
 }
 const plan: ShuttlePlanResponse = {
   topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', algorithm: 'astar',
-  start: tracks[0], destination: tracks[8], chosen_lift: lift.lift_id,
+  start: tracks[0], destination: tracks[11], chosen_lift: lift.lift_id,
   path_nodes: [
     { ...tracks[0], arrival_seconds: 0, phase: 'start' },
     { ...tracks[1], arrival_seconds: 6, phase: 'track' },
-    { ...tracks[7], arrival_seconds: 14, phase: 'lift' },
-    { ...tracks[8], arrival_seconds: 30, phase: 'track' },
+    { ...tracks[10], arrival_seconds: 17, phase: 'lift' },
+    { ...tracks[11], arrival_seconds: 33, phase: 'track' },
   ],
   path_edges: [
     { from_track_node: tracks[0].track_node_id, to_track_node: tracks[1].track_node_id, edge_type: 'track', lift_id: null, duration_seconds: 6, start_seconds: 0, motion_start_seconds: 0, motion_end_seconds: 6, end_seconds: 6, distance_cells: 12, turn_time_seconds: 0 },
-    { from_track_node: tracks[1].track_node_id, to_track_node: tracks[7].track_node_id, edge_type: 'lift', lift_id: lift.lift_id, duration_seconds: 8, start_seconds: 6, motion_start_seconds: 7, motion_end_seconds: 13, end_seconds: 14, distance_cells: 0, turn_time_seconds: 0 },
-    { from_track_node: tracks[7].track_node_id, to_track_node: tracks[8].track_node_id, edge_type: 'track', lift_id: null, duration_seconds: 16, start_seconds: 14, motion_start_seconds: 14, motion_end_seconds: 30, end_seconds: 30, distance_cells: 32, turn_time_seconds: 0 },
+    { from_track_node: tracks[1].track_node_id, to_track_node: tracks[10].track_node_id, edge_type: 'lift', lift_id: lift.lift_id, duration_seconds: 11, start_seconds: 6, motion_start_seconds: 7, motion_end_seconds: 16, end_seconds: 17, distance_cells: 0, turn_time_seconds: 0 },
+    { from_track_node: tracks[10].track_node_id, to_track_node: tracks[11].track_node_id, edge_type: 'track', lift_id: null, duration_seconds: 16, start_seconds: 17, motion_start_seconds: 17, motion_end_seconds: 33, end_seconds: 33, distance_cells: 32, turn_time_seconds: 0 },
   ],
-  lift_transitions: [{ lift_id: lift.lift_id, from_level: 1, to_level: 3, entrance_track_node: tracks[1].track_node_id, exit_track_node: tracks[7].track_node_id, enter_at_seconds: 6, lift_start_seconds: 7, arrive_level_seconds: 13, exit_at_seconds: 14, events: ['enter_lift', 'lift_started', 'arrive_level', 'exit_lift'] }],
-  horizontal_distance_cells: 44, estimated_duration_seconds: 30, visited_states: 12, planning_time_ms: 1,
+  lift_transitions: [{ lift_id: lift.lift_id, from_level: 1, to_level: 4, entrance_track_node: tracks[1].track_node_id, exit_track_node: tracks[10].track_node_id, enter_at_seconds: 6, lift_start_seconds: 7, arrive_level_seconds: 16, exit_at_seconds: 17, events: ['enter_lift', 'lift_started', 'arrive_level', 'exit_lift'] }],
+  horizontal_distance_cells: 44, estimated_duration_seconds: 33, visited_states: 12, planning_time_ms: 1,
   result_status: 'success', failure_reason: null, timing_source: 'synthetic_demo', cost_contract: { time_unit: 'seconds' },
 }
 
-function renderWorkspace(onMode = vi.fn()) {
-  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <ShuttleDemoWorkspace topologyRecord={record} topologies={[record]} onTopologyChange={vi.fn()} onWorkspaceModeChange={onMode} />
+function renderWorkspace(onMode = vi.fn(), onVehicleType = vi.fn()) {
+  return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+    <ShuttleDemoWorkspace topologyRecord={record} topologies={[record]} onTopologyChange={vi.fn()} onWorkspaceModeChange={onMode} onVehicleTypeChange={onVehicleType} />
   </QueryClientProvider>)
 }
 
 beforeEach(() => {
+  useShuttleWorkspaceStore.setState({ drafts: {} })
   vi.mocked(api.getShuttleLevels).mockResolvedValue({
     topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0', config_revision: 'v1',
     data_source: 'topology_slot_aisles', verification_status: 'program_verified_pending_human', planning_enabled: true,
     lift_candidate_count: 5, lift_selection_basis: ['north/south coverage'],
-    levels: [1, 2, 3].map((level) => ({ shuttle_level: level as 1 | 2 | 3, node_count: 3, component_count: 1, component_sizes: [3] })), warnings: ['人工复核'],
+    levels: [1, 2, 3, 4].map((level) => ({ shuttle_level: level as ShuttleLevel, node_count: 3, component_count: 1, component_sizes: [3] })), warnings: ['人工复核'],
   })
   vi.mocked(api.getShuttleTracks).mockResolvedValue({ topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', nodes: tracks })
   vi.mocked(api.getShuttleLifts).mockResolvedValue({ topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', planning_enabled: true, lifts: [lift], warnings: [] })
@@ -80,12 +82,12 @@ beforeEach(() => {
 })
 
 describe('ShuttleDemoWorkspace', () => {
-  it('shows three real levels, fixed lifts, and the isolated shuttle scene', async () => {
+  it('shows four real levels, fixed lifts, and the isolated shuttle scene', async () => {
     renderWorkspace()
-    expect(await screen.findByText('三层真实轨道 · 双提升机')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-track-count', '9'))
+    expect(await screen.findByText('四层真实轨道 · 双提升机')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-track-count', '12'))
     expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-lift-count', '1')
-    expect(screen.getAllByRole('option', { name: 'L3' })).toHaveLength(2)
+    expect(screen.getAllByRole('option', { name: 'L4' })).toHaveLength(2)
   })
 
   it('submits the same selected nodes to A* and renders the returned lift path', async () => {
@@ -93,7 +95,7 @@ describe('ShuttleDemoWorkspace', () => {
     await waitFor(() => expect(screen.getByLabelText('四向车起点轨道节点')).toHaveValue('L1-r100-c7'))
     fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
     await waitFor(() => expect(api.planShuttlePath).toHaveBeenCalledWith(expect.objectContaining({
-      start_level: 1, end_level: 3, algorithm: 'astar', start_track_node: 'L1-r100-c7', end_track_node: 'L3-r100-c51',
+      start_level: 1, end_level: 4, algorithm: 'astar', start_track_node: 'L1-r100-c7', end_track_node: 'L4-r100-c51',
     })))
     expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-plan', 'shuttle-lift-a')
     expect(screen.getByText('44 格')).toBeInTheDocument()
@@ -128,10 +130,42 @@ describe('ShuttleDemoWorkspace', () => {
       lift_candidate_count: 0, lift_selection_basis: [],
     })
     const onMode = vi.fn()
-    renderWorkspace(onMode)
+    const onVehicleType = vi.fn()
+    renderWorkspace(onMode, onVehicleType)
     expect(await screen.findByText('当前轨道或提升机配置未通过程序验证，已禁止运行。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
-    expect(onMode).toHaveBeenCalledWith('planning')
+    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
+    expect(onVehicleType).toHaveBeenCalledWith('ctu')
+  })
+
+  it('does not let a late Shuttle planning response survive switching back to CTU', async () => {
+    let resolvePlan!: (value: ShuttlePlanResponse) => void
+    vi.mocked(api.planShuttlePath).mockReturnValueOnce(new Promise((resolve) => { resolvePlan = resolve }))
+    const onVehicleType = vi.fn()
+    renderWorkspace(vi.fn(), onVehicleType)
+    await waitFor(() => expect(screen.getByLabelText('四向车终点轨道节点')).toHaveValue('L4-r100-c51'))
+
+    fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
+    resolvePlan(plan)
+
+    await waitFor(() => expect(onVehicleType).toHaveBeenCalledWith('ctu'))
+    expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-plan', '')
+  })
+
+  it('restores a still-valid per-topology Shuttle configuration after remounting', async () => {
+    const first = renderWorkspace()
+    await waitFor(() => expect(screen.getByLabelText('四向车终点轨道节点')).toHaveValue('L4-r100-c51'))
+    fireEvent.change(screen.getByLabelText('四向车起点层'), { target: { value: '4' } })
+    fireEvent.change(screen.getByLabelText('四向车终点层'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('四向车路径算法'), { target: { value: 'dijkstra' } })
+    await waitFor(() => expect(screen.getByLabelText('四向车起点轨道节点')).toHaveValue('L4-r100-c7'))
+    first.unmount()
+
+    renderWorkspace()
+    expect(await screen.findByLabelText('四向车起点层')).toHaveValue('4')
+    expect(screen.getByLabelText('四向车终点层')).toHaveValue('2')
+    expect(screen.getByLabelText('四向车路径算法')).toHaveValue('dijkstra')
+    await waitFor(() => expect(screen.getByLabelText('四向车起点轨道节点')).toHaveValue('L4-r100-c7'))
   })
 })

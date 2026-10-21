@@ -1,6 +1,6 @@
 import type { PathDemoAlgorithm, PlaybackStatus } from '../path-demo/types'
 
-export type ShuttleLevel = 1 | 2 | 3
+export type ShuttleLevel = 1 | 2 | 3 | 4
 export type ShuttleVerificationStatus =
   | 'program_verified_pending_human'
   | 'unverified'

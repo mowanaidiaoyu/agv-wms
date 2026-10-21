@@ -1,0 +1,47 @@
+{
+  "topology_id": "topology-6ceb4920",
+  "topology_version": "2.0.0",
+  "source_topology_revision": "2.0.0:6bb73d03cd63cbb4",
+  "config_revision": "shuttle-4l-lift-v2",
+  "data_source": "topology_slot_aisles",
+  "review_status": "program_verified_pending_human",
+  "selection_basis": [
+    "Both positions are real 2x2 slotAisles passages with bit0-bit3 enabled and at least three same-level neighbors on L1-L4.",
+    "Lift-A and Lift-B retain the reviewed v1 coordinates and remain separated across the connected shuttle region.",
+    "Neither footprint overlaps an existing node, CTU zone, conveyor, blocked cell, or rack slot; physical placement still requires researcher B review."
+  ],
+  "lifts": [
+    {
+      "lift_id": "shuttle-lift-a",
+      "label": "Lift-A",
+      "zone_id": "zone-shuttle-3",
+      "row": 100,
+      "col": 19,
+      "supported_levels": [1, 2, 3, 4],
+      "level_entrances": {"L1": "L1-r100-c19", "L2": "L2-r100-c19", "L3": "L3-r100-c19", "L4": "L4-r100-c19"},
+      "level_exits": {"L1": "L1-r100-c19", "L2": "L2-r100-c19", "L3": "L3-r100-c19", "L4": "L4-r100-c19"},
+      "capacity": 1,
+      "enter_time_seconds": 1.0,
+      "travel_time_per_level_seconds": 3.0,
+      "exit_time_seconds": 1.0,
+      "timing_source": "synthetic_demo",
+      "verification_status": "program_verified_pending_human"
+    },
+    {
+      "lift_id": "shuttle-lift-b",
+      "label": "Lift-B",
+      "zone_id": "zone-shuttle-30",
+      "row": 188,
+      "col": 39,
+      "supported_levels": [1, 2, 3, 4],
+      "level_entrances": {"L1": "L1-r188-c39", "L2": "L2-r188-c39", "L3": "L3-r188-c39", "L4": "L4-r188-c39"},
+      "level_exits": {"L1": "L1-r188-c39", "L2": "L2-r188-c39", "L3": "L3-r188-c39", "L4": "L4-r188-c39"},
+      "capacity": 1,
+      "enter_time_seconds": 1.0,
+      "travel_time_per_level_seconds": 3.0,
+      "exit_time_seconds": 1.0,
+      "timing_source": "synthetic_demo",
+      "verification_status": "program_verified_pending_human"
+    }
+  ]
+}

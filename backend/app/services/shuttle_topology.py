@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from ..core.config import DATA_DIR
 
 
-SHUTTLE_LEVELS = (1, 2, 3)
+SHUTTLE_LEVELS = (1, 2, 3, 4)
 SHUTTLE_LEVEL_HEIGHT = 1.4
 DEFAULT_FLOOR = "1F"
 
@@ -79,7 +79,7 @@ def _track_type(position: tuple[int, int], positions: set[tuple[int, int]]) -> s
 
 
 def build_shuttle_track_graph(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Build L1-L3 nodes from the exact slotAisles semantics used by the 3D renderer."""
+    """Build L1-L4 nodes from the exact slotAisles bit mask used by the 3D renderer."""
     cells = _cell_lookup(topology)
     positions: dict[int, dict[tuple[int, int], str]] = {level: {} for level in SHUTTLE_LEVELS}
     for zone in topology.get("zones", []):
@@ -148,10 +148,15 @@ class ShuttleConfigStore:
     root: Path = DATA_DIR / "shuttle_configs"
 
     def path_for(self, topology_id: str) -> Path:
+        return self.root / f"{topology_id}.shuttle-v2.json"
+
+    def legacy_path_for(self, topology_id: str) -> Path:
         return self.root / f"{topology_id}.shuttle-v1.json"
 
     def load(self, topology_id: str) -> dict[str, Any] | None:
         path = self.path_for(topology_id)
+        if not path.exists():
+            path = self.legacy_path_for(topology_id)
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
@@ -164,8 +169,9 @@ def _lift_footprint_is_clear(topology: dict[str, Any], lift: dict[str, Any]) -> 
         return False, ["Lift zone is missing or is not a shuttle zone."]
     row, col = int(lift["row"]), int(lift["col"])
     mask = _slot_mask(zone, row, col, _cell_lookup(topology))
-    if mask & 0b111 != 0b111:
-        return False, ["The configured 2x2 slot is not an aisle on every L1-L3 level."]
+    required_mask = sum(1 << (level - 1) for level in SHUTTLE_LEVELS)
+    if mask & required_mask != required_mask:
+        return False, ["The configured 2x2 slot is not an aisle on every L1-L4 level."]
     if any(
         node.get("row") in {row, row + 1} and node.get("col") in {col, col + 1}
         for node in topology.get("nodes", [])
@@ -180,7 +186,7 @@ def _lift_footprint_is_clear(topology: dict[str, Any], lift: dict[str, Any]) -> 
         return False, ["The lift footprint crosses a zone boundary."]
     evidence.extend(
         [
-            f"slotAisles[{row},{col}] has L1-L3 aisle bits.",
+            f"slotAisles[{row},{col}] has L1-L4 aisle bits.",
             "The 2x2 footprint contains four walkable road cells in the same shuttle zone.",
             "No existing topology node occupies the 2x2 footprint.",
         ]
@@ -191,7 +197,7 @@ def _lift_footprint_is_clear(topology: dict[str, Any], lift: dict[str, Any]) -> 
 def scan_lift_candidates(
     topology: dict[str, Any], graph: dict[str, dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
-    """Return only real 2x2 aisle slots that can host an L1-L3 shaft.
+    """Return only real 2x2 aisle slots that can host an L1-L4 shaft.
 
     This is an audit result, not an automatic topology mutation. A candidate must
     still be selected in a versioned configuration and reviewed by researcher B.
@@ -294,6 +300,25 @@ def validate_shuttle_configuration(
             warnings.append(f"{lift['lift_id']} does not have two same-level track connections on every level.")
             continue
         entrances = {f"L{level}": track_node_id(level, *key) for level in SHUTTLE_LEVELS}
+        declared_levels = lift.get("supported_levels")
+        if declared_levels is not None and list(declared_levels) != list(SHUTTLE_LEVELS):
+            warnings.append(f"{lift['lift_id']} does not declare the complete L1-L4 level contract.")
+            continue
+        invalid_level_contract = False
+        for field_name in ("level_entrances", "level_exits"):
+            declared = lift.get(field_name)
+            if declared is not None and dict(declared) != entrances:
+                warnings.append(f"{lift['lift_id']} has an invalid {field_name} contract.")
+                invalid_level_contract = True
+                break
+        if invalid_level_contract:
+            continue
+        if lift.get("capacity", 1) != 1:
+            warnings.append(f"{lift['lift_id']} capacity must be 1 for the current shuttle contract.")
+            continue
+        if lift.get("verification_status", "program_verified_pending_human") != "program_verified_pending_human":
+            warnings.append(f"{lift['lift_id']} is not program verified for four-level planning.")
+            continue
         for node_id in expected_nodes:
             graph[node_id]["track_type"] = "lift_entry"
         lift.update(
@@ -309,7 +334,7 @@ def validate_shuttle_configuration(
                 "state": "idle",
                 "verification_status": "program_verified_pending_human",
                 "validation_evidence": evidence
-                + ["Every L1-L3 entrance has at least two same-level track neighbors."],
+                + ["Every L1-L4 entrance has at least two same-level track neighbors."],
             }
         )
         validated_lifts.append(lift)

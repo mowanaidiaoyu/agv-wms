@@ -19,7 +19,7 @@ class ShuttleTrackNode(BaseModel):
     topology_id: str
     zone_id: str
     track_node_id: str
-    shuttle_level: Literal[1, 2, 3]
+    shuttle_level: Literal[1, 2, 3, 4]
     row: int
     col: int
     world_x: float
@@ -31,7 +31,7 @@ class ShuttleTrackNode(BaseModel):
 
 
 class ShuttleLevelSummary(BaseModel):
-    shuttle_level: Literal[1, 2, 3]
+    shuttle_level: Literal[1, 2, 3, 4]
     node_count: int = Field(ge=0)
     component_count: int = Field(ge=0)
     component_sizes: list[int] = Field(default_factory=list)
@@ -46,7 +46,7 @@ class ShuttleLift(BaseModel):
     zone_id: str
     row: int
     col: int
-    supported_levels: list[Literal[1, 2, 3]]
+    supported_levels: list[Literal[1, 2, 3, 4]]
     level_entrances: dict[str, str]
     level_exits: dict[str, str]
     capacity: Literal[1] = 1
@@ -94,9 +94,9 @@ class ShuttleLiftsResponse(BaseModel):
 class ShuttlePlanRequest(BaseModel):
     topology_id: str = Field(min_length=1)
     start_track_node: str = Field(min_length=1)
-    start_level: Literal[1, 2, 3]
+    start_level: Literal[1, 2, 3, 4]
     end_track_node: str = Field(min_length=1)
-    end_level: Literal[1, 2, 3]
+    end_level: Literal[1, 2, 3, 4]
     algorithm: ShuttleAlgorithm = "astar"
 
     @model_validator(mode="after")
@@ -131,8 +131,8 @@ class ShuttlePathEdge(BaseModel):
 
 class ShuttleLiftTransition(BaseModel):
     lift_id: str
-    from_level: Literal[1, 2, 3]
-    to_level: Literal[1, 2, 3]
+    from_level: Literal[1, 2, 3, 4]
+    to_level: Literal[1, 2, 3, 4]
     entrance_track_node: str
     exit_track_node: str
     enter_at_seconds: float = Field(ge=0)

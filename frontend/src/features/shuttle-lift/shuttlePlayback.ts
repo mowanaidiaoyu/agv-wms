@@ -6,10 +6,10 @@ import type {
   ShuttlePlaybackSample,
 } from './types'
 
-const VEHICLE_CENTER_HEIGHT = 0.22
+export const SHUTTLE_VEHICLE_CENTER_HEIGHT = 0.22
 
 function centeredWorld(node: ShuttlePathNodeStep): [number, number, number] {
-  return [node.world_x, node.world_y + VEHICLE_CENTER_HEIGHT, node.world_z]
+  return [node.world_x, node.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT, node.world_z]
 }
 
 function interpolate(start: number, end: number, alpha: number) {
@@ -91,6 +91,17 @@ export function shuttleCameraSample(sample: ShuttlePlaybackSample | null): Traje
     world: sample.world,
     headingRadians: sample.headingRadians,
   }
+}
+
+export function shuttleLiftPlatformY(
+  sample: ShuttlePlaybackSample | null,
+  liftId: string,
+  baseY: number,
+) {
+  const liftPhases: ShuttlePlaybackSample['phase'][] = ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift']
+  return sample?.liftId === liftId && liftPhases.includes(sample.phase)
+    ? sample.world[1] - SHUTTLE_VEHICLE_CENTER_HEIGHT
+    : baseY
 }
 
 export const shuttleMotionLabel: Record<ShuttlePlaybackSample['phase'], string> = {

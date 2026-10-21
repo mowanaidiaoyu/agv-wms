@@ -2,21 +2,23 @@ import { Html, Line } from '@react-three/drei'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { InstancedMesh, Object3D } from 'three'
 import type { ShuttleLift, ShuttlePlaybackSample, ShuttleTrackNode, ShuttleVisualizationState } from './types'
+import { shuttleLiftPlatformY } from './shuttlePlayback'
 
-const LEVEL_COLORS = ['#38bdf8', '#22d3ee', '#818cf8'] as const
-const VEHICLE_CENTER_HEIGHT = 0.22
+const SHUTTLE_LEVELS = [1, 2, 3, 4] as const
+const LEVEL_COLORS = ['#38bdf8', '#22d3ee', '#818cf8', '#c084fc'] as const
 
 function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) {
   const level1Ref = useRef<InstancedMesh>(null)
   const level2Ref = useRef<InstancedMesh>(null)
   const level3Ref = useRef<InstancedMesh>(null)
+  const level4Ref = useRef<InstancedMesh>(null)
   const grouped = useMemo(
-    () => ([1, 2, 3] as const).map((level) => state.tracks.filter((node) => node.shuttle_level === level)),
+    () => SHUTTLE_LEVELS.map((level) => state.tracks.filter((node) => node.shuttle_level === level)),
     [state.tracks],
   )
   useLayoutEffect(() => {
     const object = new Object3D()
-    const meshes = [level1Ref.current, level2Ref.current, level3Ref.current]
+    const meshes = [level1Ref.current, level2Ref.current, level3Ref.current, level4Ref.current]
     grouped.forEach((nodes, levelIndex) => {
       const mesh = meshes[levelIndex]
       if (!mesh) return
@@ -33,7 +35,7 @@ function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) 
       {grouped.map((nodes, index) => (
         <instancedMesh
           key={index}
-          ref={index === 0 ? level1Ref : index === 1 ? level2Ref : level3Ref}
+          ref={index === 0 ? level1Ref : index === 1 ? level2Ref : index === 2 ? level3Ref : level4Ref}
           args={[undefined, undefined, nodes.length]}
           frustumCulled={false}
         >
@@ -55,8 +57,8 @@ function LiftModel({ lift, entrance, sample, selected }: { lift: ShuttleLift; en
   const entranceNodes = Object.values(lift.level_entrances)
   const active = sample?.liftId === lift.lift_id && ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift'].includes(sample.phase)
   const baseY = 1.35
-  const topY = 4.15
-  const platformY = active && sample ? sample.world[1] - VEHICLE_CENTER_HEIGHT : baseY
+  const topY = baseY + Math.max(0, lift.supported_levels.length - 1) * 1.4
+  const platformY = shuttleLiftPlatformY(sample, lift.lift_id, baseY)
   if (!entrance) return null
   const x = entrance.world_x
   const z = entrance.world_z

@@ -56,7 +56,8 @@ const planningStatusLabel = {
 }
 
 type DemoMode = 'single' | 'preset' | 'custom'
-type WorkspaceMode = 'planning' | 'inventory' | 'shuttle'
+type WorkspaceMode = 'planning' | 'inventory'
+type VehicleType = 'ctu' | 'shuttle'
 type PlanningStatus = keyof typeof planningStatusLabel
 type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
 
@@ -86,6 +87,7 @@ export function PathDemoPage() {
   const [topologyId, setTopologyId] = useState('')
   const [demoMode, setDemoMode] = useState<DemoMode>('single')
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
+  const [vehicleType, setVehicleType] = useState<VehicleType>('ctu')
   const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
   const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
   const [roadSemanticOverlayEnabled, setRoadSemanticOverlayEnabled] = useState(false)
@@ -470,19 +472,20 @@ export function PathDemoPage() {
   const canPlay = demoMode === 'single' ? trajectory.length > 1 : Boolean(multiPlan && multiPlan.makespan_seconds > 0)
   const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
   const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
+  const isShuttlePlanning = workspaceMode === 'planning' && vehicleType === 'shuttle'
 
   return (
     <section className="path-demo-page">
       <header className="path-demo-header">
         <div>
           <p className="eyebrow">Gate C-3D-3 · deterministic space-time path playback</p>
-          <h2>{workspaceMode === 'shuttle' ? '四向车三层轨道与双提升机演示' : demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
-          <p>{workspaceMode === 'shuttle' ? '路径来自独立 ShuttleGraph；跨层仅能通过程序验证的 Lift-A / Lift-B，本页面不控制真实设备。' : '路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。'}</p>
+          <h2>{isShuttlePlanning ? '四向车四层轨道与双提升机演示' : demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
+          <p>{isShuttlePlanning ? '路径来自独立四层 ShuttleGraph；跨层仅能通过程序验证的 Lift-A / Lift-B，本页面不控制真实设备。' : '路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。'}</p>
         </div>
-        <span className="path-demo-mode">{workspaceMode === 'shuttle' ? 'SHUTTLE · 单车跨层离线演示' : `CTU · ${demoMode === 'single' ? '单车演示模式' : '多车离线演示'}`}</span>
+        <span className="path-demo-mode">{isShuttlePlanning ? 'SHUTTLE · 单车四层离线演示' : `CTU · ${demoMode === 'single' ? '单车演示模式' : '多车离线演示'}`}</span>
       </header>
 
-      {workspaceMode === 'shuttle' && topologyRecord ? (
+      {isShuttlePlanning && topologyRecord ? (
         <ShuttleDemoWorkspace
           topologyRecord={topologyRecord}
           topologies={topologiesQuery.data ?? []}
@@ -498,6 +501,10 @@ export function PathDemoPage() {
             invalidatePlan()
           }}
           onWorkspaceModeChange={setWorkspaceMode}
+          onVehicleTypeChange={(nextVehicleType) => {
+            setVehicleType(nextVehicleType)
+            setRoadSelection(null)
+          }}
         />
       ) : (
       <div className="path-demo-layout">
@@ -523,14 +530,14 @@ export function PathDemoPage() {
               {topologyList.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <div className="path-demo-workspace-tabs is-three" role="tablist" aria-label="工作台模式">
+          <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
             <button
               type="button"
               role="tab"
               aria-selected={workspaceMode === 'planning'}
               className={workspaceMode === 'planning' ? 'active' : ''}
               onClick={() => setWorkspaceMode('planning')}
-            >轨迹规划</button>
+            >路径规划</button>
             <button
               type="button"
               role="tab"
@@ -541,18 +548,14 @@ export function PathDemoPage() {
                 setRoadSelection(null)
               }}
             >库存查看</button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={workspaceMode === 'shuttle'}
-              className={workspaceMode === 'shuttle' ? 'active' : ''}
-              onClick={() => {
-                setWorkspaceMode('shuttle')
-                setRoadSelection(null)
-              }}
-            >四向车跨层</button>
           </div>
           {workspaceMode === 'planning' ? (
+            <div className="path-demo-vehicle-type-tabs" role="tablist" aria-label="车辆类型">
+              <button type="button" role="tab" aria-selected={vehicleType === 'ctu'} className={vehicleType === 'ctu' ? 'active' : ''} onClick={() => setVehicleType('ctu')}>CTU</button>
+              <button type="button" role="tab" aria-selected={vehicleType === 'shuttle'} className={vehicleType === 'shuttle' ? 'active' : ''} onClick={() => { invalidatePlan(); setVehicleType('shuttle'); setRoadSelection(null) }}>四向车 Shuttle</button>
+            </div>
+          ) : null}
+          {workspaceMode === 'planning' && vehicleType === 'ctu' ? (
             <>
           <label>
             演示模式
@@ -873,6 +876,8 @@ export function PathDemoPage() {
             />
           ) : null}
             </>
+          ) : workspaceMode === 'planning' ? (
+            <p className="path-demo-note">正在准备四向车四层规划工作台…</p>
           ) : (
             <StorageInventoryPanel
               topologyId={topologyId}
