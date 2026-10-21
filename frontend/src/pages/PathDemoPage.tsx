@@ -111,12 +111,27 @@ export function PathDemoPage() {
   const setCustomDraft = useMultiPathExperimentStore((state) => state.setCustomDraft)
 
   useEffect(() => {
-    if (topologyId || !topologiesQuery.data?.length) return
+    if (!topologiesQuery.data) return
+    if (!topologiesQuery.data.length) {
+      if (topologyId) setTopologyId('')
+      return
+    }
+    if (topologiesQuery.data.some((item) => item.id === topologyId)) return
     const preferred = topologiesQuery.data.find((item) => item.name === '666') ?? topologiesQuery.data[0]
     setTopologyId(preferred.id)
   }, [topologiesQuery.data, topologyId])
 
   const topologyRecord = topologiesQuery.data?.find((item) => item.id === topologyId)
+  const topologyList = topologiesQuery.data ?? []
+  const topologyLoadFailed = topologiesQuery.isError && topologyList.length === 0
+  const topologyListEmpty = topologiesQuery.isSuccess && topologyList.length === 0
+  const topologyPlaceholder = topologiesQuery.isPending
+    ? '正在加载拓扑…'
+    : topologyLoadFailed
+      ? '拓扑加载失败'
+      : topologyListEmpty
+        ? '没有可用拓扑'
+        : '正在选择默认拓扑…'
   const inventoryLocationsQuery = useQuery({
     queryKey: ['inventory-locations', topologyId],
     queryFn: () => api.listInventoryLocations(topologyId),
@@ -491,6 +506,7 @@ export function PathDemoPage() {
             拓扑
             <select
               value={topologyId}
+              disabled={topologiesQuery.isPending || topologyLoadFailed || topologyListEmpty}
               onChange={(event) => {
                 setTopologyId(event.target.value)
                 setSelectedInventoryNodeId(null)
@@ -503,7 +519,8 @@ export function PathDemoPage() {
                 invalidatePlan()
               }}
             >
-              {(topologiesQuery.data ?? []).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {!topologyRecord ? <option value="">{topologyPlaceholder}</option> : null}
+              {topologyList.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
           <div className="path-demo-workspace-tabs is-three" role="tablist" aria-label="工作台模式">
@@ -912,7 +929,28 @@ export function PathDemoPage() {
                 roadSemanticCells={roadSemanticOverlayEnabled ? ctuRoadAuditQuery.data?.road_cells ?? [] : []}
               />
             </Suspense>
-          ) : <div className="path-demo-empty">正在读取拓扑…</div>}
+          ) : (
+            <div
+              className={`path-demo-empty path-demo-topology-state${topologyLoadFailed ? ' is-error' : ''}`}
+              role={topologyLoadFailed ? 'alert' : 'status'}
+            >
+              {topologiesQuery.isPending ? <p>正在读取拓扑…</p> : null}
+              {topologyLoadFailed ? (
+                <>
+                  <strong>拓扑接口连接失败</strong>
+                  <p>{topologiesQuery.error instanceof Error ? topologiesQuery.error.message : String(topologiesQuery.error)}</p>
+                  <button className="ghost-button" type="button" onClick={() => void topologiesQuery.refetch()}>重新加载拓扑</button>
+                </>
+              ) : null}
+              {topologyListEmpty ? (
+                <>
+                  <strong>没有可用拓扑</strong>
+                  <p>请先在拓扑编辑器中创建或导入仓库拓扑。</p>
+                </>
+              ) : null}
+              {!topologiesQuery.isPending && !topologyLoadFailed && !topologyListEmpty ? <p>正在选择默认拓扑…</p> : null}
+            </div>
+          )}
         </div>
       </div>
       )}

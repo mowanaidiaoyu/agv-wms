@@ -50,7 +50,13 @@
   font-size: 13px;
 }
 
-.path-demo-panel select { width: 100%; min-width: 0; }
+.path-demo-panel select {
+  width: 100%;
+  min-width: 0;
+  background: #111827;
+  color: #e2e8f0;
+}
+.path-demo-panel select:disabled { color: #94a3b8; opacity: 1; }
 .path-demo-plan-button { width: 100%; justify-content: center; }
 
 .path-demo-workspace-tabs {
@@ -374,6 +380,17 @@
   height: 100%;
   color: #94a3b8;
 }
+
+.path-demo-topology-state {
+  align-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+}
+.path-demo-topology-state p { margin: 0; max-width: 520px; overflow-wrap: anywhere; }
+.path-demo-topology-state strong { color: #cbd5e1; }
+.path-demo-topology-state button { justify-self: center; }
+.path-demo-topology-state.is-error strong { color: #fda4af; }
 
 .shuttle-demo-panel { min-width: 0; }
 .shuttle-contract-card {

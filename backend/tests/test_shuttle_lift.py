@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import path_demo as path_demo_api
+from app.api import routes as core_routes
 from app.api import shuttle as shuttle_api
 from app.main import app
 from app.services.shuttle_pathfinding import plan_shuttle_path
@@ -258,6 +260,43 @@ def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.
     assert planned.status_code == 200
     assert planned.json()["result_status"] == "success"
     assert planned.json()["chosen_lift"] == "shuttle-lift-a"
+
+
+def test_shuttle_router_keeps_original_topology_and_path_demo_routes_available(
+    monkeypatch: pytest.MonkeyPatch,
+    topology: dict,
+):
+    record = {"id": topology["id"], "name": topology["name"], "payload": topology}
+
+    class FakeRepository:
+        def list_topologies(self):
+            return [record]
+
+        def get_topology(self, topology_id: str):
+            return record if topology_id == topology["id"] else None
+
+    repository = FakeRepository()
+    monkeypatch.setattr(core_routes, "repo", repository)
+    monkeypatch.setattr(path_demo_api, "repo", repository)
+    monkeypatch.setattr(shuttle_api, "repo", repository)
+
+    client = TestClient(app)
+    listed = client.get("/api/v1/topologies")
+    assert listed.status_code == 200
+    assert [(item["id"], item["name"]) for item in listed.json()] == [(topology["id"], "666")]
+
+    detail = client.get(f"/api/v1/topologies/{topology['id']}")
+    assert detail.status_code == 200
+    assert len(detail.json()["payload"]["cells"]) == 2484
+
+    options = client.get(f"/api/v1/path-demo/topologies/{topology['id']}/options")
+    assert options.status_code == 200
+    assert options.json()["default_start"]
+    assert options.json()["default_goal"]
+
+    shuttle = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/levels")
+    assert shuttle.status_code == 200
+    assert [level["shuttle_level"] for level in shuttle.json()["levels"]] == [1, 2, 3]
 
 
 def test_api_rejects_track_level_mismatch(monkeypatch: pytest.MonkeyPatch, topology: dict):

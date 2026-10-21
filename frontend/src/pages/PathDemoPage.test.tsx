@@ -99,6 +99,10 @@ vi.mock('../lib/api', () => ({
     getCtuRoadSemanticAudit: vi.fn(),
     listCtuRoadDrafts: vi.fn(),
     createCtuRoadDraft: vi.fn(),
+    getShuttleLevels: vi.fn(),
+    getShuttleTracks: vi.fn(),
+    getShuttleLifts: vi.fn(),
+    planShuttlePath: vi.fn(),
   },
 }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
@@ -354,6 +358,54 @@ beforeEach(() => {
   vi.mocked(pathDemoApi.planMulti).mockResolvedValue(multiPlan)
 })
 describe('PathDemoPage', () => {
+  it('leaves the loading state and renders 666 after the topology request succeeds with Shuttle mode installed', async () => {
+    renderPage()
+
+    expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
+    expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
+    expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
+    expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
+  })
+
+  it('exits loading and exposes retry when the topology endpoint is unavailable', async () => {
+    vi.mocked(api.listTopologies).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    renderPage()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('拓扑接口连接失败')
+    expect(screen.getByRole('alert')).toHaveTextContent('Failed to fetch')
+    expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('拓扑')).toHaveDisplayValue('拓扑加载失败')
+    fireEvent.click(screen.getByRole('button', { name: '重新加载拓扑' }))
+    expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
+    expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
+  })
+
+  it('shows an explicit empty state instead of a blank topology field', async () => {
+    vi.mocked(api.listTopologies).mockResolvedValueOnce([])
+    renderPage()
+
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('没有可用拓扑'))
+    expect(screen.getByLabelText('拓扑')).toHaveDisplayValue('没有可用拓扑')
+    expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
+  })
+
+  it('isolates Shuttle API failures from the loaded topology and original planning workspace', async () => {
+    vi.mocked(api.getShuttleLevels).mockRejectedValueOnce(new Error('shuttle unavailable'))
+    vi.mocked(api.getShuttleTracks).mockRejectedValueOnce(new Error('shuttle unavailable'))
+    vi.mocked(api.getShuttleLifts).mockRejectedValueOnce(new Error('shuttle unavailable'))
+    renderPage()
+    await screen.findByTestId('path-demo-scene')
+
+    fireEvent.click(screen.getByRole('tab', { name: '四向车跨层' }))
+    expect(await screen.findByText(/shuttle unavailable/)).toBeInTheDocument()
+    expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
+
+    fireEvent.click(screen.getByRole('tab', { name: '轨迹规划' }))
+    expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
+    expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
+    expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
+  })
+
   it('shares the current custom vehicle DTO with the algorithm lab store', async () => {
     renderPage()
     await enterCustomModeWithSixVehicles()
