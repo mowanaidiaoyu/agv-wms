@@ -30,6 +30,9 @@ import type {
 } from '../features/inventory/types'
 import type {
   ShuttleLiftsResponse,
+  ShuttleMultiPlanRequest,
+  ShuttleMultiPlanResponse,
+  ShuttleMultiScenariosResponse,
   ShuttlePlanRequest,
   ShuttlePlanResponse,
   ShuttleTopologyLevelsResponse,
@@ -260,6 +263,17 @@ export const api = {
   },
   planShuttlePath(payload: ShuttlePlanRequest) {
     return request<ShuttlePlanResponse>('/shuttle/plan', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+  getShuttleMultiScenarios(topologyId: string) {
+    return request<ShuttleMultiScenariosResponse>(
+      `/shuttle/multi-scenarios?topology_id=${encodeURIComponent(topologyId)}`,
+    )
+  },
+  planShuttleMulti(payload: ShuttleMultiPlanRequest) {
+    return request<ShuttleMultiPlanResponse>('/shuttle/plan-multi', {
       method: 'POST',
       body: JSON.stringify(payload),
     })

@@ -149,6 +149,118 @@ export interface ShuttlePlanResponse {
   cost_contract: Record<string, string | number>
 }
 
+export interface ShuttleMultiVehicleRequest {
+  vehicle_id: string
+  start_track_node_id: string
+  target_track_node_id: string
+  priority: number
+  algorithm: PathDemoAlgorithm
+}
+
+export interface ShuttleMultiPlanningOptions {
+  time_step_seconds?: 0.25
+  max_vehicles?: number
+  max_time_steps?: number
+  max_expanded_states?: number
+  max_lift_candidates?: number
+  max_replans?: number
+  vehicle_length_cells?: number
+  vehicle_width_cells?: number
+  safety_margin_cells?: number
+  lift_initial_levels?: Record<'shuttle-lift-a' | 'shuttle-lift-b', ShuttleLevel>
+}
+
+export interface ShuttleMultiPlanRequest {
+  topology_id: string
+  topology_revision: string
+  shuttle_config_revision: string
+  coordinate_contract_version: 'shuttle-internal-levels-v1'
+  vehicle_requests: ShuttleMultiVehicleRequest[]
+  planning_options?: ShuttleMultiPlanningOptions
+}
+
+export interface ShuttleMultiPlanResponse {
+  planning_id: string
+  topology_id: string
+  topology_version: string
+  topology_revision: string
+  shuttle_config_revision: string
+  coordinate_contract_version: 'shuttle-internal-levels-v1'
+  planning_algorithm_version: string
+  status: 'planning_success' | 'failed' | 'unsafe'
+  vehicles: Array<{
+    vehicle_id: string
+    priority: number
+    algorithm: PathDemoAlgorithm
+    start: ShuttleTrackNode
+    destination: ShuttleTrackNode
+    path: string[]
+    timed_trajectory: Array<{
+      time_step: number
+      time_seconds: number
+      world_x: number
+      world_y: number
+      world_z: number
+      track_node_id: string | null
+      action: 'start' | 'wait' | 'turn' | 'move' | 'lift_enter' | 'lift' | 'lift_exit'
+      lift_id: string | null
+      edge_from: string | null
+      edge_to: string | null
+    }>
+    wait_intervals: Array<{
+      track_node_id: string
+      start_time_seconds: number
+      end_time_seconds: number
+      duration_seconds: number
+      reason: 'track_reservation' | 'lift_resource' | 'turn'
+    }>
+    lift_usage: Array<Record<string, string | number | boolean>>
+    arrival_time_seconds: number
+    wait_time_seconds: number
+    horizontal_distance_cells: number
+    visited_states: number
+    planning_status: 'planned'
+  }>
+  events: Array<{
+    event_id: string
+    simulation_time_seconds: number
+    vehicle_ids: string[]
+    event_type: string
+    resource_id: string | null
+    track_node_id: string | null
+    details: Record<string, unknown>
+    resolution_status: string
+  }>
+  metrics: Record<string, number>
+  safety_validation: {
+    node_conflicts: number
+    edge_conflicts: number
+    geometric_conflicts: number
+    lift_resource_conflicts: number
+    timing_violations: number
+    safe: boolean
+  }
+  unresolved_conflicts: Array<Record<string, unknown>>
+  failure_reason: string | null
+  vehicle_initial_config: ShuttleMultiVehicleRequest[]
+  lift_initial_state: Record<string, ShuttleLevel>
+  time_contract: Record<string, unknown>
+}
+
+export interface ShuttleMultiScenariosResponse {
+  topology_id: string
+  topology_revision: string
+  shuttle_config_revision: string
+  coordinate_contract_version: 'shuttle-internal-levels-v1'
+  scenarios: Array<{
+    scenario_id: 'parallel' | 'track-conflict' | 'lift-conflict'
+    name: string
+    description: string
+    vehicle_requests: ShuttleMultiVehicleRequest[]
+    evidence: Record<string, unknown>
+  }>
+}
+
 export type ShuttleMotionPhase =
   | 'idle'
   | 'turning'

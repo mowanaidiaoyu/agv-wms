@@ -4,6 +4,12 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..services.runtime import repo
 from ..services.shuttle_pathfinding import plan_shuttle_path
+from ..services.shuttle_multi_planner import (
+    ShuttleMultiPlanningError,
+    build_shuttle_multi_scenarios,
+    failed_shuttle_multi_response,
+    plan_shuttle_multi,
+)
 from ..services.shuttle_topology import (
     SHUTTLE_COORDINATE_CONTRACT_REVISION,
     ShuttleConfigStore,
@@ -17,6 +23,11 @@ from ..shuttle_lift_schemas import (
     ShuttlePlanResponse,
     ShuttleTopologyLevelsResponse,
     ShuttleTracksResponse,
+)
+from ..shuttle_multi_schemas import (
+    ShuttleMultiPlanRequest,
+    ShuttleMultiPlanResponse,
+    ShuttleMultiScenariosResponse,
 )
 
 
@@ -110,3 +121,76 @@ def create_shuttle_plan(request: ShuttlePlanRequest):
         "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
         **result,
     }
+
+
+@router.get("/multi-scenarios", response_model=ShuttleMultiScenariosResponse)
+def get_shuttle_multi_scenarios(topology_id: str = Query(min_length=1)):
+    _, graph, validation = _context(topology_id)
+    if not validation["planning_enabled"]:
+        raise HTTPException(
+            status_code=409,
+            detail="The ShuttleGraph and both lifts must pass configuration validation.",
+        )
+    try:
+        scenarios = build_shuttle_multi_scenarios(graph, validation["lifts"])
+    except ShuttleMultiPlanningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "topology_id": topology_id,
+        "topology_revision": validation["topology_revision"],
+        "shuttle_config_revision": validation["config_revision"],
+        "coordinate_contract_version": SHUTTLE_COORDINATE_CONTRACT_REVISION,
+        "scenarios": scenarios,
+    }
+
+
+@router.post("/plan-multi", response_model=ShuttleMultiPlanResponse)
+def create_shuttle_multi_plan(request: ShuttleMultiPlanRequest):
+    record, graph, validation = _context(request.topology_id)
+    topology_version = str(record["payload"].get("meta", {}).get("version", "unknown"))
+    vehicles = [vehicle.model_dump() for vehicle in request.vehicle_requests]
+    options = request.planning_options.model_dump()
+    mismatch = None
+    if request.topology_revision != validation["topology_revision"]:
+        mismatch = (
+            f"Topology revision mismatch: request={request.topology_revision}, "
+            f"current={validation['topology_revision']}"
+        )
+    elif request.shuttle_config_revision != validation["config_revision"]:
+        mismatch = (
+            f"Shuttle config revision mismatch: request={request.shuttle_config_revision}, "
+            f"current={validation['config_revision']}"
+        )
+    elif not validation["planning_enabled"]:
+        mismatch = "; ".join(validation["warnings"]) or "Shuttle planning is not enabled."
+    if mismatch:
+        return failed_shuttle_multi_response(
+            topology_id=request.topology_id,
+            topology_version=topology_version,
+            topology_revision=validation["topology_revision"],
+            config_revision=validation["config_revision"],
+            vehicles=vehicles,
+            options=options,
+            reason=mismatch,
+        )
+    try:
+        return plan_shuttle_multi(
+            graph,
+            validation["lifts"],
+            vehicles,
+            options,
+            topology_id=request.topology_id,
+            topology_version=topology_version,
+            topology_revision=validation["topology_revision"],
+            config_revision=validation["config_revision"],
+        )
+    except ShuttleMultiPlanningError as exc:
+        return failed_shuttle_multi_response(
+            topology_id=request.topology_id,
+            topology_version=topology_version,
+            topology_revision=validation["topology_revision"],
+            config_revision=validation["config_revision"],
+            vehicles=vehicles,
+            options=options,
+            reason=str(exc),
+        )
