@@ -17,9 +17,13 @@ import type {
 export const CELL = 1 // 一格的世界长度
 export const FLOOR_HEIGHT = 4 // 楼层净高
 export const LEVEL_HEIGHT = 0.5 // 货架每层高度
+export const SHUTTLE_RACK_LEVEL_COUNT = 4
+export const SHUTTLE_LEVEL_HEIGHT = 1.4
+export const SHUTTLE_TRACK_DECK_THICKNESS = 0.06
+export const SHUTTLE_TRACK_SURFACE_OFFSET = SHUTTLE_LEVEL_HEIGHT / 4
 export const ZONE_LEVELS: Record<ZoneType, number> = {
   ctu: 17,
-  shuttle: 4,
+  shuttle: SHUTTLE_RACK_LEVEL_COUNT,
   station: 1,
   buffer: 1,
   conveyor: 1,
@@ -29,7 +33,7 @@ export const ZONE_LEVELS: Record<ZoneType, number> = {
 /** 货架每层高度（按区域类型）：CTU 料箱 0.5，四向车托盘 1.4（平库货位更高）。 */
 export const ZONE_LEVEL_HEIGHT: Record<ZoneType, number> = {
   ctu: 0.5,
-  shuttle: 1.4,
+  shuttle: SHUTTLE_LEVEL_HEIGHT,
   station: 0.5,
   buffer: 0.5,
   conveyor: 0.5,
@@ -51,6 +55,18 @@ export const DIRECTION_VEC3: Record<ConveyorDirection, Direction3D> = {
 /** 楼层在世界里的基准高度（每层 slab 底面所在 y）。 */
 export function floorPlaneY(floorIndex: number): number {
   return floorIndex * FLOOR_HEIGHT
+}
+
+/** 四向车内部轨道承载面：L1 位于首个货格内，L4 仍低于货架结构顶面。 */
+export function shuttleLevelToWorldY(level: number, rackBaseY = 0): number {
+  if (!Number.isInteger(level) || level < 1 || level > SHUTTLE_RACK_LEVEL_COUNT) {
+    throw new RangeError(`Unsupported shuttle level: ${level}`)
+  }
+  return rackBaseY + SHUTTLE_TRACK_SURFACE_OFFSET + (level - 1) * SHUTTLE_LEVEL_HEIGHT
+}
+
+export function shuttleRackTopWorldY(rackBaseY = 0): number {
+  return rackBaseY + SHUTTLE_RACK_LEVEL_COUNT * SHUTTLE_LEVEL_HEIGHT
 }
 
 /** 世界坐标 → 网格坐标（worldX/worldZ 的逆）。 */
@@ -124,6 +140,13 @@ export interface SceneRack {
   /** 四向车库槽位锚点（2×2 槽左上角），用于按槽位高亮/选择 */
   slotRow?: number
   slotCol?: number
+}
+
+/** 返回层板中心；四向车层板顶面就是轨道承载面。 */
+export function rackDeckCenterY(rack: SceneRack, levelIndex: number): number {
+  return rack.zoneType === 'shuttle'
+    ? shuttleLevelToWorldY(levelIndex + 1, rack.y) - SHUTTLE_TRACK_DECK_THICKNESS / 2
+    : rack.y + (levelIndex + 1) * rack.levelHeight - 0.05
 }
 
 export interface SceneTower {

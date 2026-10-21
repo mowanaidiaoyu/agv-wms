@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ShuttleLevel, ShuttlePlanResponse, ShuttleTrackNode } from './types'
-import { sampleShuttlePlan, shuttleCameraSample, shuttleLiftPlatformY } from './shuttlePlayback'
+import { SHUTTLE_TRACK_DECK_THICKNESS, shuttleLevelToWorldY } from '../../lib/topology3d'
+import { sampleShuttlePlan, SHUTTLE_VEHICLE_CENTER_HEIGHT, shuttleCameraSample, shuttleLiftPlatformY } from './shuttlePlayback'
 
 function node(id: string, level: ShuttleLevel, row: number, col: number, y: number): ShuttleTrackNode {
   return {
@@ -10,14 +11,14 @@ function node(id: string, level: ShuttleLevel, row: number, col: number, y: numb
   }
 }
 
-const start = node('L1-start', 1, 10, 1, 1.35)
-const liftL1 = node('L1-lift', 1, 10, 3, 1.35)
-const liftL3 = node('L3-lift', 3, 10, 3, 4.15)
-const goal = node('L3-goal', 3, 10, 5, 4.15)
-const liftL4 = node('L4-lift', 4, 10, 3, 5.55)
-const goalL4 = node('L4-goal', 4, 10, 5, 5.55)
+const start = node('L1-start', 1, 10, 1, shuttleLevelToWorldY(1))
+const liftL1 = node('L1-lift', 1, 10, 3, shuttleLevelToWorldY(1))
+const liftL3 = node('L3-lift', 3, 10, 3, shuttleLevelToWorldY(3))
+const goal = node('L3-goal', 3, 10, 5, shuttleLevelToWorldY(3))
+const liftL4 = node('L4-lift', 4, 10, 3, shuttleLevelToWorldY(4))
+const goalL4 = node('L4-goal', 4, 10, 5, shuttleLevelToWorldY(4))
 const plan: ShuttlePlanResponse = {
-  topology_id: 'topology-666', topology_revision: '2.0.0:hash', config_revision: 'v1', algorithm: 'astar',
+  topology_id: 'topology-666', topology_revision: '2.0.0:hash', config_revision: 'v1', coordinate_contract_revision: 'shuttle-internal-levels-v1', algorithm: 'astar',
   start, destination: goal, chosen_lift: 'shuttle-lift-a', result_status: 'success', failure_reason: null,
   horizontal_distance_cells: 4, estimated_duration_seconds: 12, visited_states: 4, planning_time_ms: 1,
   timing_source: 'synthetic_demo', cost_contract: { time_unit: 'seconds' },
@@ -92,7 +93,7 @@ describe('shuttle cross-level playback', () => {
     const risingA = sampleShuttlePlan(plan, 4, 'running')!
     const risingB = sampleShuttlePlan(plan, 7, 'running')!
     expect(entering.phase).toBe('entering_lift')
-    expect(entering.world[1]).toBeCloseTo(liftL1.world_y + 0.22)
+    expect(entering.world[1]).toBeCloseTo(liftL1.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT)
     expect(risingA.phase).toBe('moving_up')
     expect(risingB.world[1]).toBeGreaterThan(risingA.world[1])
     expect(risingB.world[0]).toBe(risingA.world[0])
@@ -136,11 +137,11 @@ describe('shuttle cross-level playback', () => {
     const arrivedL4 = sampleShuttlePlan(l4Plan, 15, 'completed')!
     expect(rising.phase).toBe('moving_up')
     expect(falling.phase).toBe('moving_down')
-    expect(rising.world[1]).toBeGreaterThan(liftL1.world_y + 0.22)
-    expect(falling.world[1]).toBeLessThan(liftL4.world_y + 0.22)
+    expect(rising.world[1]).toBeGreaterThan(liftL1.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT)
+    expect(falling.world[1]).toBeLessThan(liftL4.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT)
     expect(arrivedL4.shuttleLevel).toBe(4)
-    expect(arrivedL4.world[1]).toBeCloseTo(5.77)
-    expect(shuttleLiftPlatformY(rising, 'shuttle-lift-a', 1.35) + 0.22).toBeCloseTo(rising.world[1])
-    expect(shuttleLiftPlatformY(falling, 'shuttle-lift-a', 1.35) + 0.22).toBeCloseTo(falling.world[1])
+    expect(arrivedL4.world[1]).toBeCloseTo(shuttleLevelToWorldY(4) + SHUTTLE_VEHICLE_CENTER_HEIGHT)
+    expect(shuttleLiftPlatformY(rising, 'shuttle-lift-a', liftL1.world_y) + SHUTTLE_TRACK_DECK_THICKNESS / 2 + SHUTTLE_VEHICLE_CENTER_HEIGHT).toBeCloseTo(rising.world[1])
+    expect(shuttleLiftPlatformY(falling, 'shuttle-lift-a', liftL1.world_y) + SHUTTLE_TRACK_DECK_THICKNESS / 2 + SHUTTLE_VEHICLE_CENTER_HEIGHT).toBeCloseTo(falling.world[1])
   })
 })

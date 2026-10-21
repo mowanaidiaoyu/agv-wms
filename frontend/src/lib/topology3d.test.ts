@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { TopologyPayload } from '../types'
-import { buildSceneSpec } from './topology3d'
+import {
+  buildSceneSpec,
+  rackDeckCenterY,
+  SHUTTLE_RACK_LEVEL_COUNT,
+  SHUTTLE_TRACK_DECK_THICKNESS,
+  shuttleLevelToWorldY,
+  shuttleRackTopWorldY,
+} from './topology3d'
 
 describe('topology3d road rendering contract', () => {
   it('derives road and rack colors from Cell and Zone data without inventing CTU permissions', () => {
@@ -31,5 +38,21 @@ describe('topology3d road rendering contract', () => {
     expect(ctuRoad).toMatchObject({ kind: 'box', color: '#2e3a52' })
     expect(shuttleRoad).toMatchObject({ kind: 'box', color: '#3a4f6e' })
     expect(ctuRack).toMatchObject({ kind: 'rack', color: '#0e7490', zoneType: 'ctu' })
+  })
+
+  it('places four Shuttle decks on internal running surfaces and retains a higher structural top', () => {
+    const rack = {
+      kind: 'rack' as const,
+      key: 'shuttle-rack', x: 0, y: 0, z: 0, cellsW: 2, cellsD: 2,
+      levels: SHUTTLE_RACK_LEVEL_COUNT, slotSize: 2, levelHeight: 1.4,
+      color: '#b45309', zoneType: 'shuttle' as const, label: 'Shuttle', floor: '1F',
+    }
+    const surfaces = Array.from({ length: rack.levels }, (_, index) => (
+      rackDeckCenterY(rack, index) + SHUTTLE_TRACK_DECK_THICKNESS / 2
+    ))
+
+    expect(surfaces).toEqual(Array.from({ length: rack.levels }, (_, index) => shuttleLevelToWorldY(index + 1)))
+    expect(surfaces.every((surface, index) => index === 0 || surface > surfaces[index - 1])).toBe(true)
+    expect(surfaces[3]).toBeLessThan(shuttleRackTopWorldY())
   })
 })

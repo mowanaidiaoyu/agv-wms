@@ -9,6 +9,7 @@ import { createCustomVehicle, validateMultiVehicleConfiguration } from '../featu
 import type { CameraActionRequest, CameraViewMode } from '../features/path-demo/cameraControls'
 import type { MultiPathVehicleRequest, PathDemoCell, PathDemoEndpointMarker, PathDemoVehicleView, PlaybackStatus, TrajectorySample } from '../features/path-demo/types'
 import { PathDemoPage } from './PathDemoPage'
+import { shuttleLevelToWorldY } from '../lib/topology3d'
 
 vi.mock('../features/path-demo/PathDemo3DScene', () => ({
   PathDemo3DScene: ({
@@ -362,21 +363,21 @@ beforeEach(() => {
   vi.mocked(api.listCtuRoadDrafts).mockResolvedValue([])
   vi.mocked(api.getShuttleLevels).mockResolvedValue({
     topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0',
-    config_revision: 'shuttle-4l-lift-v2', data_source: 'topology_slot_aisles',
+    config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1', data_source: 'topology_slot_aisles',
     verification_status: 'program_verified_pending_human', planning_enabled: true,
     lift_candidate_count: 2, lift_selection_basis: [],
     levels: [1, 2, 3, 4].map((level) => ({ shuttle_level: level as 1 | 2 | 3 | 4, node_count: 1, component_count: 1, component_sizes: [1] })), warnings: [],
   })
   vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => ({
-    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2',
+    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1',
     nodes: [{
       topology_id: topology.id, zone_id: 'zone-shuttle', track_node_id: `L${level}-r100-c7`, shuttle_level: level!,
-      row: 100, col: 7, world_x: 7, world_y: level! * 1.4 - 0.05, world_z: 1,
+      row: 100, col: 7, world_x: 7, world_y: shuttleLevelToWorldY(level!), world_z: 1,
       track_type: 'straight', traversable: true, neighbors: [],
     }],
   }))
   vi.mocked(api.getShuttleLifts).mockResolvedValue({
-    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', planning_enabled: true, lifts: [], warnings: [],
+    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1', planning_enabled: true, lifts: [], warnings: [],
   })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))

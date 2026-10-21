@@ -6,7 +6,7 @@ import { PathPlaybackController } from '../path-demo/PathPlaybackController'
 import type { CameraActionRequest, CameraViewMode } from '../path-demo/cameraControls'
 import { usePathPlayback } from '../path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../path-demo/types'
-import { sampleShuttlePlan, shuttleCameraSample, shuttleMotionLabel } from './shuttlePlayback'
+import { sampleShuttlePlan, SHUTTLE_VEHICLE_CENTER_HEIGHT, shuttleCameraSample, shuttleMotionLabel } from './shuttlePlayback'
 import { useShuttleWorkspaceStore } from './shuttleWorkspaceStore'
 import type { ShuttleLevel, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
@@ -18,6 +18,7 @@ type WorkspaceMode = 'planning' | 'inventory'
 type VehicleType = 'ctu' | 'shuttle'
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
+const INTERNAL_HEIGHT_CONTRACT_REVISION = 'shuttle-internal-levels-v1'
 
 function nodesAtLevel(nodes: ShuttleTrackNode[], level: ShuttleLevel) {
   return nodes.filter((node) => node.shuttle_level === level)
@@ -77,6 +78,7 @@ export function ShuttleDemoWorkspace({
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
   const [selectedLiftId, setSelectedLiftId] = useState<string | null>(null)
+  const [rackXray, setRackXray] = useState(false)
   const requestRef = useRef(0)
   const cameraSequenceRef = useRef(0)
 
@@ -90,6 +92,7 @@ export function ShuttleDemoWorkspace({
     setCameraViewMode('free')
     setCameraActionRequest(null)
     setSelectedLiftId(null)
+    setRackXray(false)
     setStartLevel(validDraft?.startLevel ?? 1)
     setEndLevel(validDraft?.endLevel ?? 4)
     setStartNodeId(validDraft?.startNodeId ?? '')
@@ -154,11 +157,12 @@ export function ShuttleDemoWorkspace({
   }
   const focusLift = (liftId: string) => {
     const lift = lifts.find((item) => item.lift_id === liftId)
-    const entrance = lift ? trackLookup.get(lift.level_entrances.L2) : null
+    const levelKey = `L${startLevel}` as keyof NonNullable<typeof lift>['level_entrances']
+    const entrance = lift ? trackLookup.get(lift.level_entrances[levelKey]) : null
     if (!entrance) return
     setSelectedLiftId(liftId)
     setCameraViewMode('free')
-    requestCamera('focus-point', [entrance.world_x, entrance.world_y, entrance.world_z])
+    requestCamera('focus-point', [entrance.world_x, entrance.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT, entrance.world_z])
   }
   const requestPlan = async () => {
     const sequence = requestRef.current + 1
@@ -175,6 +179,14 @@ export function ShuttleDemoWorkspace({
         algorithm,
       })
       if (requestRef.current !== sequence) return
+      if (
+        next.config_revision !== FOUR_LEVEL_CONFIG_REVISION
+        || next.coordinate_contract_revision !== INTERNAL_HEIGHT_CONTRACT_REVISION
+      ) {
+        setPlan(null)
+        setError('规划结果使用了旧版四向车坐标契约，请重启后端后重新规划。')
+        return
+      }
       if (next.result_status !== 'success') {
         setPlan(null)
         setError(next.failure_reason ?? '四向车跨层路径规划失败。')
@@ -195,10 +207,17 @@ export function ShuttleDemoWorkspace({
     liftsQuery.data?.config_revision,
     ...trackQueries.map((query) => query.data?.config_revision),
   ].filter((revision): revision is string => Boolean(revision))
+  const coordinateContractRevisions = [
+    levelsQuery.data?.coordinate_contract_revision,
+    liftsQuery.data?.coordinate_contract_revision,
+    ...trackQueries.map((query) => query.data?.coordinate_contract_revision),
+  ].filter((revision): revision is 'shuttle-internal-levels-v1' => Boolean(revision))
   const contractQueriesSettled = Boolean(levelsQuery.data && liftsQuery.data)
     && trackQueries.every((query) => query.isSuccess)
   const hasFourLevelContract = configRevisions.length === 6
     && configRevisions.every((revision) => revision === FOUR_LEVEL_CONFIG_REVISION)
+    && coordinateContractRevisions.length === 6
+    && coordinateContractRevisions.every((revision) => revision === INTERNAL_HEIGHT_CONTRACT_REVISION)
   const planningEnabled = Boolean(
     levelsQuery.data?.planning_enabled
     && liftsQuery.data?.planning_enabled
@@ -273,7 +292,7 @@ export function ShuttleDemoWorkspace({
           {planning ? '规划中…' : startLevel === endLevel ? '规划同层路径' : '规划跨层路径'}
         </button>
         {queryError ? <p className="path-demo-error" role="alert">{String(queryError)}</p> : null}
-        {versionMismatch ? <p className="path-demo-error" role="alert">检测到旧版 Shuttle 服务（{levelsQuery.data?.config_revision ?? '未知版本'}）。请重启后端并确认加载 {FOUR_LEVEL_CONFIG_REVISION}，旧版响应不会用于 L4 规划。</p> : null}
+        {versionMismatch ? <p className="path-demo-error" role="alert">检测到旧版 Shuttle 服务（配置 {levelsQuery.data?.config_revision ?? '未知'}，坐标 {levelsQuery.data?.coordinate_contract_revision ?? '缺失'}）。请重启后端并确认加载 {FOUR_LEVEL_CONFIG_REVISION} / {INTERNAL_HEIGHT_CONTRACT_REVISION}，旧高度响应不会用于 L4 规划。</p> : null}
         {!queryError && !startTrackQuery.isPending && startNodes.length === 0 ? <p className="path-demo-error" role="alert">L{startLevel} 未返回可用轨道节点，无法选择起点。</p> : null}
         {!queryError && !endTrackQuery.isPending && endNodes.length === 0 ? <p className="path-demo-error" role="alert">L{endLevel} 未返回可用轨道节点，无法选择终点。</p> : null}
         {error ? <p className="path-demo-error" role="alert">{error}</p> : null}
@@ -298,6 +317,7 @@ export function ShuttleDemoWorkspace({
             <button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCamera('overview') }}>仓库全景</button>
             <button className="ghost-button" type="button" disabled={!lifts.some((lift) => lift.lift_id === 'shuttle-lift-a')} onClick={() => focusLift('shuttle-lift-a')}>查看 Lift-A</button>
             <button className="ghost-button" type="button" disabled={!lifts.some((lift) => lift.lift_id === 'shuttle-lift-b')} onClick={() => focusLift('shuttle-lift-b')}>查看 Lift-B</button>
+            <button className={rackXray ? 'accent-button' : 'ghost-button'} type="button" aria-pressed={rackXray} onClick={() => setRackXray((enabled) => !enabled)}>透视货架：{rackXray ? '开' : '关'}</button>
           </div>
         </section>
 
@@ -326,6 +346,7 @@ export function ShuttleDemoWorkspace({
             cameraActionRequest={cameraActionRequest}
             followedVehicleSample={cameraSample}
             shuttleVisualization={{ tracks, lifts, plan, sample, selectedLiftId }}
+            shuttleRackXray={rackXray}
           />
         </Suspense>
       </div>

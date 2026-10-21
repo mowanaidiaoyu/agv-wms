@@ -66,6 +66,7 @@ class ShuttleTopologyLevelsResponse(BaseModel):
     topology_revision: str
     topology_version: str
     config_revision: str
+    coordinate_contract_revision: Literal["shuttle-internal-levels-v1"]
     data_source: Literal["topology_slot_aisles"] = "topology_slot_aisles"
     verification_status: ShuttleVerificationStatus
     planning_enabled: bool
@@ -79,6 +80,7 @@ class ShuttleTracksResponse(BaseModel):
     topology_id: str
     topology_revision: str
     config_revision: str
+    coordinate_contract_revision: Literal["shuttle-internal-levels-v1"]
     nodes: list[ShuttleTrackNode]
 
 
@@ -86,6 +88,7 @@ class ShuttleLiftsResponse(BaseModel):
     topology_id: str
     topology_revision: str
     config_revision: str
+    coordinate_contract_revision: Literal["shuttle-internal-levels-v1"]
     planning_enabled: bool
     lifts: list[ShuttleLift]
     warnings: list[str] = Field(default_factory=list)
@@ -146,6 +149,7 @@ class ShuttlePlanResponse(BaseModel):
     topology_id: str
     topology_revision: str
     config_revision: str
+    coordinate_contract_revision: Literal["shuttle-internal-levels-v1"]
     algorithm: ShuttleAlgorithm
     start: ShuttleTrackNode | None = None
     destination: ShuttleTrackNode | None = None

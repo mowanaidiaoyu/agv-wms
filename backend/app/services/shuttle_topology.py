@@ -12,7 +12,19 @@ from ..core.config import DATA_DIR
 
 SHUTTLE_LEVELS = (1, 2, 3, 4)
 SHUTTLE_LEVEL_HEIGHT = 1.4
+# A shuttle level is an internal running bay, not the rack roof.  The running
+# surface sits one quarter of a bay above that bay's lower boundary; L4
+# therefore retains vehicle clearance below the structural top at 4 * 1.4.
+SHUTTLE_TRACK_SURFACE_OFFSET = SHUTTLE_LEVEL_HEIGHT / 4
+SHUTTLE_RACK_TOP_Y = len(SHUTTLE_LEVELS) * SHUTTLE_LEVEL_HEIGHT
+SHUTTLE_COORDINATE_CONTRACT_REVISION = "shuttle-internal-levels-v1"
 DEFAULT_FLOOR = "1F"
+
+
+def shuttle_level_world_y(level: int) -> float:
+    if level not in SHUTTLE_LEVELS:
+        raise ValueError(f"Unsupported shuttle level: {level}")
+    return SHUTTLE_TRACK_SURFACE_OFFSET + (level - 1) * SHUTTLE_LEVEL_HEIGHT
 
 
 def topology_revision(topology: dict[str, Any]) -> str:
@@ -33,7 +45,7 @@ def _world_position(topology: dict[str, Any], level: int, row: int, col: int) ->
     # therefore half a cell beyond the normal cell-center transform.
     return (
         col + 1.0 - cols / 2.0,
-        level * SHUTTLE_LEVEL_HEIGHT - 0.05,
+        shuttle_level_world_y(level),
         rows / 2.0 - (row + 1.0),
     )
 

@@ -1,7 +1,7 @@
 import { Canvas } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
 import { useMemo } from 'react'
-import { buildSceneSpec, floorPlaneY, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
+import { buildSceneSpec, floorPlaneY, rackDeckCenterY, SHUTTLE_TRACK_DECK_THICKNESS, worldX, worldZ, type SceneItem, type SceneRack } from '../../lib/topology3d'
 import type { TopologyPayload } from '../../types'
 import { InventoryOverlay } from '../inventory/InventoryOverlay'
 import type { CtuRoadSemanticCell, StorageAccessCandidate } from '../inventory/types'
@@ -21,7 +21,7 @@ import type {
   TrajectorySample,
 } from './types'
 
-function RackModel({ rack }: { rack: SceneRack }) {
+function RackModel({ rack, xray = false }: { rack: SceneRack; xray?: boolean }) {
   const height = rack.levels * rack.levelHeight
   const halfWidth = rack.cellsW / 2
   const halfDepth = rack.cellsD / 2
@@ -36,15 +36,21 @@ function RackModel({ rack }: { rack: SceneRack }) {
       {posts.map(([x, z]) => (
         <mesh key={`${x}:${z}`} position={[rack.x + x, rack.y + height / 2, rack.z + z]}>
           <boxGeometry args={[0.08, height, 0.08]} />
-          <meshStandardMaterial color={rack.color} metalness={0.25} roughness={0.75} />
+          <meshStandardMaterial color={rack.color} transparent={xray} opacity={xray ? 0.16 : 1} metalness={0.25} roughness={0.75} />
         </mesh>
       ))}
       {Array.from({ length: rack.levels }, (_, index) => (
-        <mesh key={index} position={[rack.x, rack.y + (index + 1) * rack.levelHeight - 0.05, rack.z]}>
-          <boxGeometry args={[rack.cellsW * 0.96, 0.06, rack.cellsD * 0.96]} />
-          <meshStandardMaterial color={rack.levelColors?.[index] ?? rack.color} transparent opacity={0.48} roughness={0.85} />
+        <mesh key={index} position={[rack.x, rackDeckCenterY(rack, index), rack.z]}>
+          <boxGeometry args={[rack.cellsW * 0.96, rack.zoneType === 'shuttle' ? SHUTTLE_TRACK_DECK_THICKNESS : 0.06, rack.cellsD * 0.96]} />
+          <meshStandardMaterial color={rack.levelColors?.[index] ?? rack.color} transparent opacity={xray ? 0.12 : 0.48} roughness={0.85} />
         </mesh>
       ))}
+      {rack.zoneType === 'shuttle' ? (
+        <mesh position={[rack.x, rack.y + height - 0.05, rack.z]}>
+          <boxGeometry args={[rack.cellsW * 0.96, 0.06, rack.cellsD * 0.96]} />
+          <meshStandardMaterial color={rack.color} transparent opacity={xray ? 0.1 : 0.48} roughness={0.85} />
+        </mesh>
+      ) : null}
     </group>
   )
 }
@@ -54,12 +60,14 @@ function StaticSceneItem({
   selectedInventoryNodeId,
   storageNodeIds,
   onInventoryNodeSelect,
+  shuttleRackXray,
 }: {
   item: SceneItem
   inventoryMode: boolean
   selectedInventoryNodeId: string | null
   storageNodeIds: ReadonlySet<string>
   onInventoryNodeSelect?: (storageNodeId: string) => void
+  shuttleRackXray: boolean
 }) {
   if (item.kind === 'slab') {
     return (
@@ -69,7 +77,7 @@ function StaticSceneItem({
       </mesh>
     )
   }
-  if (item.kind === 'rack') return <RackModel rack={item} />
+  if (item.kind === 'rack') return <RackModel rack={item} xray={shuttleRackXray && item.zoneType === 'shuttle'} />
   if (item.kind === 'tower') {
     return (
       <mesh position={[item.x, item.y + item.height / 2, item.z]}>
@@ -136,6 +144,7 @@ export function PathDemo3DScene({
   onAccessCandidateSelect,
   roadSemanticCells = [],
   shuttleVisualization,
+  shuttleRackXray = false,
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -162,6 +171,7 @@ export function PathDemo3DScene({
   onAccessCandidateSelect?: (accessCellId: string) => void
   roadSemanticCells?: CtuRoadSemanticCell[]
   shuttleVisualization?: ShuttleVisualizationState
+  shuttleRackXray?: boolean
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const storageNodeIds = useMemo(
@@ -201,6 +211,7 @@ export function PathDemo3DScene({
           selectedInventoryNodeId={selectedInventoryNodeId}
           storageNodeIds={storageNodeIds}
           onInventoryNodeSelect={onInventoryNodeSelect}
+          shuttleRackXray={shuttleRackXray}
         />
       ))}
       {inventoryMode ? (

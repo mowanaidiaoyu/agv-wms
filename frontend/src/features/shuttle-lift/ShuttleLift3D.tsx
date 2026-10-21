@@ -1,8 +1,15 @@
 import { Html, Line } from '@react-three/drei'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { InstancedMesh, Object3D } from 'three'
+import { SHUTTLE_TRACK_DECK_THICKNESS } from '../../lib/topology3d'
 import type { ShuttleLift, ShuttlePlaybackSample, ShuttleTrackNode, ShuttleVisualizationState } from './types'
 import { shuttleLiftPlatformY } from './shuttlePlayback'
+import {
+  SHUTTLE_ENDPOINT_MARKER_OFFSET,
+  SHUTTLE_PATH_LINE_OFFSET,
+  shuttleLiftShaftBounds,
+  shuttleTrackMeshCenterY,
+} from './shuttleGeometry'
 
 const SHUTTLE_LEVELS = [1, 2, 3, 4] as const
 const LEVEL_COLORS = ['#38bdf8', '#22d3ee', '#818cf8', '#c084fc'] as const
@@ -23,7 +30,7 @@ function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) 
       const mesh = meshes[levelIndex]
       if (!mesh) return
       nodes.forEach((node, index) => {
-        object.position.set(node.world_x, node.world_y + 0.025, node.world_z)
+        object.position.set(node.world_x, shuttleTrackMeshCenterY(node.world_y), node.world_z)
         object.updateMatrix()
         mesh.setMatrixAt(index, object.matrix)
       })
@@ -39,7 +46,7 @@ function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) 
           args={[undefined, undefined, nodes.length]}
           frustumCulled={false}
         >
-          <boxGeometry args={[1.58, 0.05, 1.58]} />
+          <boxGeometry args={[1.58, SHUTTLE_TRACK_DECK_THICKNESS, 1.58]} />
           <meshStandardMaterial
             color={LEVEL_COLORS[index]}
             emissive={LEVEL_COLORS[index]}
@@ -53,24 +60,27 @@ function ShuttleTrackInstances({ state }: { state: ShuttleVisualizationState }) 
     </group>
   )
 }
-function LiftModel({ lift, entrance, sample, selected }: { lift: ShuttleLift; entrance?: ShuttleTrackNode; sample: ShuttlePlaybackSample | null; selected: boolean }) {
+function LiftModel({ lift, entrances, sample, selected }: { lift: ShuttleLift; entrances: ShuttleTrackNode[]; sample: ShuttlePlaybackSample | null; selected: boolean }) {
   const entranceNodes = Object.values(lift.level_entrances)
   const active = sample?.liftId === lift.lift_id && ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift'].includes(sample.phase)
-  const baseY = 1.35
-  const topY = baseY + Math.max(0, lift.supported_levels.length - 1) * 1.4
+  const levelYs = entrances.map((node) => node.world_y)
+  const baseY = Math.min(...levelYs)
+  const topY = Math.max(...levelYs)
   const platformY = shuttleLiftPlatformY(sample, lift.lift_id, baseY)
-  if (!entrance) return null
+  const shaft = shuttleLiftShaftBounds(levelYs)
+  const entrance = entrances[0]
+  if (!entrance || !shaft || !Number.isFinite(baseY) || !Number.isFinite(topY)) return null
   const x = entrance.world_x
   const z = entrance.world_z
   const color = selected ? '#facc15' : '#f59e0b'
   return (
     <group position={[x, 0, z]}>
-      <mesh position={[0, (baseY + topY) / 2, 0]}>
-        <boxGeometry args={[1.72, topY - baseY + 1.1, 1.72]} />
+      <mesh position={[0, (shaft.bottomY + shaft.topY) / 2, 0]}>
+        <boxGeometry args={[1.72, shaft.topY - shaft.bottomY, 1.72]} />
         <meshStandardMaterial color={color} wireframe transparent opacity={selected ? 0.9 : 0.55} />
       </mesh>
       <mesh position={[0, platformY, 0]}>
-        <boxGeometry args={[1.5, 0.14, 1.5]} />
+        <boxGeometry args={[1.5, SHUTTLE_TRACK_DECK_THICKNESS, 1.5]} />
         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={active ? 0.75 : 0.28} metalness={0.42} />
       </mesh>
       <Html position={[0, topY + 0.85, 0]} center distanceFactor={18} style={{ pointerEvents: 'none' }}>
@@ -126,8 +136,8 @@ function ShuttlePath({ state }: { state: ShuttleVisualizationState }) {
           <Line
             key={`${edge.from_track_node}:${edge.to_track_node}:${index}`}
             points={[
-              [from.world_x, from.world_y + 0.16, from.world_z],
-              [to.world_x, to.world_y + 0.16, to.world_z],
+              [from.world_x, from.world_y + SHUTTLE_PATH_LINE_OFFSET, from.world_z],
+              [to.world_x, to.world_y + SHUTTLE_PATH_LINE_OFFSET, to.world_z],
             ]}
             color={vertical ? '#facc15' : '#f8fafc'}
             lineWidth={vertical ? 4 : 2.4}
@@ -137,6 +147,18 @@ function ShuttlePath({ state }: { state: ShuttleVisualizationState }) {
           />
         )
       })}
+      {state.plan.start ? (
+        <mesh position={[state.plan.start.world_x, state.plan.start.world_y + SHUTTLE_ENDPOINT_MARKER_OFFSET, state.plan.start.world_z]}>
+          <sphereGeometry args={[0.13, 12, 8]} />
+          <meshBasicMaterial color="#22c55e" />
+        </mesh>
+      ) : null}
+      {state.plan.destination ? (
+        <mesh position={[state.plan.destination.world_x, state.plan.destination.world_y + SHUTTLE_ENDPOINT_MARKER_OFFSET, state.plan.destination.world_z]}>
+          <sphereGeometry args={[0.13, 12, 8]} />
+          <meshBasicMaterial color="#ef4444" />
+        </mesh>
+      ) : null}
     </group>
   )
 }
@@ -151,7 +173,7 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
         <LiftModel
           key={lift.lift_id}
           lift={lift}
-          entrance={trackLookup.get(lift.level_entrances.L1)}
+          entrances={Object.values(lift.level_entrances).map((nodeId) => trackLookup.get(nodeId)).filter((node): node is ShuttleTrackNode => Boolean(node))}
           sample={state.sample}
           selected={state.selectedLiftId === lift.lift_id}
         />

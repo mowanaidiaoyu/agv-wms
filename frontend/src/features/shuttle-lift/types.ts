@@ -35,6 +35,7 @@ export interface ShuttleTopologyLevelsResponse {
   topology_revision: string
   topology_version: string
   config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
   data_source: 'topology_slot_aisles'
   verification_status: ShuttleVerificationStatus
   planning_enabled: boolean
@@ -71,6 +72,7 @@ export interface ShuttleTracksResponse {
   topology_id: string
   topology_revision: string
   config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
   nodes: ShuttleTrackNode[]
 }
 
@@ -78,6 +80,7 @@ export interface ShuttleLiftsResponse {
   topology_id: string
   topology_revision: string
   config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
   planning_enabled: boolean
   lifts: ShuttleLift[]
   warnings: string[]
@@ -128,6 +131,7 @@ export interface ShuttlePlanResponse {
   topology_id: string
   topology_revision: string
   config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
   algorithm: PathDemoAlgorithm
   start: ShuttleTrackNode | null
   destination: ShuttleTrackNode | null

@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from ..services.runtime import repo
 from ..services.shuttle_pathfinding import plan_shuttle_path
 from ..services.shuttle_topology import (
+    SHUTTLE_COORDINATE_CONTRACT_REVISION,
     ShuttleConfigStore,
     build_shuttle_track_graph,
     level_summaries,
@@ -42,6 +43,7 @@ def get_shuttle_levels(topology_id: str):
         "topology_revision": validation["topology_revision"],
         "topology_version": str(record["payload"].get("meta", {}).get("version", "unknown")),
         "config_revision": validation["config_revision"],
+        "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
         "verification_status": validation["verification_status"],
         "planning_enabled": validation["planning_enabled"],
         "lift_candidate_count": validation["lift_candidate_count"],
@@ -61,6 +63,7 @@ def get_shuttle_tracks(topology_id: str, level: int | None = Query(default=None,
         "topology_id": topology_id,
         "topology_revision": validation["topology_revision"],
         "config_revision": validation["config_revision"],
+        "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
         "nodes": sorted(nodes, key=lambda item: item["track_node_id"]),
     }
 
@@ -72,6 +75,7 @@ def get_shuttle_lifts(topology_id: str):
         "topology_id": topology_id,
         "topology_revision": validation["topology_revision"],
         "config_revision": validation["config_revision"],
+        "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
         "planning_enabled": validation["planning_enabled"],
         "lifts": validation["lifts"],
         "warnings": validation["warnings"],
@@ -87,6 +91,7 @@ def create_shuttle_plan(request: ShuttlePlanRequest):
             "topology_id": request.topology_id,
             "topology_revision": validation["topology_revision"],
             "config_revision": validation["config_revision"],
+            "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
             "algorithm": request.algorithm,
             "result_status": "failed",
             "failure_reason": reason,
@@ -102,5 +107,6 @@ def create_shuttle_plan(request: ShuttlePlanRequest):
         "topology_id": request.topology_id,
         "topology_revision": validation["topology_revision"],
         "config_revision": validation["config_revision"],
+        "coordinate_contract_revision": SHUTTLE_COORDINATE_CONTRACT_REVISION,
         **result,
     }

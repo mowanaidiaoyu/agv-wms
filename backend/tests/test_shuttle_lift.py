@@ -14,6 +14,10 @@ from app.api import shuttle as shuttle_api
 from app.main import app
 from app.services.shuttle_pathfinding import plan_shuttle_path
 from app.services.shuttle_topology import (
+    SHUTTLE_LEVELS,
+    SHUTTLE_LEVEL_HEIGHT,
+    SHUTTLE_RACK_TOP_Y,
+    SHUTTLE_TRACK_SURFACE_OFFSET,
     ShuttleConfigStore,
     add_lift_neighbors,
     build_shuttle_track_graph,
@@ -22,6 +26,7 @@ from app.services.shuttle_topology import (
     topology_revision,
     track_node_id,
     scan_lift_candidates,
+    shuttle_level_world_y,
     validate_shuttle_configuration,
 )
 
@@ -56,8 +61,13 @@ def test_real_666_four_level_track_counts_and_unique_ids(graph: dict):
         {"shuttle_level": 4, "node_count": 348, "component_count": 1, "component_sizes": [348]},
     ]
     assert len(graph) == len(set(graph)) == 1394
-    assert graph["L1-r100-c19"]["world_y"] != graph["L2-r100-c19"]["world_y"]
-    assert graph["L4-r100-c19"]["world_y"] == pytest.approx(5.55)
+    heights = [graph[f"L{level}-r100-c19"]["world_y"] for level in SHUTTLE_LEVELS]
+    assert heights == sorted(heights)
+    assert all(right > left for left, right in zip(heights, heights[1:]))
+    assert heights == pytest.approx([shuttle_level_world_y(level) for level in SHUTTLE_LEVELS])
+    assert heights[0] == pytest.approx(SHUTTLE_TRACK_SURFACE_OFFSET)
+    assert heights[-1] == pytest.approx(SHUTTLE_TRACK_SURFACE_OFFSET + 3 * SHUTTLE_LEVEL_HEIGHT)
+    assert heights[-1] < SHUTTLE_RACK_TOP_Y
 
 
 @pytest.mark.parametrize("level", [1, 2, 3, 4])
@@ -100,6 +110,7 @@ def test_two_lifts_are_fixed_distinct_and_program_verified(validation: dict, gra
             assert lift["level_entrances"][f"L{level}"] == node_id
             assert lift["level_exits"][f"L{level}"] == node_id
             assert len(graph[node_id]["neighbors"]) >= 2
+            assert graph[node_id]["world_y"] == pytest.approx(shuttle_level_world_y(level))
 
 
 def test_candidate_scan_uses_only_four_level_real_aisles(topology: dict, graph: dict):
@@ -184,6 +195,7 @@ def test_astar_and_dijkstra_return_same_optimal_cost(graph: dict, validation: di
     assert astar["estimated_duration_seconds"] == pytest.approx(dijkstra["estimated_duration_seconds"])
     assert astar["horizontal_distance_cells"] == pytest.approx(dijkstra["horizontal_distance_cells"])
     assert astar["chosen_lift"] == dijkstra["chosen_lift"] == "shuttle-lift-a"
+    assert astar["estimated_duration_seconds"] == pytest.approx(43.75)
 
 
 def test_lift_cost_uses_seconds_and_timeline_is_monotonic(graph: dict, validation: dict):
@@ -296,12 +308,14 @@ def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.
     client = TestClient(app)
     levels = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/levels")
     assert levels.status_code == 200
+    assert levels.json()["coordinate_contract_revision"] == "shuttle-internal-levels-v1"
     assert [item["node_count"] for item in levels.json()["levels"]] == [350, 348, 348, 348]
     lifts = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/lifts")
     assert lifts.status_code == 200
     assert [item["lift_id"] for item in lifts.json()["lifts"]] == ["shuttle-lift-a", "shuttle-lift-b"]
     tracks = client.get(f"/api/v1/shuttle/topologies/{topology['id']}/tracks?level=4")
     assert tracks.status_code == 200
+    assert tracks.json()["coordinate_contract_revision"] == "shuttle-internal-levels-v1"
     assert len(tracks.json()["nodes"]) == 348
     planned = client.post(
         "/api/v1/shuttle/plan",
@@ -315,6 +329,7 @@ def test_shuttle_api_exposes_real_tracks_lifts_and_planning(monkeypatch: pytest.
         },
     )
     assert planned.status_code == 200
+    assert planned.json()["coordinate_contract_revision"] == "shuttle-internal-levels-v1"
     assert planned.json()["result_status"] == "success"
     assert planned.json()["chosen_lift"] == "shuttle-lift-a"
 

@@ -8,6 +8,8 @@ import {
   CELL,
   buildSceneSpec,
   floorPlaneY,
+  rackDeckCenterY,
+  SHUTTLE_TRACK_DECK_THICKNESS,
   shuttleSlotEntityId,
   worldToCell,
   worldX,
@@ -123,7 +125,7 @@ function RackView({
 
     const shelves: { level: number; y: number }[] = []
     for (let level = 1; level <= rack.levels; level += 1) {
-      shelves.push({ level, y: rack.y + level * rack.levelHeight - 0.05 })
+      shelves.push({ level, y: rackDeckCenterY(rack, level - 1) })
     }
     return { posts, shelves, rackHeight }
   }, [rack])
@@ -144,11 +146,17 @@ function RackView({
         const shelfColor = highlighted || hovered ? color : (rack.levelColors?.[level - 1] ?? rack.color)
         return (
           <mesh key={`s-${rack.key}-${y}`} position={[rack.x, y, rack.z]}>
-            <boxGeometry args={[rack.cellsW * 0.96, 0.06, rack.cellsD * 0.96]} />
+            <boxGeometry args={[rack.cellsW * 0.96, rack.zoneType === 'shuttle' ? SHUTTLE_TRACK_DECK_THICKNESS : 0.06, rack.cellsD * 0.96]} />
             <meshStandardMaterial color={shelfColor} transparent opacity={shelfOpacity} roughness={0.85} />
           </mesh>
         )
       })}
+      {rack.zoneType === 'shuttle' ? (
+        <mesh position={[rack.x, rack.y + rackHeight - 0.05, rack.z]}>
+          <boxGeometry args={[rack.cellsW * 0.96, 0.06, rack.cellsD * 0.96]} />
+          <meshStandardMaterial color={rack.color} transparent opacity={shelfOpacity} roughness={0.85} />
+        </mesh>
+      ) : null}
     </group>
   )
 }

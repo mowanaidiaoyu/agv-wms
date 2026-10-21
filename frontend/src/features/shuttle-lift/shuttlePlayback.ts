@@ -5,8 +5,10 @@ import type {
   ShuttlePlanResponse,
   ShuttlePlaybackSample,
 } from './types'
+import { SHUTTLE_TRACK_DECK_THICKNESS } from '../../lib/topology3d'
+import { SHUTTLE_VEHICLE_CENTER_HEIGHT } from './shuttleGeometry'
 
-export const SHUTTLE_VEHICLE_CENTER_HEIGHT = 0.22
+export { SHUTTLE_VEHICLE_CENTER_HEIGHT } from './shuttleGeometry'
 
 function centeredWorld(node: ShuttlePathNodeStep): [number, number, number] {
   return [node.world_x, node.world_y + SHUTTLE_VEHICLE_CENTER_HEIGHT, node.world_z]
@@ -100,8 +102,8 @@ export function shuttleLiftPlatformY(
 ) {
   const liftPhases: ShuttlePlaybackSample['phase'][] = ['entering_lift', 'moving_up', 'moving_down', 'exiting_lift']
   return sample?.liftId === liftId && liftPhases.includes(sample.phase)
-    ? sample.world[1] - SHUTTLE_VEHICLE_CENTER_HEIGHT
-    : baseY
+    ? sample.world[1] - SHUTTLE_VEHICLE_CENTER_HEIGHT - SHUTTLE_TRACK_DECK_THICKNESS / 2
+    : baseY - SHUTTLE_TRACK_DECK_THICKNESS / 2
 }
 
 export const shuttleMotionLabel: Record<ShuttlePlaybackSample['phase'], string> = {
