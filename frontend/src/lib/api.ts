@@ -35,6 +35,7 @@ import type {
   ShuttleMultiScenariosResponse,
   ShuttlePlanRequest,
   ShuttlePlanResponse,
+  ShuttleStorageAuditResponse,
   ShuttleTopologyLevelsResponse,
   ShuttleTracksResponse,
 } from '../features/shuttle-lift/types'
@@ -260,6 +261,11 @@ export const api = {
   },
   getShuttleLifts(topologyId: string) {
     return request<ShuttleLiftsResponse>(`/shuttle/topologies/${encodeURIComponent(topologyId)}/lifts`)
+  },
+  getShuttleStorageAudit(topologyId: string) {
+    return request<ShuttleStorageAuditResponse>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-audit`,
+    )
   },
   planShuttlePath(payload: ShuttlePlanRequest) {
     return request<ShuttlePlanResponse>('/shuttle/plan', {

@@ -37,6 +37,7 @@ import { floorPlaneY, worldX, worldZ } from '../lib/topology3d'
 import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPanel'
 import type { StorageInventoryLocation } from '../features/inventory/types'
 import { ShuttleDemoWorkspace } from '../features/shuttle-lift/ShuttleDemoWorkspace'
+import { ShuttleStorageAuditPanel } from '../features/shuttle-lift/ShuttleStorageAuditPanel'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -155,6 +156,11 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const ctuRoadAuditQuery = useQuery({
     queryKey: ['ctu-road-audit', topologyId],
     queryFn: () => api.getCtuRoadSemanticAudit(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleStorageAuditQuery = useQuery({
+    queryKey: ['shuttle-storage-audit', topologyId],
+    queryFn: () => api.getShuttleStorageAudit(topologyId),
     enabled: workspaceMode === 'inventory' && Boolean(topologyId),
   })
   const stockedInventoryNodeIds = useMemo(
@@ -567,7 +573,7 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
                 setWorkspaceMode('inventory')
                 setRoadSelection(null)
               }}
-            >库存查看</button>
+            >库存与取货</button>
           </div>
           {workspaceMode === 'planning' ? (
             <PathDemoModeSelect value={selectedDemoMode} onChange={selectDemoMode} />
@@ -879,7 +885,13 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
           ) : workspaceMode === 'planning' ? (
             <p className="path-demo-note">正在准备四向车四层规划工作台…</p>
           ) : (
-            <StorageInventoryPanel
+            <>
+              <ShuttleStorageAuditPanel
+                audit={shuttleStorageAuditQuery.data}
+                loading={shuttleStorageAuditQuery.isLoading}
+                error={shuttleStorageAuditQuery.isError ? String(shuttleStorageAuditQuery.error) : null}
+              />
+              <StorageInventoryPanel
               topologyId={topologyId}
               selectedStorageNodeId={selectedInventoryNodeId}
               onSelectStorageNode={(storageNodeId) => {
@@ -897,7 +909,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
               ctuRoadAudit={ctuRoadAuditQuery.data}
               roadSemanticOverlayEnabled={roadSemanticOverlayEnabled}
               onToggleRoadSemanticOverlay={() => setRoadSemanticOverlayEnabled((enabled) => !enabled)}
-            />
+              />
+            </>
           )}
         </aside>
 

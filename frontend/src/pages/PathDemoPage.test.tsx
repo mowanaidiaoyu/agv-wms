@@ -103,6 +103,7 @@ vi.mock('../lib/api', () => ({
     getShuttleLevels: vi.fn(),
     getShuttleTracks: vi.fn(),
     getShuttleLifts: vi.fn(),
+    getShuttleStorageAudit: vi.fn(),
     planShuttlePath: vi.fn(),
     getShuttleMultiScenarios: vi.fn(),
     planShuttleMulti: vi.fn(),
@@ -332,6 +333,26 @@ beforeEach(() => {
   })
   vi.mocked(api.listInventoryLocations).mockResolvedValue([inventoryLocation])
   vi.mocked(api.getInventoryLocation).mockResolvedValue(inventoryLocation)
+  vi.mocked(api.getShuttleStorageAudit).mockResolvedValue({
+    topology_id: topology.id,
+    topology_version: topology.meta.version,
+    topology_revision: '2.0.0:hash',
+    contract_version: 'shuttle-storage-contract/v1',
+    audit_status: 'blocked_unverified_mappings',
+    data_source: 'topology_shuttle_slot_candidate',
+    execution_allowed: false,
+    ctu_storage_node_count: 1,
+    shuttle_storage_node_count: 0,
+    shuttle_zone_count: 0,
+    rack_level_candidate_count: 0,
+    candidates_with_adjacent_track_count: 0,
+    declared_pick_face_count: 0,
+    verified_access_mapping_count: 0,
+    formal_dropoff_count: 0,
+    blockers: ['missing Shuttle storage identity'],
+    required_human_review: ['confirm storage identity'],
+    candidate_preview: [],
+  })
   vi.mocked(api.previewSyntheticInventorySupplement).mockResolvedValue({
     topology_id: topology.id, eligible_location_count: 0, requested_location_count: 100,
     estimated_insert_count: 0, fill_all: false,
@@ -776,13 +797,14 @@ describe('PathDemoPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
 
-    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
 
     await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topology.id))
     expect(api.listInventoryLocations).toHaveBeenCalledWith(topology.id)
     await waitFor(() => expect(screen.getByText('正库存')).toBeInTheDocument())
     expect(screen.getByText('12', { selector: 'strong' })).toBeInTheDocument()
     expect(screen.getByLabelText('搜索 SKU 或库位')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '四向车货位审计' })).toHaveTextContent('执行阻塞')
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'true')
     expect(await screen.findByRole('region', { name: 'CTU 道路语义审计' })).toHaveTextContent('CTU road 1')
     fireEvent.click(screen.getByRole('button', { name: '高亮道路语义图层' }))
@@ -812,7 +834,7 @@ describe('PathDemoPage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
 
-    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('库存加载失败')
 
     fireEvent.click(screen.getByRole('tab', { name: '路径规划' }))
@@ -847,7 +869,7 @@ describe('PathDemoPage', () => {
 
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
-    fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
+    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
     fireEvent.change(screen.getByLabelText('拓扑'), { target: { value: topologyB.id } })
 
     await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topologyB.id))

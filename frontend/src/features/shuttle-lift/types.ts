@@ -86,6 +86,46 @@ export interface ShuttleLiftsResponse {
   warnings: string[]
 }
 
+export interface ShuttleStorageCandidate {
+  location_id: string
+  topology_id: string
+  topology_revision: string
+  zone_id: string
+  floor: string
+  storage_level: ShuttleLevel
+  row: number
+  col: number
+  pick_face: 'unknown'
+  access_track_node_id: null
+  potential_access_track_node_ids: string[]
+  access_mapping_status: 'unverified'
+  review_status: 'draft'
+  data_source: 'topology_shuttle_slot_candidate'
+  execution_allowed: false
+  blocker_codes: string[]
+}
+
+export interface ShuttleStorageAuditResponse {
+  topology_id: string
+  topology_version: string
+  topology_revision: string
+  contract_version: 'shuttle-storage-contract/v1'
+  audit_status: 'blocked_unverified_mappings'
+  data_source: 'topology_shuttle_slot_candidate'
+  execution_allowed: false
+  ctu_storage_node_count: number
+  shuttle_storage_node_count: number
+  shuttle_zone_count: number
+  rack_level_candidate_count: number
+  candidates_with_adjacent_track_count: number
+  declared_pick_face_count: number
+  verified_access_mapping_count: number
+  formal_dropoff_count: number
+  blockers: string[]
+  required_human_review: string[]
+  candidate_preview: ShuttleStorageCandidate[]
+}
+
 export interface ShuttlePlanRequest {
   topology_id: string
   start_track_node: string

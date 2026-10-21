@@ -6,6 +6,10 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..services.runtime import repo
 from ..services.shuttle_pathfinding import plan_shuttle_path
+from ..services.shuttle_storage_audit import (
+    audit_shuttle_storage,
+    page_shuttle_storage_candidates,
+)
 from ..services.shuttle_multi_planner import (
     ShuttleMultiPlanningError,
     build_shuttle_multi_scenarios,
@@ -30,6 +34,10 @@ from ..shuttle_multi_schemas import (
     ShuttleMultiPlanRequest,
     ShuttleMultiPlanResponse,
     ShuttleMultiScenariosResponse,
+)
+from ..shuttle_storage_schemas import (
+    ShuttleStorageAuditResponse,
+    ShuttleStorageCandidatePage,
 )
 
 
@@ -93,6 +101,36 @@ def get_shuttle_lifts(topology_id: str):
         "lifts": validation["lifts"],
         "warnings": validation["warnings"],
     }
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-audit",
+    response_model=ShuttleStorageAuditResponse,
+)
+def get_shuttle_storage_audit(topology_id: str):
+    record, _, _ = _context(topology_id)
+    return audit_shuttle_storage(record["payload"])
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-candidates",
+    response_model=ShuttleStorageCandidatePage,
+)
+def get_shuttle_storage_candidates(
+    topology_id: str,
+    level: int | None = Query(default=None, ge=1, le=4),
+    zone_id: str | None = Query(default=None, min_length=1),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    record, _, _ = _context(topology_id)
+    return page_shuttle_storage_candidates(
+        record["payload"],
+        level=level,
+        zone_id=zone_id,
+        offset=offset,
+        limit=limit,
+    )
 
 
 @router.post("/plan", response_model=ShuttlePlanResponse)
