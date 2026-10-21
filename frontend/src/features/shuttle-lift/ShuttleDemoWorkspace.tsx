@@ -3,6 +3,8 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import type { StoredRecord, TopologyPayload } from '../../types'
 import { api } from '../../lib/api'
 import { PathPlaybackController } from '../path-demo/PathPlaybackController'
+import { PathDemoModeSelect } from '../path-demo/PathDemoModeSelect'
+import type { PathDemoMode } from '../path-demo/PathDemoModeSelect'
 import type { CameraActionRequest, CameraViewMode } from '../path-demo/cameraControls'
 import { usePathPlayback } from '../path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../path-demo/types'
@@ -15,7 +17,6 @@ const PathDemo3DScene = lazy(() =>
 )
 
 type WorkspaceMode = 'planning' | 'inventory'
-type VehicleType = 'ctu' | 'shuttle'
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
 const INTERNAL_HEIGHT_CONTRACT_REVISION = 'shuttle-internal-levels-v1'
@@ -36,13 +37,15 @@ export function ShuttleDemoWorkspace({
   topologies,
   onTopologyChange,
   onWorkspaceModeChange,
-  onVehicleTypeChange,
+  demoMode,
+  onDemoModeChange,
 }: {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
   onTopologyChange: (topologyId: string) => void
   onWorkspaceModeChange: (mode: WorkspaceMode) => void
-  onVehicleTypeChange: (vehicleType: VehicleType) => void
+  demoMode: PathDemoMode
+  onDemoModeChange: (mode: PathDemoMode) => void
 }) {
   const topologyId = topologyRecord.id
   const topologyVersion = topologyRecord.payload.meta.version
@@ -241,12 +244,16 @@ export function ShuttleDemoWorkspace({
         </label>
         <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
           <button type="button" role="tab" aria-selected className="active">路径规划</button>
-          <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); onWorkspaceModeChange('inventory') }}>库存查看</button>
+          <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); playback.reset(); onWorkspaceModeChange('inventory') }}>库存查看</button>
         </div>
-        <section className="path-demo-secondary-entry" aria-label="CTU 次级入口">
-          <div><strong>四向车路径规划</strong><span>当前主工作台 · 同层与跨层自动判断</span></div>
-          <button type="button" className="ghost-button" onClick={() => { invalidatePlan(); onVehicleTypeChange('ctu') }}>进入 CTU 平面道路与多车实验</button>
-        </section>
+        <PathDemoModeSelect
+          value={demoMode}
+          onChange={(nextMode) => {
+            invalidatePlan()
+            playback.reset()
+            onDemoModeChange(nextMode)
+          }}
+        />
 
         <section className="shuttle-contract-card" aria-label="四向车轨道契约">
           <strong>四层真实轨道 · 双提升机</strong>

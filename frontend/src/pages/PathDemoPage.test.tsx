@@ -310,7 +310,7 @@ function renderDefaultPage() {
 }
 
 async function enterCustomModeWithSixVehicles() {
-  fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+  fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
   const addButton = await screen.findByRole('button', { name: '添加车辆' })
   await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
   fireEvent.click(addButton)
@@ -385,12 +385,42 @@ beforeEach(() => {
   vi.mocked(pathDemoApi.planMulti).mockResolvedValue(multiPlan)
 })
 describe('PathDemoPage', () => {
-  it('opens the unified planning page on the Shuttle workspace by default and keeps CTU as a secondary entry', async () => {
+  it('opens the unified planning page on the Shuttle workspace by default without a secondary CTU entry', async () => {
     renderDefaultPage()
 
     expect(await screen.findByText('四向车四层轨道与双提升机演示')).toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: '进入 CTU 平面道路与多车实验' })).toBeInTheDocument()
+    expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_single')
+    expect(screen.getByRole('option', { name: 'CTU 单车轨迹' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'CTU 预设多车场景（A/B/C）' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'CTU 自定义多车（1–6 辆）' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
     expect(screen.queryByRole('tablist', { name: '车辆类型' })).not.toBeInTheDocument()
+    expect(pathDemoApi.options).not.toHaveBeenCalled()
+  })
+
+  it('switches directly among Shuttle, CTU single, preset, and custom panels while retaining valid CTU input', async () => {
+    renderDefaultPage()
+    const mode = await screen.findByLabelText('演示模式')
+
+    fireEvent.change(mode, { target: { value: 'ctu_single' } })
+    expect(await screen.findByLabelText('起点（可行驶道路）')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
+    const scenario = await screen.findByRole('combobox', { name: '冲突演示场景' })
+    await waitFor(() => expect(scenario).toHaveValue('parallel'))
+
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
+    expect(await screen.findByText('车辆配置（3/6）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '添加车辆' }))
+    expect(await screen.findByText('车辆配置（4/6）')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_single' } })
+    expect(await screen.findByText('四层真实轨道 · 双提升机')).toBeInTheDocument()
+    expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_single')
+
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
+    expect(await screen.findByText('车辆配置（4/6）')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
   })
 
   it('leaves the loading state and renders 666 after the topology request succeeds with Shuttle mode installed', async () => {
@@ -399,7 +429,8 @@ describe('PathDemoPage', () => {
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
     expect(within(screen.getByRole('tablist', { name: '工作台模式' })).getAllByRole('tab')).toHaveLength(2)
     expect(screen.getByRole('tab', { name: '路径规划' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('button', { name: '返回四向车路径规划' })).toBeInTheDocument()
+    expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single')
+    expect(screen.queryByRole('button', { name: '返回四向车路径规划' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
@@ -434,11 +465,11 @@ describe('PathDemoPage', () => {
     renderPage()
     await screen.findByTestId('path-demo-scene')
 
-    fireEvent.click(screen.getByRole('button', { name: '返回四向车路径规划' }))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_single' } })
     expect(await screen.findByText(/shuttle unavailable/)).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
 
-    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_single' } })
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
@@ -539,7 +570,7 @@ describe('PathDemoPage', () => {
   it('plans and renders three backend-scheduled vehicles with selectable follow targets', async () => {
     renderPage()
     await waitFor(() => expect(screen.getByLabelText('终点（可行驶道路）')).toHaveValue(cells[2].id))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     await waitFor(() => expect(screen.getByRole('combobox', { name: '冲突演示场景' })).toHaveValue('parallel'))
     expect(screen.getByRole('option', { name: '场景 B：交叉节点竞争' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: '场景 C：相向边交换风险' })).toBeInTheDocument()
@@ -562,8 +593,8 @@ describe('PathDemoPage', () => {
 
   it('shows the real scene-B node event, seeks before it, and focuses its backend cell', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     const scenarioSelect = await screen.findByRole('combobox', { name: '冲突演示场景' })
     await waitFor(() => expect(scenarioSelect).toHaveValue('parallel'))
     fireEvent.change(scenarioSelect, { target: { value: 'node-conflict' } })
@@ -591,8 +622,8 @@ describe('PathDemoPage', () => {
   it('shows a multi-vehicle no-solution response without starting playback', async () => {
     vi.mocked(pathDemoApi.planMulti).mockRejectedValueOnce(new Error('No conflict-free space-time path found'))
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     const planButton = screen.getByRole('button', { name: '开始多车规划' })
     await waitFor(() => expect(planButton).toBeEnabled())
     fireEvent.click(planButton)
@@ -602,8 +633,8 @@ describe('PathDemoPage', () => {
 
   it('adds and deletes custom vehicles without affecting the preset list', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
     const addButton = await screen.findByRole('button', { name: '添加车辆' })
     await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
     fireEvent.click(addButton)
@@ -617,15 +648,15 @@ describe('PathDemoPage', () => {
     fireEvent.click(deleteButtons.at(-1)!)
     expect(screen.getByText('车辆配置（5/6）')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     expect(await screen.findByRole('combobox', { name: '冲突演示场景' })).toHaveValue('parallel')
     expect(screen.getByText('场景 A：无冲突并行运行')).toBeInTheDocument()
   })
 
   it('selects a verified road cell for the active vehicle and exposes endpoint markers', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'custom' } })
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_custom' } })
     await waitFor(() => expect(screen.getByText('车辆配置（3/6）')).toBeInTheDocument())
     fireEvent.click(screen.getAllByRole('button', { name: '图选起点' })[0])
     expect(screen.getByRole('status')).toHaveTextContent('正在为 CTU-01 选择起点')
@@ -640,12 +671,12 @@ describe('PathDemoPage', () => {
     let resolvePlan: ((value: typeof multiPlan) => void) | undefined
     vi.mocked(pathDemoApi.planMulti).mockImplementationOnce(() => new Promise((resolve) => { resolvePlan = resolve }))
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'preset' } })
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     const planButton = await screen.findByRole('button', { name: '开始多车规划' })
     await waitFor(() => expect(planButton).toBeEnabled())
     fireEvent.click(planButton)
-    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'single' } })
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_single' } })
     resolvePlan?.(multiPlan)
     await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', ''))
     expect(screen.getByText('未规划')).toBeInTheDocument()
@@ -653,7 +684,7 @@ describe('PathDemoPage', () => {
 
   it('keeps CTU-06 selected and locates its configured start before planning', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
     await enterCustomModeWithSixVehicles()
 
     const vehicleSelect = screen.getByLabelText('选择跟随车辆')
@@ -690,7 +721,7 @@ describe('PathDemoPage', () => {
   it('switches FOLLOW from CTU-01 to CTU-06 and CTU-03 using planned samples', async () => {
     vi.mocked(pathDemoApi.planMulti).mockResolvedValueOnce(sixVehiclePlan)
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
     await enterCustomModeWithSixVehicles()
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
 
@@ -725,7 +756,7 @@ describe('PathDemoPage', () => {
 
   it('disables unplanned locate when the selected custom vehicle has no legal start', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
     await enterCustomModeWithSixVehicles()
     fireEvent.change(screen.getByLabelText('CTU-06 起点'), { target: { value: '' } })
     expect(screen.getByLabelText('选择跟随车辆')).toHaveValue('CTU-06')
@@ -737,7 +768,7 @@ describe('PathDemoPage', () => {
     let resolvePlan: ((value: typeof sixVehiclePlan) => void) | undefined
     vi.mocked(pathDemoApi.planMulti).mockImplementationOnce(() => new Promise((resolve) => { resolvePlan = resolve }))
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
     await enterCustomModeWithSixVehicles()
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
     fireEvent.change(screen.getByLabelText('CTU-01 优先级'), { target: { value: '8' } })
@@ -750,7 +781,7 @@ describe('PathDemoPage', () => {
 
   it('shares the selected topology with inventory mode and locates real storage and access coordinates', async () => {
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
 
     fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
 
@@ -786,7 +817,7 @@ describe('PathDemoPage', () => {
     vi.mocked(api.getInventorySummary).mockRejectedValueOnce(new Error('summary unavailable'))
     vi.mocked(api.listInventoryLocations).mockRejectedValueOnce(new Error('locations unavailable'))
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
 
     fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('库存加载失败')
@@ -822,7 +853,7 @@ describe('PathDemoPage', () => {
     ))
 
     renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('single'))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
     fireEvent.click(screen.getByRole('tab', { name: '库存查看' }))
     fireEvent.change(screen.getByLabelText('拓扑'), { target: { value: topologyB.id } })
 

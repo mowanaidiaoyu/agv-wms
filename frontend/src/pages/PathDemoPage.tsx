@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
+import { PathDemoModeSelect } from '../features/path-demo/PathDemoModeSelect'
+import type { PathDemoMode } from '../features/path-demo/PathDemoModeSelect'
 import { ConflictAvoidancePanel } from '../features/path-demo/ConflictAvoidancePanel'
 import {
   conflictSeekTime,
@@ -178,12 +180,12 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const optionsQuery = useQuery({
     queryKey: ['path-demo-options', topologyId],
     queryFn: () => pathDemoApi.options(topologyId),
-    enabled: Boolean(topologyId),
+    enabled: workspaceMode === 'planning' && vehicleType === 'ctu' && Boolean(topologyId),
   })
   const multiScenariosQuery = useQuery({
     queryKey: ['path-demo-multi-scenarios', topologyId],
     queryFn: () => pathDemoApi.multiScenarios(topologyId),
-    enabled: Boolean(topologyId) && demoMode !== 'single',
+    enabled: workspaceMode === 'planning' && vehicleType === 'ctu' && Boolean(topologyId) && demoMode !== 'single',
   })
   const roadCells = useMemo(() => multiScenariosQuery.data?.road_cells ?? [], [multiScenariosQuery.data])
   const activeVehicles = useMemo(
@@ -473,6 +475,24 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
   const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
   const isShuttlePlanning = workspaceMode === 'planning' && vehicleType === 'shuttle'
+  const selectedDemoMode: PathDemoMode = vehicleType === 'shuttle'
+    ? 'shuttle_single'
+    : demoMode === 'single'
+      ? 'ctu_single'
+      : demoMode === 'preset'
+        ? 'ctu_multi_preset'
+        : 'ctu_multi_custom'
+  const selectDemoMode = (nextMode: PathDemoMode) => {
+    invalidatePlan()
+    setRoadSelection(null)
+    setSelectionError('')
+    if (nextMode === 'shuttle_single') {
+      setVehicleType('shuttle')
+      return
+    }
+    setVehicleType('ctu')
+    setDemoMode(nextMode === 'ctu_single' ? 'single' : nextMode === 'ctu_multi_preset' ? 'preset' : 'custom')
+  }
 
   return (
     <section className="path-demo-page">
@@ -501,10 +521,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
             invalidatePlan()
           }}
           onWorkspaceModeChange={setWorkspaceMode}
-          onVehicleTypeChange={(nextVehicleType) => {
-            setVehicleType(nextVehicleType)
-            setRoadSelection(null)
-          }}
+          demoMode={selectedDemoMode}
+          onDemoModeChange={selectDemoMode}
         />
       ) : (
       <div className="path-demo-layout">
@@ -550,30 +568,10 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
             >库存查看</button>
           </div>
           {workspaceMode === 'planning' ? (
-            <section className="path-demo-secondary-entry" aria-label="CTU 规划入口">
-              <div><strong>CTU 平面道路与多车实验</strong><span>次级工作台 · 保留单车、多车与冲突避让</span></div>
-              <button type="button" className="ghost-button" onClick={() => { invalidatePlan(); setVehicleType('shuttle'); setRoadSelection(null) }}>返回四向车路径规划</button>
-            </section>
+            <PathDemoModeSelect value={selectedDemoMode} onChange={selectDemoMode} />
           ) : null}
           {workspaceMode === 'planning' && vehicleType === 'ctu' ? (
             <>
-          <label>
-            演示模式
-            <select
-              value={demoMode}
-              onChange={(event) => {
-                const nextMode = event.target.value as DemoMode
-                setDemoMode(nextMode)
-                setRoadSelection(null)
-                setSelectionError('')
-                invalidatePlan()
-              }}
-            >
-              <option value="single">单车轨迹</option>
-              <option value="preset">预设多车场景（A/B/C）</option>
-              <option value="custom">自定义多车（1–6 辆）</option>
-            </select>
-          </label>
           <label>
             路径算法
             <select value={algorithm} onChange={(event) => { setAlgorithm(event.target.value as PathDemoAlgorithm); invalidatePlan() }}>

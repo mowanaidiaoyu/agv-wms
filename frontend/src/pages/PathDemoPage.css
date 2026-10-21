@@ -109,19 +109,6 @@
   background: rgba(8, 145, 178, 0.28);
 }
 
-.path-demo-secondary-entry {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #334155;
-  border-radius: 9px;
-  background: rgba(15, 23, 42, 0.72);
-}
-.path-demo-secondary-entry div { display: grid; gap: 3px; }
-.path-demo-secondary-entry strong { color: #e2e8f0; font-size: 13px; }
-.path-demo-secondary-entry span { color: #94a3b8; font-size: 11px; }
-.path-demo-secondary-entry button { justify-content: center; }
-
 .path-demo-playback-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

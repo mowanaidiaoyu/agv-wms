@@ -66,9 +66,16 @@ const plan: ShuttlePlanResponse = {
   result_status: 'success', failure_reason: null, timing_source: 'synthetic_demo', cost_contract: { time_unit: 'seconds' },
 }
 
-function renderWorkspace(onMode = vi.fn(), onVehicleType = vi.fn()) {
+function renderWorkspace(onMode = vi.fn(), onDemoMode = vi.fn()) {
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-    <ShuttleDemoWorkspace topologyRecord={record} topologies={[record]} onTopologyChange={vi.fn()} onWorkspaceModeChange={onMode} onVehicleTypeChange={onVehicleType} />
+    <ShuttleDemoWorkspace
+      topologyRecord={record}
+      topologies={[record]}
+      onTopologyChange={vi.fn()}
+      onWorkspaceModeChange={onMode}
+      demoMode="shuttle_single"
+      onDemoModeChange={onDemoMode}
+    />
   </QueryClientProvider>)
 }
 
@@ -96,6 +103,8 @@ describe('ShuttleDemoWorkspace', () => {
   it('shows four real levels, fixed lifts, and the isolated shuttle scene', async () => {
     renderWorkspace()
     expect(await screen.findByText('四层真实轨道 · 双提升机')).toBeInTheDocument()
+    expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_single')
+    expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-track-count', '12'))
     expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-lift-count', '1')
     expect(screen.getAllByRole('option', { name: 'L4' })).toHaveLength(2)
@@ -149,33 +158,33 @@ describe('ShuttleDemoWorkspace', () => {
     expect(api.planShuttlePath).not.toHaveBeenCalled()
   })
 
-  it('blocks execution when verification is not valid and can return to CTU modes', async () => {
+  it('blocks execution when verification is not valid and can switch directly to a CTU mode', async () => {
     vi.mocked(api.getShuttleLevels).mockResolvedValueOnce({
       topology_id: topology.id, topology_name: '666', topology_revision: 'stale', topology_version: '2.0.0', config_revision: 'v0', coordinate_contract_revision: 'shuttle-internal-levels-v1',
       data_source: 'topology_slot_aisles', verification_status: 'topology_version_mismatch', planning_enabled: false, levels: [], warnings: ['版本不匹配'],
       lift_candidate_count: 0, lift_selection_basis: [],
     })
     const onMode = vi.fn()
-    const onVehicleType = vi.fn()
-    renderWorkspace(onMode, onVehicleType)
+    const onDemoMode = vi.fn()
+    renderWorkspace(onMode, onDemoMode)
     expect(await screen.findByText('当前轨道或提升机配置未通过程序验证，已禁止运行。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
-    expect(onVehicleType).toHaveBeenCalledWith('ctu')
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_single' } })
+    expect(onDemoMode).toHaveBeenCalledWith('ctu_single')
   })
 
   it('does not let a late Shuttle planning response survive switching back to CTU', async () => {
     let resolvePlan!: (value: ShuttlePlanResponse) => void
     vi.mocked(api.planShuttlePath).mockReturnValueOnce(new Promise((resolve) => { resolvePlan = resolve }))
-    const onVehicleType = vi.fn()
-    renderWorkspace(vi.fn(), onVehicleType)
+    const onDemoMode = vi.fn()
+    renderWorkspace(vi.fn(), onDemoMode)
     await waitFor(() => expect(screen.getByLabelText('四向车终点轨道节点')).toHaveValue('L4-r100-c51'))
 
     fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
-    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'ctu_multi_preset' } })
     resolvePlan(plan)
 
-    await waitFor(() => expect(onVehicleType).toHaveBeenCalledWith('ctu'))
+    await waitFor(() => expect(onDemoMode).toHaveBeenCalledWith('ctu_multi_preset'))
     expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-plan', '')
   })
 
