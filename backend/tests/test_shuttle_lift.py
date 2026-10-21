@@ -258,6 +258,18 @@ def test_versioned_configuration_reloads_without_mutating_666(tmp_path: Path, to
     assert hashlib.sha256(TOPOLOGY_PATH.read_bytes()).hexdigest() == before
 
 
+def test_v2_configuration_takes_precedence_when_legacy_v1_also_exists(tmp_path: Path, topology: dict):
+    root = tmp_path / "shuttle_configs"
+    root.mkdir()
+    (root / "topology-6ceb4920.shuttle-v1.json").write_bytes(LEGACY_CONFIG_PATH.read_bytes())
+    (root / "topology-6ceb4920.shuttle-v2.json").write_bytes(CONFIG_PATH.read_bytes())
+
+    loaded = ShuttleConfigStore(root).load(topology["id"])
+
+    assert loaded is not None
+    assert loaded["config_revision"] == "shuttle-4l-lift-v2"
+
+
 def test_legacy_three_level_configuration_is_loaded_and_safely_derived_to_four_levels(
     tmp_path: Path,
     topology: dict,

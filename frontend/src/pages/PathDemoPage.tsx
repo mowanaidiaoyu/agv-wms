@@ -82,12 +82,12 @@ function normalizeVehicles(vehicles: MultiPathVehicleRequest[]): MultiPathVehicl
   }))
 }
 
-export function PathDemoPage() {
+export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicleType?: VehicleType } = {}) {
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const [topologyId, setTopologyId] = useState('')
   const [demoMode, setDemoMode] = useState<DemoMode>('single')
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
-  const [vehicleType, setVehicleType] = useState<VehicleType>('ctu')
+  const [vehicleType, setVehicleType] = useState<VehicleType>(initialVehicleType)
   const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
   const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
   const [roadSemanticOverlayEnabled, setRoadSemanticOverlayEnabled] = useState(false)
@@ -550,10 +550,10 @@ export function PathDemoPage() {
             >库存查看</button>
           </div>
           {workspaceMode === 'planning' ? (
-            <div className="path-demo-vehicle-type-tabs" role="tablist" aria-label="车辆类型">
-              <button type="button" role="tab" aria-selected={vehicleType === 'ctu'} className={vehicleType === 'ctu' ? 'active' : ''} onClick={() => setVehicleType('ctu')}>CTU</button>
-              <button type="button" role="tab" aria-selected={vehicleType === 'shuttle'} className={vehicleType === 'shuttle' ? 'active' : ''} onClick={() => { invalidatePlan(); setVehicleType('shuttle'); setRoadSelection(null) }}>四向车 Shuttle</button>
-            </div>
+            <section className="path-demo-secondary-entry" aria-label="CTU 规划入口">
+              <div><strong>CTU 平面道路与多车实验</strong><span>次级工作台 · 保留单车、多车与冲突避让</span></div>
+              <button type="button" className="ghost-button" onClick={() => { invalidatePlan(); setVehicleType('shuttle'); setRoadSelection(null) }}>返回四向车路径规划</button>
+            </section>
           ) : null}
           {workspaceMode === 'planning' && vehicleType === 'ctu' ? (
             <>

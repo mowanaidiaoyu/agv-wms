@@ -36,7 +36,7 @@ const makeNode = (level: ShuttleLevel, col: number): ShuttleTrackNode => ({
 const tracks = [1, 2, 3, 4].flatMap((level) => [7, 19, 51].map((col) => makeNode(level as ShuttleLevel, col)))
 const lift: ShuttleLift = {
   lift_id: 'shuttle-lift-a', label: 'Lift-A', topology_id: topology.id,
-  topology_revision: '2.0.0:hash', config_revision: 'v1', zone_id: 'zone-shuttle', row: 100, col: 19,
+  topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', zone_id: 'zone-shuttle', row: 100, col: 19,
   supported_levels: [1, 2, 3, 4], level_entrances: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19', L4: 'L4-r100-c19' },
   level_exits: { L1: 'L1-r100-c19', L2: 'L2-r100-c19', L3: 'L3-r100-c19', L4: 'L4-r100-c19' },
   capacity: 1, enter_time_seconds: 1, travel_time_per_level_seconds: 3, exit_time_seconds: 1,
@@ -44,7 +44,7 @@ const lift: ShuttleLift = {
   verification_status: 'program_verified_pending_human', validation_evidence: ['real aisles'],
 }
 const plan: ShuttlePlanResponse = {
-  topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', algorithm: 'astar',
+  topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', algorithm: 'astar',
   start: tracks[0], destination: tracks[11], chosen_lift: lift.lift_id,
   path_nodes: [
     { ...tracks[0], arrival_seconds: 0, phase: 'start' },
@@ -71,13 +71,18 @@ function renderWorkspace(onMode = vi.fn(), onVehicleType = vi.fn()) {
 beforeEach(() => {
   useShuttleWorkspaceStore.setState({ drafts: {} })
   vi.mocked(api.getShuttleLevels).mockResolvedValue({
-    topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0', config_revision: 'v1',
+    topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0', config_revision: 'shuttle-4l-lift-v2',
     data_source: 'topology_slot_aisles', verification_status: 'program_verified_pending_human', planning_enabled: true,
     lift_candidate_count: 5, lift_selection_basis: ['north/south coverage'],
     levels: [1, 2, 3, 4].map((level) => ({ shuttle_level: level as ShuttleLevel, node_count: 3, component_count: 1, component_sizes: [3] })), warnings: ['人工复核'],
   })
-  vi.mocked(api.getShuttleTracks).mockResolvedValue({ topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', nodes: tracks })
-  vi.mocked(api.getShuttleLifts).mockResolvedValue({ topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'v1', planning_enabled: true, lifts: [lift], warnings: [] })
+  vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => ({
+    topology_id: topology.id,
+    topology_revision: '2.0.0:hash',
+    config_revision: 'shuttle-4l-lift-v2',
+    nodes: tracks.filter((node) => node.shuttle_level === level),
+  }))
+  vi.mocked(api.getShuttleLifts).mockResolvedValue({ topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', planning_enabled: true, lifts: [lift], warnings: [] })
   vi.mocked(api.planShuttlePath).mockResolvedValue(plan)
 })
 
@@ -134,7 +139,7 @@ describe('ShuttleDemoWorkspace', () => {
     renderWorkspace(onMode, onVehicleType)
     expect(await screen.findByText('当前轨道或提升机配置未通过程序验证，已禁止运行。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
+    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
     expect(onVehicleType).toHaveBeenCalledWith('ctu')
   })
 
@@ -146,7 +151,7 @@ describe('ShuttleDemoWorkspace', () => {
     await waitFor(() => expect(screen.getByLabelText('四向车终点轨道节点')).toHaveValue('L4-r100-c51'))
 
     fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
-    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
+    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
     resolvePlan(plan)
 
     await waitFor(() => expect(onVehicleType).toHaveBeenCalledWith('ctu'))
@@ -167,5 +172,52 @@ describe('ShuttleDemoWorkspace', () => {
     expect(screen.getByLabelText('四向车终点层')).toHaveValue('2')
     expect(screen.getByLabelText('四向车路径算法')).toHaveValue('dijkstra')
     await waitFor(() => expect(screen.getByLabelText('四向车起点轨道节点')).toHaveValue('L4-r100-c7'))
+  })
+
+  it('loads a real L4 endpoint list and submits the selected L4 node', async () => {
+    renderWorkspace()
+
+    fireEvent.change(await screen.findByLabelText('四向车终点层'), { target: { value: '4' } })
+    const endpoint = await screen.findByLabelText('四向车终点轨道节点')
+    await waitFor(() => expect(endpoint).toHaveValue('L4-r100-c51'))
+    expect(api.getShuttleTracks).toHaveBeenCalledWith(topology.id, 4)
+    expect(Array.from((endpoint as HTMLSelectElement).options).map((option) => option.value)).toEqual([
+      'L4-r100-c7', 'L4-r100-c19', 'L4-r100-c51',
+    ])
+
+    fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
+    await waitFor(() => expect(api.planShuttlePath).toHaveBeenCalledWith(expect.objectContaining({
+      end_level: 4,
+      end_track_node: 'L4-r100-c51',
+    })))
+  })
+
+  it('shows an explicit empty option instead of a blank select when L4 has no nodes', async () => {
+    vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => ({
+      topology_id: topology.id,
+      topology_revision: '2.0.0:hash',
+      config_revision: 'shuttle-4l-lift-v2',
+      nodes: level === 4 ? [] : tracks.filter((node) => node.shuttle_level === level),
+    }))
+
+    renderWorkspace()
+
+    expect(await screen.findByRole('alert', { name: '' })).toHaveTextContent('L4 未返回可用轨道节点')
+    expect(screen.getByLabelText('四向车终点轨道节点')).toHaveDisplayValue('当前层无可用轨道节点')
+    expect(screen.getByLabelText('四向车终点轨道节点')).toBeDisabled()
+    expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
+  })
+
+  it('rejects a stale three-level service response with restart guidance', async () => {
+    vi.mocked(api.getShuttleLevels).mockResolvedValueOnce({
+      topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0', config_revision: 'shuttle-3l-lift-v1',
+      data_source: 'topology_slot_aisles', verification_status: 'program_verified_pending_human', planning_enabled: true,
+      lift_candidate_count: 5, lift_selection_basis: [], levels: [], warnings: [],
+    })
+
+    renderWorkspace()
+
+    expect(await screen.findByText(/检测到旧版 Shuttle 服务/)).toHaveTextContent('shuttle-3l-lift-v1')
+    expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
   })
 })

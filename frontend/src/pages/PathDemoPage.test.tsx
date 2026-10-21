@@ -295,6 +295,14 @@ const sixVehiclePlan = {
 function renderPage() {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <PathDemoPage initialVehicleType="ctu" />
+    </QueryClientProvider>,
+  )
+}
+
+function renderDefaultPage() {
+  return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <PathDemoPage />
     </QueryClientProvider>,
   )
@@ -352,20 +360,45 @@ beforeEach(() => {
     trial_area: null, warnings: ['颜色不授予权限'], saved_draft_count: 0,
   })
   vi.mocked(api.listCtuRoadDrafts).mockResolvedValue([])
+  vi.mocked(api.getShuttleLevels).mockResolvedValue({
+    topology_id: topology.id, topology_name: '666', topology_revision: '2.0.0:hash', topology_version: '2.0.0',
+    config_revision: 'shuttle-4l-lift-v2', data_source: 'topology_slot_aisles',
+    verification_status: 'program_verified_pending_human', planning_enabled: true,
+    lift_candidate_count: 2, lift_selection_basis: [],
+    levels: [1, 2, 3, 4].map((level) => ({ shuttle_level: level as 1 | 2 | 3 | 4, node_count: 1, component_count: 1, component_sizes: [1] })), warnings: [],
+  })
+  vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => ({
+    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2',
+    nodes: [{
+      topology_id: topology.id, zone_id: 'zone-shuttle', track_node_id: `L${level}-r100-c7`, shuttle_level: level!,
+      row: 100, col: 7, world_x: 7, world_y: level! * 1.4 - 0.05, world_z: 1,
+      track_type: 'straight', traversable: true, neighbors: [],
+    }],
+  }))
+  vi.mocked(api.getShuttleLifts).mockResolvedValue({
+    topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', planning_enabled: true, lifts: [], warnings: [],
+  })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
   vi.mocked(pathDemoApi.multiScenarios).mockResolvedValue(multiScenarios)
   vi.mocked(pathDemoApi.planMulti).mockResolvedValue(multiPlan)
 })
 describe('PathDemoPage', () => {
+  it('opens the unified planning page on the Shuttle workspace by default and keeps CTU as a secondary entry', async () => {
+    renderDefaultPage()
+
+    expect(await screen.findByText('四向车四层轨道与双提升机演示')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '进入 CTU 平面道路与多车实验' })).toBeInTheDocument()
+    expect(screen.queryByRole('tablist', { name: '车辆类型' })).not.toBeInTheDocument()
+  })
+
   it('leaves the loading state and renders 666 after the topology request succeeds with Shuttle mode installed', async () => {
     renderPage()
 
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
     expect(within(screen.getByRole('tablist', { name: '工作台模式' })).getAllByRole('tab')).toHaveLength(2)
     expect(screen.getByRole('tab', { name: '路径规划' })).toHaveAttribute('aria-selected', 'true')
-    expect(within(screen.getByRole('tablist', { name: '车辆类型' })).getAllByRole('tab')).toHaveLength(2)
-    expect(screen.getByRole('tab', { name: 'CTU' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('button', { name: '返回四向车路径规划' })).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
@@ -400,11 +433,11 @@ describe('PathDemoPage', () => {
     renderPage()
     await screen.findByTestId('path-demo-scene')
 
-    fireEvent.click(screen.getByRole('tab', { name: '四向车 Shuttle' }))
+    fireEvent.click(screen.getByRole('button', { name: '返回四向车路径规划' }))
     expect(await screen.findByText(/shuttle unavailable/)).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'CTU' }))
+    fireEvent.click(screen.getByRole('button', { name: '进入 CTU 平面道路与多车实验' }))
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)

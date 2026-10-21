@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import type { StoredRecord, TopologyPayload } from '../../types'
 import { api } from '../../lib/api'
 import { PathPlaybackController } from '../path-demo/PathPlaybackController'
@@ -17,6 +17,7 @@ const PathDemo3DScene = lazy(() =>
 type WorkspaceMode = 'planning' | 'inventory'
 type VehicleType = 'ctu' | 'shuttle'
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
+const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
 
 function nodesAtLevel(nodes: ShuttleTrackNode[], level: ShuttleLevel) {
   return nodes.filter((node) => node.shuttle_level === level)
@@ -50,13 +51,19 @@ export function ShuttleDemoWorkspace({
   const levelsQuery = useQuery({
     queryKey: ['shuttle-levels', topologyId], queryFn: () => api.getShuttleLevels(topologyId),
   })
-  const tracksQuery = useQuery({
-    queryKey: ['shuttle-tracks', topologyId], queryFn: () => api.getShuttleTracks(topologyId),
+  const trackQueries = useQueries({
+    queries: SHUTTLE_LEVELS.map((level) => ({
+      queryKey: ['shuttle-tracks', topologyId, level],
+      queryFn: () => api.getShuttleTracks(topologyId, level),
+    })),
   })
   const liftsQuery = useQuery({
     queryKey: ['shuttle-lifts', topologyId], queryFn: () => api.getShuttleLifts(topologyId),
   })
-  const tracks = useMemo(() => tracksQuery.data?.nodes ?? [], [tracksQuery.data])
+  const tracks = useMemo(
+    () => trackQueries.flatMap((query) => query.data?.nodes ?? []),
+    [trackQueries],
+  )
   const lifts = useMemo(() => liftsQuery.data?.lifts ?? [], [liftsQuery.data])
   const [startLevel, setStartLevel] = useState<ShuttleLevel>(initialDraft?.startLevel ?? 1)
   const [endLevel, setEndLevel] = useState<ShuttleLevel>(initialDraft?.endLevel ?? 4)
@@ -109,6 +116,22 @@ export function ShuttleDemoWorkspace({
       : preferredNode(tracks, endLevel, `L${endLevel}-r100-c51`, true))
   }, [endLevel, tracks])
 
+  const startNodes = nodesAtLevel(tracks, startLevel)
+  const endNodes = nodesAtLevel(tracks, endLevel)
+  const selectedStartNodeId = startNodes.some((node) => node.track_node_id === startNodeId) ? startNodeId : ''
+  const selectedEndNodeId = endNodes.some((node) => node.track_node_id === endNodeId) ? endNodeId : ''
+
+  const changeStartLevel = (nextLevel: ShuttleLevel) => {
+    setStartLevel(nextLevel)
+    setStartNodeId(preferredNode(tracks, nextLevel, `L${nextLevel}-r100-c7`))
+    invalidatePlan()
+  }
+  const changeEndLevel = (nextLevel: ShuttleLevel) => {
+    setEndLevel(nextLevel)
+    setEndNodeId(preferredNode(tracks, nextLevel, `L${nextLevel}-r100-c51`, true))
+    invalidatePlan()
+  }
+
   const invalidatePlan = () => {
     requestRef.current += 1
     setPlan(null)
@@ -145,9 +168,9 @@ export function ShuttleDemoWorkspace({
     try {
       const next = await api.planShuttlePath({
         topology_id: topologyId,
-        start_track_node: startNodeId,
+        start_track_node: selectedStartNodeId,
         start_level: startLevel,
-        end_track_node: endNodeId,
+        end_track_node: selectedEndNodeId,
         end_level: endLevel,
         algorithm,
       })
@@ -165,8 +188,28 @@ export function ShuttleDemoWorkspace({
       if (requestRef.current === sequence) setPlanning(false)
     }
   }
-  const planningEnabled = Boolean(levelsQuery.data?.planning_enabled && liftsQuery.data?.planning_enabled)
-  const queryError = [levelsQuery.error, tracksQuery.error, liftsQuery.error].find(Boolean)
+  const trackQueryErrorIndex = trackQueries.findIndex((query) => query.isError)
+  const trackQueryError = trackQueryErrorIndex >= 0 ? trackQueries[trackQueryErrorIndex].error : null
+  const configRevisions = [
+    levelsQuery.data?.config_revision,
+    liftsQuery.data?.config_revision,
+    ...trackQueries.map((query) => query.data?.config_revision),
+  ].filter((revision): revision is string => Boolean(revision))
+  const contractQueriesSettled = Boolean(levelsQuery.data && liftsQuery.data)
+    && trackQueries.every((query) => query.isSuccess)
+  const hasFourLevelContract = configRevisions.length === 6
+    && configRevisions.every((revision) => revision === FOUR_LEVEL_CONFIG_REVISION)
+  const planningEnabled = Boolean(
+    levelsQuery.data?.planning_enabled
+    && liftsQuery.data?.planning_enabled
+    && hasFourLevelContract
+    && startNodes.length
+    && endNodes.length,
+  )
+  const queryError = [levelsQuery.error, trackQueryError, liftsQuery.error].find(Boolean)
+  const versionMismatch = contractQueriesSettled && !hasFourLevelContract
+  const startTrackQuery = trackQueries[startLevel - 1]
+  const endTrackQuery = trackQueries[endLevel - 1]
 
   return (
     <div className="path-demo-layout">
@@ -181,10 +224,10 @@ export function ShuttleDemoWorkspace({
           <button type="button" role="tab" aria-selected className="active">路径规划</button>
           <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); onWorkspaceModeChange('inventory') }}>库存查看</button>
         </div>
-        <div className="path-demo-vehicle-type-tabs" role="tablist" aria-label="车辆类型">
-          <button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); onVehicleTypeChange('ctu') }}>CTU</button>
-          <button type="button" role="tab" aria-selected className="active">四向车 Shuttle</button>
-        </div>
+        <section className="path-demo-secondary-entry" aria-label="CTU 次级入口">
+          <div><strong>四向车路径规划</strong><span>当前主工作台 · 同层与跨层自动判断</span></div>
+          <button type="button" className="ghost-button" onClick={() => { invalidatePlan(); onVehicleTypeChange('ctu') }}>进入 CTU 平面道路与多车实验</button>
+        </section>
 
         <section className="shuttle-contract-card" aria-label="四向车轨道契约">
           <strong>四层真实轨道 · 双提升机</strong>
@@ -199,24 +242,26 @@ export function ShuttleDemoWorkspace({
 
         <div className="shuttle-level-grid">
           <label>起点层
-            <select aria-label="四向车起点层" value={startLevel} onChange={(event) => { setStartLevel(Number(event.target.value) as ShuttleLevel); invalidatePlan() }}>
+            <select aria-label="四向车起点层" value={startLevel} onChange={(event) => changeStartLevel(Number(event.target.value) as ShuttleLevel)}>
               {SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}
             </select>
           </label>
           <label>终点层
-            <select aria-label="四向车终点层" value={endLevel} onChange={(event) => { setEndLevel(Number(event.target.value) as ShuttleLevel); invalidatePlan() }}>
+            <select aria-label="四向车终点层" value={endLevel} onChange={(event) => changeEndLevel(Number(event.target.value) as ShuttleLevel)}>
               {SHUTTLE_LEVELS.map((level) => <option key={level} value={level}>L{level}</option>)}
             </select>
           </label>
         </div>
         <label>起点轨道节点
-          <select aria-label="四向车起点轨道节点" value={startNodeId} onChange={(event) => { setStartNodeId(event.target.value); invalidatePlan() }}>
-            {nodesAtLevel(tracks, startLevel).map((node) => <option key={node.track_node_id} value={node.track_node_id}>{node.track_node_id}</option>)}
+          <select aria-label="四向车起点轨道节点" value={selectedStartNodeId} disabled={startTrackQuery.isPending || startTrackQuery.isError || startNodes.length === 0} onChange={(event) => { setStartNodeId(event.target.value); invalidatePlan() }}>
+            {!selectedStartNodeId ? <option value="">{startTrackQuery.isPending ? `正在读取 L${startLevel} 轨道节点…` : startTrackQuery.isError ? `L${startLevel} 轨道接口读取失败` : `当前层无可用轨道节点`}</option> : null}
+            {startNodes.map((node) => <option key={node.track_node_id} value={node.track_node_id}>{node.track_node_id}</option>)}
           </select>
         </label>
         <label>终点轨道节点
-          <select aria-label="四向车终点轨道节点" value={endNodeId} onChange={(event) => { setEndNodeId(event.target.value); invalidatePlan() }}>
-            {nodesAtLevel(tracks, endLevel).map((node) => <option key={node.track_node_id} value={node.track_node_id}>{node.track_node_id}</option>)}
+          <select aria-label="四向车终点轨道节点" value={selectedEndNodeId} disabled={endTrackQuery.isPending || endTrackQuery.isError || endNodes.length === 0} onChange={(event) => { setEndNodeId(event.target.value); invalidatePlan() }}>
+            {!selectedEndNodeId ? <option value="">{endTrackQuery.isPending ? `正在读取 L${endLevel} 轨道节点…` : endTrackQuery.isError ? `L${endLevel} 轨道接口读取失败` : `当前层无可用轨道节点`}</option> : null}
+            {endNodes.map((node) => <option key={node.track_node_id} value={node.track_node_id}>{node.track_node_id}</option>)}
           </select>
         </label>
         <label>路径算法
@@ -224,10 +269,13 @@ export function ShuttleDemoWorkspace({
             <option value="astar">A*</option><option value="dijkstra">Dijkstra</option>
           </select>
         </label>
-        <button className="accent-button path-demo-plan-button" type="button" disabled={!planningEnabled || planning || !startNodeId || !endNodeId} onClick={() => void requestPlan()}>
+        <button className="accent-button path-demo-plan-button" type="button" disabled={!planningEnabled || planning || !selectedStartNodeId || !selectedEndNodeId} onClick={() => void requestPlan()}>
           {planning ? '规划中…' : startLevel === endLevel ? '规划同层路径' : '规划跨层路径'}
         </button>
         {queryError ? <p className="path-demo-error" role="alert">{String(queryError)}</p> : null}
+        {versionMismatch ? <p className="path-demo-error" role="alert">检测到旧版 Shuttle 服务（{levelsQuery.data?.config_revision ?? '未知版本'}）。请重启后端并确认加载 {FOUR_LEVEL_CONFIG_REVISION}，旧版响应不会用于 L4 规划。</p> : null}
+        {!queryError && !startTrackQuery.isPending && startNodes.length === 0 ? <p className="path-demo-error" role="alert">L{startLevel} 未返回可用轨道节点，无法选择起点。</p> : null}
+        {!queryError && !endTrackQuery.isPending && endNodes.length === 0 ? <p className="path-demo-error" role="alert">L{endLevel} 未返回可用轨道节点，无法选择终点。</p> : null}
         {error ? <p className="path-demo-error" role="alert">{error}</p> : null}
         {!planningEnabled && levelsQuery.data ? <p className="path-demo-error">当前轨道或提升机配置未通过程序验证，已禁止运行。</p> : null}
         {(levelsQuery.data?.warnings ?? []).map((warning) => <p className="path-demo-note" key={warning}>{warning}</p>)}
@@ -255,7 +303,7 @@ export function ShuttleDemoWorkspace({
 
         <dl className="path-demo-stats shuttle-stats">
           <div><dt>当前轨道层</dt><dd>{sample ? `L${sample.shuttleLevel}` : `L${startLevel}`}</dd></div>
-          <div><dt>当前轨道节点</dt><dd>{sample?.trackNodeId ?? (startNodeId || '—')}</dd></div>
+          <div><dt>当前轨道节点</dt><dd>{sample?.trackNodeId ?? (selectedStartNodeId || '—')}</dd></div>
           <div><dt>运行状态</dt><dd>{sample ? shuttleMotionLabel[sample.phase] : '待规划'}</dd></div>
           <div><dt>使用提升机</dt><dd>{plan?.chosen_lift ?? '—'}</dd></div>
           <div><dt>水平路径长度</dt><dd>{plan ? `${plan.horizontal_distance_cells.toFixed(0)} 格` : '—'}</dd></div>
