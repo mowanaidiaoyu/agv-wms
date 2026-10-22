@@ -27,8 +27,6 @@ export type Simulation3DSceneProps = {
   focusRequest?: number
 }
 
-const CTU_COLOR = '#22d3ee'
-const CTU_EMISSIVE = '#0e7490'
 const SHUTTLE_COLOR = '#c084fc'
 const SHUTTLE_EMISSIVE = '#6d28d9'
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
@@ -63,64 +61,138 @@ function RobotGroup({ position, children }: { position: [number, number, number]
   return <group ref={groupRef}>{children}</group>
 }
 
-/** CTU 车：底座 + 4 立柱 + 5 层载货搁板，前 `load` 层点亮（0/5→5/5），并渲染实际装载的货物箱。局部坐标，原点=格中心贴地。 */
-function CtuCart({ load, carrying }: { load: number; carrying?: GoodsSlot[] }) {
+/**
+ * PQ-50 风格 CTU：17 层高行程门架、升降取箱台和 5 个独立载箱位。
+ * 货架层数决定升降高度，载箱位数量决定单趟容量，两者不混用。
+ */
+function CtuCart({
+  load,
+  carrying,
+  action,
+}: {
+  load: number
+  carrying?: GoodsSlot[]
+  action?: SimulationRobot['handlingAction']
+}) {
+  const liftRef = useRef<Group>(null)
+  const forkRef = useRef<Group>(null)
+  const invalidate = useThree((state) => state.invalidate)
   const levelHeight = ZONE_LEVEL_HEIGHT.ctu
-  const w = CELL * 0.7
-  const d = CELL * 0.7
-  const halfW = w / 2
-  const halfD = d / 2
-  const baseH = 0.12
-  const baseY = 0.08
-  const baseTop = baseY + baseH / 2
-  const shelfH = 0.08
-  const rackHeight = CTU_ROBOT_LEVELS * levelHeight
-  const postCenterY = baseTop + rackHeight / 2
-  const postOffsets: [number, number][] = [
-    [-halfW + 0.08, -halfD + 0.08],
-    [halfW - 0.08, -halfD + 0.08],
-    [-halfW + 0.08, halfD - 0.08],
-    [halfW - 0.08, halfD - 0.08],
-  ]
-  const boxW = w * 0.55
-  const boxD = d * 0.55
-  const boxH = levelHeight * 0.5
+  const mastHeight = 17 * levelHeight
+  const baseTop = 0.2
+  const homeLiftY = 0.42
+  const carryStartY = 0.72
+  const carryGap = 0.52
+  const targetLayerY = (Math.max(1, Math.min(17, action?.targetLayer ?? 1)) - 0.5) * levelHeight
+  const targetLiftY = action?.stage === 'stowing'
+    ? carryStartY + Math.max(0, Math.min(4, action.slotIndex)) * carryGap
+    : action
+      ? targetLayerY
+      : homeLiftY
+  const targetForkZ = action?.stage === 'extending' ? -0.68 : 0
+  const liftY = useRef(homeLiftY)
+  const forkZ = useRef(0)
+  const actionSignature = `${action?.stage ?? 'idle'}:${action?.targetLayer ?? 1}:${action?.slotIndex ?? 0}`
+
+  useEffect(() => invalidate(), [actionSignature, invalidate])
+  useFrame((_, delta) => {
+    const step = Math.min(1, delta * 7)
+    liftY.current += (targetLiftY - liftY.current) * step
+    forkZ.current += (targetForkZ - forkZ.current) * step
+    if (Math.abs(liftY.current - targetLiftY) < 0.005) liftY.current = targetLiftY
+    if (Math.abs(forkZ.current - targetForkZ) < 0.005) forkZ.current = targetForkZ
+    if (liftRef.current) liftRef.current.position.y = liftY.current
+    if (forkRef.current) forkRef.current.position.z = forkZ.current
+    if (liftY.current !== targetLiftY || forkZ.current !== targetForkZ) invalidate()
+  })
+
+  const visibleCarrying = action?.stage === 'stowing'
+    ? (carrying ?? []).slice(0, -1)
+    : (carrying ?? [])
+  const showTransferBox = action?.stage === 'extending' || action?.stage === 'stowing'
+  const rotationY = action?.approachDirection === 'north'
+    ? Math.PI
+    : action?.approachDirection === 'east'
+      ? -Math.PI / 2
+      : action?.approachDirection === 'west'
+        ? Math.PI / 2
+        : 0
 
   return (
-    <group>
-      <mesh position={[0, baseY, 0]}>
-        <boxGeometry args={[w, baseH, d]} />
-        <meshStandardMaterial color={CTU_COLOR} emissive={CTU_EMISSIVE} emissiveIntensity={0.3} roughness={0.5} />
+    <group rotation={[0, rotationY, 0]}>
+      {/* 红色移动底盘和黑色前保险杠，对应参考设备的主要外形。 */}
+      <mesh position={[0, 0.11, 0]}>
+        <boxGeometry args={[0.82, 0.2, 0.94]} />
+        <meshStandardMaterial color="#dc2626" emissive="#7f1d1d" emissiveIntensity={0.2} roughness={0.48} metalness={0.25} />
       </mesh>
-      {postOffsets.map(([px, pz], i) => (
-        <mesh key={`post-${i}`} position={[px, postCenterY, pz]}>
-          <boxGeometry args={[0.07, rackHeight, 0.07]} />
-          <meshStandardMaterial color={CTU_COLOR} emissive={CTU_EMISSIVE} emissiveIntensity={0.3} roughness={0.5} />
+      <mesh position={[0, 0.2, -0.43]}>
+        <boxGeometry args={[0.68, 0.24, 0.14]} />
+        <meshStandardMaterial color="#111827" roughness={0.36} metalness={0.55} />
+      </mesh>
+      <mesh position={[0, 0.25, 0.34]}>
+        <boxGeometry args={[0.58, 0.38, 0.28]} />
+        <meshStandardMaterial color="#b91c1c" emissive="#7f1d1d" emissiveIntensity={0.16} roughness={0.5} />
+      </mesh>
+
+      {/* 17 层行程门架。 */}
+      {[-0.28, 0.28].map((x) => (
+        <mesh key={`mast-${x}`} position={[x, baseTop + mastHeight / 2, 0.18]}>
+          <boxGeometry args={[0.075, mastHeight, 0.075]} />
+          <meshStandardMaterial color="#cbd5e1" roughness={0.32} metalness={0.75} />
         </mesh>
       ))}
-      {Array.from({ length: CTU_ROBOT_LEVELS }, (_, i) => {
-        const filled = i < load
-        return (
-          <mesh key={`shelf-${i}`} position={[0, baseTop + i * levelHeight + shelfH / 2, 0]}>
-            <boxGeometry args={[w, shelfH, d]} />
+      <mesh position={[0, baseTop + mastHeight, 0.18]}>
+        <boxGeometry args={[0.64, 0.1, 0.12]} />
+        <meshStandardMaterial color="#1f2937" roughness={0.38} metalness={0.55} />
+      </mesh>
+      <mesh position={[0, baseTop + mastHeight / 2, 0.2]}>
+        <boxGeometry args={[0.035, mastHeight - 0.18, 0.035]} />
+        <meshStandardMaterial color="#fbbf24" emissive="#92400e" emissiveIntensity={0.16} metalness={0.55} />
+      </mesh>
+
+      {/* 五个载箱位位于门架后方。 */}
+      {Array.from({ length: CTU_ROBOT_LEVELS }, (_, index) => (
+        <group key={`carry-slot-${index}`}>
+          <mesh position={[0, carryStartY + index * carryGap - 0.2, 0.25]}>
+            <boxGeometry args={[0.62, 0.055, 0.54]} />
             <meshStandardMaterial
-              color={filled ? CTU_COLOR : '#1e293b'}
-              emissive={filled ? CTU_EMISSIVE : '#0b1220'}
-              emissiveIntensity={filled ? 0.35 : 0}
+              color={index < load ? '#ef4444' : '#334155'}
+              emissive={index < load ? '#7f1d1d' : '#0f172a'}
+              emissiveIntensity={index < load ? 0.22 : 0.05}
               roughness={0.5}
+              metalness={0.35}
             />
           </mesh>
-        )
-      })}
-      {(carrying ?? []).slice(0, CTU_ROBOT_LEVELS).map((_, i) => {
-        const color = '#34d399'
-        return (
-          <mesh key={`carry-${i}`} position={[0, baseTop + i * levelHeight + shelfH + boxH / 2, 0]}>
-            <boxGeometry args={[boxW, boxH, boxD]} />
-            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.25} roughness={0.6} />
-          </mesh>
-        )
-      })}
+        </group>
+      ))}
+      {visibleCarrying.slice(0, CTU_ROBOT_LEVELS).map((slot, index) => (
+        <mesh key={`carry-${slot.nodeId}-${slot.layer}`} position={[0, carryStartY + index * carryGap, 0.25]}>
+          <boxGeometry args={[0.5, 0.3, 0.42]} />
+          <meshStandardMaterial color="#34d399" emissive="#047857" emissiveIntensity={0.26} roughness={0.58} />
+        </mesh>
+      ))}
+
+      {/* 升降台与伸缩双叉。 */}
+      <group ref={liftRef} position={[0, homeLiftY, -0.02]}>
+        <mesh>
+          <boxGeometry args={[0.6, 0.12, 0.28]} />
+          <meshStandardMaterial color="#f97316" emissive="#9a3412" emissiveIntensity={0.28} roughness={0.4} metalness={0.42} />
+        </mesh>
+        <group ref={forkRef}>
+          {[-0.17, 0.17].map((x) => (
+            <mesh key={`fork-${x}`} position={[x, 0, -0.32]}>
+              <boxGeometry args={[0.07, 0.055, 0.72]} />
+              <meshStandardMaterial color="#e5e7eb" roughness={0.28} metalness={0.8} />
+            </mesh>
+          ))}
+          {showTransferBox ? (
+            <mesh position={[0, 0.2, -0.3]}>
+              <boxGeometry args={[0.5, 0.3, 0.42]} />
+              <meshStandardMaterial color="#fde047" emissive="#ca8a04" emissiveIntensity={0.48} roughness={0.5} />
+            </mesh>
+          ) : null}
+        </group>
+      </group>
     </group>
   )
 }
@@ -171,11 +243,11 @@ function RobotFocusMarker({ robotId, phase }: { robotId: string; phase: string }
         <torusGeometry args={[0.7, 0.08, 12, 36]} />
         <meshBasicMaterial color="#22d3ee" depthTest={false} />
       </mesh>
-      <mesh position={[0, 3.3, 0]}>
+      <mesh position={[0, 9.15, 0]}>
         <coneGeometry args={[0.26, 0.72, 16]} />
         <meshBasicMaterial color="#22d3ee" transparent opacity={0.9} depthTest={false} />
       </mesh>
-      <Html position={[0, 4.05, 0]} center zIndexRange={[29, 19]}>
+      <Html position={[0, 9.8, 0]} center zIndexRange={[29, 19]}>
         <div className="simulation-scene-label simulation-scene-robot-label">
           <b>{robotId}</b>
           <span>{phase}</span>
@@ -298,6 +370,10 @@ function Simulation3DScene({
       if (!robot.currentTaskId) continue
       const task = taskById.get(robot.currentTaskId)
       if (!task || task.phase !== 'pickup_from_ctu') continue
+      if (robot.handlingAction?.nodeId) {
+        keys.push(`goods-${robot.handlingAction.nodeId}-${robot.handlingAction.targetLayer}`)
+        continue
+      }
       const line = task.lines?.[task.currentLineIndex]
       if (line) keys.push(`goods-${line.nodeId}-${line.layer}`)
     }
@@ -325,11 +401,15 @@ function Simulation3DScene({
     ? robots.find((robot) => robot.id === focusTask.assignedRobotId)
     : undefined
   const isPicking = focusTask?.phase === 'pickup_from_ctu' || focusTask?.phase === 'pickup_from_shuttle'
-  const focusLine = isPicking
-    ? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
+  const handlingAction = focusRobot?.handlingAction
+  const handlingLine = handlingAction
+    ? focusTask?.lines.find((line) => line.nodeId === handlingAction.nodeId && line.layer === handlingAction.targetLayer)
     : undefined
-  const focusTargetCellId = focusLine?.cellId || focusTask?.deliveryCellId
-  const focusTargetLayer = focusLine?.layer ?? 1
+  const focusLine = isPicking
+    ? handlingLine ?? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
+    : undefined
+  const focusTargetCellId = handlingAction?.cellId || focusLine?.cellId || focusTask?.deliveryCellId
+  const focusTargetLayer = handlingAction?.targetLayer ?? focusLine?.layer ?? 1
   const focusTargetPosition = useMemo(
     () => focusTargetCellId
       ? cellWorldPosition(focusTargetCellId, focusTargetLayer, spec.floors, spec.cols, spec.rows)
@@ -421,7 +501,9 @@ function Simulation3DScene({
         )
         return (
           <RobotGroup key={robot.id} position={position}>
-            {robot.type === 'ctu' ? <CtuCart load={robot.load} carrying={robot.carrying} /> : <ShuttleCart />}
+            {robot.type === 'ctu' ? (
+              <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} />
+            ) : <ShuttleCart />}
             {robot.id === focusRobot?.id ? (
               <RobotFocusMarker
                 robotId={robot.id}

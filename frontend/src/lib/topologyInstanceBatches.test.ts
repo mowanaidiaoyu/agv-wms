@@ -66,4 +66,28 @@ describe('topology instance batches', () => {
     expect(goodsLayer).toHaveLength(2)
     expect(fullSceneGoods).toEqual(goodsLayer)
   })
+
+  it('CTU 模型使用 17 层升降门架和 5 个载箱位', () => {
+    const topology = emptyTopology()
+    topology.nodes.push({
+      id: 'ctu-model',
+      type: 'ctu_robot',
+      floor: '1F',
+      row: 2,
+      col: 3,
+      zoneId: null,
+      capacity: 5,
+      label: 'CTU',
+    })
+
+    const boxes = buildSceneSpec(topology).items.filter(
+      (item): item is SceneBox => item.kind === 'box' && item.entity?.id === 'ctu-model',
+    )
+    const mast = boxes.find((item) => item.key === 'ctu-model-mast-0')
+    const carrySlots = boxes.filter((item) => item.key.startsWith('ctu-model-carry-slot-'))
+
+    expect(mast?.size[1]).toBe(8.5)
+    expect(carrySlots).toHaveLength(5)
+    expect(boxes.some((item) => item.key === 'ctu-model-lift-platform')).toBe(true)
+  })
 })

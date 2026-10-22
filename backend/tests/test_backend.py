@@ -265,6 +265,21 @@ def test_robot_carry_capacity():
     assert robot["capacity"] == ROBOT_CARRY_CAPACITY["ctu"]
 
 
+def test_ctu_pickup_path_stops_in_adjacent_aisle_cell():
+    service = _service()
+    runtime = service._create_runtime("test-pickup-approach", TOPOLOGY, CONFIG)
+    robot = runtime.state["robots"][0]
+    target = node_to_cell_id(TOPOLOGY, "node-storage")
+
+    assert service._robot_path_to(runtime, robot, target, 17, stop_adjacent=True) is True
+    assert robot["path"][-1] != target
+    _, end_row, end_col = parse_cell_id(robot["path"][-1])
+    _, target_row, target_col = parse_cell_id(target)
+    assert abs(end_row - target_row) + abs(end_col - target_col) == 1
+    assert robot["targetCellId"] == target
+    assert robot["targetLayer"] == 17
+
+
 def test_ctu_pickup_increments_load_and_advances_to_next_line():
     service = _service()
     runtime = service._create_runtime("test-pickup", TOPOLOGY, CONFIG)
@@ -289,8 +304,17 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
     runtime.state["tasks"] = [task]
 
     service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "lifting"
+    assert robot["handlingAction"]["targetLayer"] == 3
+    assert robot["load"] == 0
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "extending"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "stowing"
+    service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["currentLineIndex"] == 1
     assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-storage-2")
@@ -320,9 +344,11 @@ def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
     robot["currentCellId"] = node_to_cell_id(TOPOLOGY, "node-storage")
     runtime.state["tasks"] = [task]
 
-    service._advance_robot_phase(runtime, robot, task)
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["phase"] == "delivery_to_port"
     assert robot["targetCellId"] == "cell-r5-c6"
@@ -554,3 +580,40 @@ def test_order_driven_tasks_keep_order_identity_and_inventory_allocation():
     assert order_states[0]["taskIds"] == [tasks[0]["id"]]
     assert order_states[0]["status"] == "waiting_dispatch"
     assert order_states[0]["lines"][0]["allocated"] == 2
+
+
+def test_ctu_order_over_five_boxes_is_split_by_vehicle_capacity():
+    service = _service()
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": "cell-r1-c1",
+            "layer": layer,
+            "skuId": "sku-capacity",
+            "skuName": "容量测试料箱",
+            "qty": 1,
+        }
+        for layer in range(1, 7)
+    ]
+    orders = [
+        {
+            "id": "ORD-CAPACITY",
+            "priority": "normal",
+            "targetStation": "出库口",
+            "createdAt": "2026-10-22T00:00:00Z",
+            "lines": [
+                {
+                    "id": "line-capacity",
+                    "skuId": "sku-capacity",
+                    "skuName": "容量测试料箱",
+                    "quantity": 6,
+                }
+            ],
+        }
+    ]
+
+    tasks, order_states = service._seed_order_tasks(TOPOLOGY, orders, inventory)
+
+    assert [len(task["lines"]) for task in tasks] == [5, 1]
+    assert all(len(task["lines"]) <= ROBOT_CARRY_CAPACITY["ctu"] for task in tasks)
+    assert order_states[0]["totalTasks"] == 2

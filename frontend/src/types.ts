@@ -131,6 +131,19 @@ export interface SimulationRobot {
   capacity: number
   /** CTU 当前装载的货物箱（取货后从库位移到车上，交付后清空） */
   carrying?: GoodsSlot[]
+  /** CTU 到达库位后的升降、伸叉和装箱动作；仅动作期间存在。 */
+  handlingAction?: {
+    type: 'pickup'
+    stage: 'lifting' | 'extending' | 'stowing'
+    targetLayer: number
+    slotIndex: number
+    nodeId?: string
+    cellId?: string
+    approachDirection?: 'north' | 'south' | 'east' | 'west'
+    skuId?: string
+    skuName?: string
+    verified?: boolean
+  } | null
 }
 
 export interface SimulationTaskHistory {

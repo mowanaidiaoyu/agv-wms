@@ -185,6 +185,7 @@ class SimulationService:
                     "targetLayer": 1,
                     "currentTaskId": None,
                     "returningToStandby": False,
+                    "handlingAction": None,
                     "waitTicks": 0,
                     "failed": False,
                     "phaseLabel": "待命",
@@ -525,6 +526,7 @@ class SimulationService:
                 robot["failed"] = True
                 robot["status"] = "failed"
                 robot["phaseLabel"] = "设备故障"
+                robot["handlingAction"] = None
                 robot["currentTaskId"] = None
                 robot["path"] = [robot["currentCellId"]]
                 self._emit_alert(
@@ -582,12 +584,19 @@ class SimulationService:
             if task is None:
                 continue
             phase = "pickup_from_ctu" if task["mode"] == "direct" else "pickup_from_shuttle"
-            if not self._robot_path_to(runtime, robot, task["sourceCellId"], task["sourceLayer"]):
+            if not self._robot_path_to(
+                runtime,
+                robot,
+                task["sourceCellId"],
+                task["sourceLayer"],
+                stop_adjacent=True,
+            ):
                 continue
             robot["currentTaskId"] = task_id
             robot["status"] = "moving"
             robot["waitTicks"] = 0
             robot["load"] = 0
+            robot["handlingAction"] = None
             robot["phaseLabel"] = self._phase_label(phase)
             task["assignedRobotId"] = robot_id
             task["status"] = "assigned"
@@ -599,7 +608,7 @@ class SimulationService:
             self._record_event(runtime, runtime.state["tick"], "task_state_changed", {"taskId": task_id, "status": "assigned", "robotId": robot_id, "phase": task["phase"]})
 
     def _move_robots(self, runtime: RunRuntime) -> None:
-        movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle"}]
+        movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle", "exception"}]
         movable.sort(key=lambda item: item["id"])
         occupied_cells = {robot["currentCellId"] for robot in runtime.state["robots"]}
         reserved_targets: set[str] = set()
@@ -682,6 +691,9 @@ class SimulationService:
             avoid_storage=True,
             extra_blocked=others,
         )
+        task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+        if task and task.get("phase") == "pickup_from_ctu" and len(path_cells) > 1:
+            path_cells = path_cells[:-1]
         if not path_cells or len(path_cells) <= 1 or path_cells[1]["id"] in occupied_cells:
             return False
         robot["path"] = [cell["id"] for cell in path_cells]
@@ -803,7 +815,14 @@ class SimulationService:
         robot["yieldTicks"] = 2
         robot["status"] = "blocked"
         if target_cell:
-            self._robot_path_to(runtime, robot, target_cell, robot.get("targetLayer", 1))
+            task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+            self._robot_path_to(
+                runtime,
+                robot,
+                target_cell,
+                robot.get("targetLayer", 1),
+                stop_adjacent=bool(task and task.get("phase") == "pickup_from_ctu"),
+            )
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -812,44 +831,143 @@ class SimulationService:
         )
         return True
 
-    def _transfer_goods_to_robot(self, runtime: RunRuntime, robot: dict[str, Any], line: dict[str, Any]) -> None:
+    def _transfer_goods_to_robot(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        line: dict[str, Any],
+    ) -> dict[str, Any] | None:
         """CTU 取到一箱：把该库位槽从库存移除，并把货物挂到机器人 carrying，前端据此把货箱从库位移到车上。"""
         node_id = line.get("nodeId")
         if node_id is None:
-            return
+            return None
         layer = int(line.get("layer", 1))
         inventory = runtime.state.get("inventory") or []
         for index, slot in enumerate(inventory):
             if slot.get("nodeId") == node_id and int(slot.get("layer", 1)) == layer:
                 robot.setdefault("carrying", []).append(slot)
                 del inventory[index]
-                return
+                return slot
+        return None
 
-    def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+    def _advance_ctu_pickup_action(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        """用三个可观察阶段完成一次取箱，库存只在货叉真正取到箱时扣减。"""
         tick = runtime.state["tick"]
-        if task["phase"] == "pickup_from_ctu":
-            capacity = robot.get("capacity", ROBOT_CARRY_CAPACITY["ctu"])
-            lines = task.get("lines", [])
-            line_index = task.get("currentLineIndex", 0)
-            picked_line = lines[line_index] if 0 <= line_index < len(lines) else {}
-            self._transfer_goods_to_robot(runtime, robot, picked_line)
-            robot["load"] = min(capacity, robot.get("load", 0) + 1)
-            task["picked"] = task.get("picked", 0) + 1
+        capacity = min(ROBOT_CARRY_CAPACITY["ctu"], int(robot.get("capacity", ROBOT_CARRY_CAPACITY["ctu"])))
+        lines = task.get("lines", [])
+        line_index = int(task.get("currentLineIndex", 0))
+        action = robot.get("handlingAction")
+
+        if action is None:
+            if robot.get("load", 0) >= capacity or line_index >= len(lines):
+                self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"])
+                task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
+                return
+            line = lines[line_index]
+            target_layer = max(1, min(CTU_RACK_LAYERS, int(line.get("layer", 1))))
+            target_cell_id = line.get("cellId") or robot["targetCellId"]
+            target_floor, target_row, target_col = parse_cell_id(target_cell_id)
+            current_floor, current_row, current_col = parse_cell_id(robot["currentCellId"])
+            row_delta = target_row - current_row if target_floor == current_floor else 0
+            col_delta = target_col - current_col if target_floor == current_floor else 0
+            if abs(col_delta) > abs(row_delta):
+                approach_direction = "east" if col_delta > 0 else "west"
+            else:
+                approach_direction = "south" if row_delta >= 0 else "north"
+            action = {
+                "type": "pickup",
+                "stage": "lifting",
+                "targetLayer": target_layer,
+                "slotIndex": int(robot.get("load", 0)),
+                "nodeId": line.get("nodeId"),
+                "cellId": target_cell_id,
+                "approachDirection": approach_direction,
+                "skuId": line.get("skuId"),
+                "skuName": line.get("skuName"),
+            }
+            robot["handlingAction"] = action
+            robot["status"] = "handling"
+            robot["phaseLabel"] = f"升降至第 {target_layer} 层"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(runtime, tick, "ctu_handling", {"robotId": robot["id"], **action})
+            return
+
+        if action.get("stage") == "lifting":
+            action["stage"] = "extending"
+            robot["status"] = "handling"
+            robot["phaseLabel"] = f"第 {action['targetLayer']} 层 · 伸叉取箱"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(runtime, tick, "ctu_handling", {"robotId": robot["id"], **action})
+            return
+
+        if action.get("stage") == "extending":
+            line = lines[line_index] if 0 <= line_index < len(lines) else {}
+            slot = self._transfer_goods_to_robot(runtime, robot, line)
+            if slot is None:
+                robot["handlingAction"] = None
+                robot["status"] = "exception"
+                robot["phaseLabel"] = "取货异常：目标库位无货"
+                task["status"] = "exception"
+                task["phaseLabel"] = robot["phaseLabel"]
+                self._emit_alert(
+                    runtime,
+                    tick,
+                    category=f"pickup_missing:{task['id']}",
+                    level="error",
+                    message=f"设备 {robot['id']} 在 {line.get('nodeId', '目标库位')} 未找到待取料箱。",
+                    details={"robotId": robot["id"], "taskId": task["id"], "nodeId": line.get("nodeId"), "layer": line.get("layer")},
+                    suggestion="核对订单分配库存与拓扑库位数据。",
+                )
+                return
+            robot["load"] = min(capacity, int(robot.get("load", 0)) + 1)
+            task["picked"] = int(task.get("picked", 0)) + 1
             task["currentLineIndex"] = line_index + 1
+            action["stage"] = "stowing"
+            action["verified"] = not line.get("skuId") or slot.get("skuId") == line.get("skuId")
+            robot["status"] = "handling"
+            robot["phaseLabel"] = f"装入载箱位 {robot['load']}/{capacity}"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(
+                runtime,
+                tick,
+                "ctu_handling",
+                {"robotId": robot["id"], **action, "picked": task["picked"], "load": robot["load"]},
+            )
+            return
+
+        if action.get("stage") == "stowing":
+            robot["handlingAction"] = None
             if task["currentLineIndex"] < len(lines) and robot["load"] < capacity:
-                next_cell = lines[task["currentLineIndex"]]["cellId"]
-                self._set_robot_leg(runtime, robot, task, "pickup_from_ctu", next_cell)
+                next_line = lines[task["currentLineIndex"]]
+                self._set_robot_leg(runtime, robot, task, "pickup_from_ctu", next_line["cellId"], next_line.get("layer", 1))
                 task["phaseLabel"] = f"CTU 取货 {task['picked']}/{len(lines)}"
                 robot["phaseLabel"] = f"CTU 取货 {robot['load']}/{capacity}"
             else:
                 self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"])
                 task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-            event: dict[str, Any] = {"taskId": task["id"], "phase": task["phase"], "status": task["status"], "picked": task["picked"], "load": robot["load"]}
-            if picked_line.get("skuId"):
-                event["skuId"] = picked_line["skuId"]
-                event["skuName"] = picked_line.get("skuName")
+            event: dict[str, Any] = {
+                "taskId": task["id"],
+                "phase": task["phase"],
+                "status": task["status"],
+                "picked": task["picked"],
+                "load": robot["load"],
+                "targetLayer": action.get("targetLayer"),
+            }
+            if action.get("skuId"):
+                event["skuId"] = action["skuId"]
+                event["skuName"] = action.get("skuName")
             self._record_event(runtime, tick, "task_state_changed", event)
+
+    def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        tick = runtime.state["tick"]
+        if task["phase"] == "pickup_from_ctu":
+            self._advance_ctu_pickup_action(runtime, robot, task)
             return
 
         if task["phase"] == "pickup_from_shuttle":
@@ -867,6 +985,7 @@ class SimulationService:
             task["phaseLabel"] = self._phase_label(task["phase"])
             task["completedTick"] = tick
             robot["currentTaskId"] = None
+            robot["handlingAction"] = None
             robot["path"] = [robot["currentCellId"]]
             robot["pathLayers"] = [robot.get("currentLayer", 1)]
             robot["load"] = 0
@@ -892,7 +1011,15 @@ class SimulationService:
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
 
-    def _robot_path_to(self, runtime: RunRuntime, robot: dict[str, Any], target_cell_id: str, target_layer: int | None = None) -> bool:
+    def _robot_path_to(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        target_cell_id: str,
+        target_layer: int | None = None,
+        *,
+        stop_adjacent: bool = False,
+    ) -> bool:
         """计算并写入 robot 的 path/pathLayers/target；CTU 走自由网格寻路，四向车走巷道+电梯寻路。"""
         if robot["type"] == "shuttle":
             layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
@@ -919,15 +1046,25 @@ class SimulationService:
             )
             if not path_cells:
                 return False
+            if stop_adjacent and len(path_cells) > 1:
+                path_cells = path_cells[:-1]
             robot["path"] = [cell["id"] for cell in path_cells]
             robot["pathLayers"] = [1] * len(robot["path"])
+            robot["targetLayer"] = max(1, min(CTU_RACK_LAYERS, int(target_layer or 1)))
         robot["targetCellId"] = target_cell_id
         return True
 
     def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> None:
         if not target_cell_id:
             return
-        self._robot_path_to(runtime, robot, target_cell_id, target_layer)
+        self._robot_path_to(
+            runtime,
+            robot,
+            target_cell_id,
+            target_layer,
+            stop_adjacent=phase == "pickup_from_ctu",
+        )
+        robot["handlingAction"] = None
         robot["status"] = "moving"
         robot["phaseLabel"] = self._phase_label(phase)
         task["phase"] = phase
@@ -965,7 +1102,7 @@ class SimulationService:
 
     def _refresh_metrics(self, runtime: RunRuntime) -> None:
         pending = [task for task in runtime.state["tasks"] if task["status"] != "completed"]
-        active = [robot for robot in runtime.state["robots"] if robot["status"] == "moving"]
+        active = [robot for robot in runtime.state["robots"] if robot["status"] in {"moving", "handling", "returning"}]
         blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
         completed = [task for task in runtime.state["tasks"] if task["completedTick"] is not None and task["startedTick"] is not None]
         completed_durations = [task["completedTick"] - task["startedTick"] for task in completed]
@@ -992,6 +1129,7 @@ class SimulationService:
                 continue
             completed = [task for task in related if task.get("status") == "completed"]
             active = [task for task in related if task.get("status") in {"assigned", "running"}]
+            exceptions = [task for task in related if task.get("status") == "exception"]
             picked_by_sku: dict[str, int] = {}
             for task in related:
                 picked_count = max(0, int(task.get("picked", 0)))
@@ -1021,6 +1159,9 @@ class SimulationService:
                 order["statusLabel"] = "已完成"
                 order["progress"] = 100
                 order["completedTick"] = max(task.get("completedTick") or 0 for task in completed)
+            elif exceptions:
+                order["status"] = "exception"
+                order["statusLabel"] = exceptions[0].get("phaseLabel") or "取货异常"
             elif active:
                 order["status"] = "executing"
                 order["statusLabel"] = active[0].get("phaseLabel") or "执行中"

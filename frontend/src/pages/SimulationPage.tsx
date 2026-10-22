@@ -268,8 +268,14 @@ export function SimulationPage() {
     ? robots.find((robot) => robot.id === focusTask.assignedRobotId)
     : undefined
   const isPicking = focusTask?.phase === 'pickup_from_ctu' || focusTask?.phase === 'pickup_from_shuttle'
+  const handlingLine = focusRobot?.handlingAction
+    ? focusTask?.lines.find((line) => (
+        line.nodeId === focusRobot.handlingAction?.nodeId
+        && line.layer === focusRobot.handlingAction?.targetLayer
+      ))
+    : undefined
   const focusLine = isPicking
-    ? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
+    ? handlingLine ?? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
     : undefined
   const runStatusLabel = starting
     ? '启动中…'
