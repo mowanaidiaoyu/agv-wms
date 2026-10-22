@@ -23,6 +23,18 @@ vi.mock('../lib/api', () => ({
     getTopology: vi.fn(async () => ({ id: topology.id, name: topology.name, payload: topology })),
     getSimulationState: vi.fn(),
     getSimulationMetrics: vi.fn(),
+    getGoodsCatalog: vi.fn(async () => ({
+      version: 1,
+      skus: [
+        { skuId: 'sku-1', name: '六角螺栓 M8', spec: 'M8' },
+        { skuId: 'sku-2', name: '法兰螺母 M10', spec: 'M10' },
+        { skuId: 'sku-3', name: '弹簧垫圈 M8', spec: 'M8' },
+        { skuId: 'sku-4', name: '内六角螺钉 M6', spec: 'M6' },
+        { skuId: 'sku-5', name: '平垫圈 M12', spec: 'M12' },
+        { skuId: 'sku-6', name: '高强度螺栓 M16', spec: 'M16' },
+        { skuId: 'sku-7', name: '锁紧螺母 M16', spec: 'M16' },
+      ],
+    })),
     startSimulation: vi.fn(),
     pauseSimulation: vi.fn(),
     resumeSimulation: vi.fn(),
@@ -87,6 +99,8 @@ describe('SimulationPage', () => {
     )
 
     expect(await screen.findByTestId('simulation-3d')).toBeInTheDocument()
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    expect(screen.getByText('订单队列')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '实时指标' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '设备状态' })).not.toBeInTheDocument()
 

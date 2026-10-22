@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
@@ -387,6 +388,21 @@ def test_robot_carry_capacity():
     assert robot["capacity"] == ROBOT_CARRY_CAPACITY["ctu"]
 
 
+def test_ctu_pickup_path_stops_in_adjacent_aisle_cell():
+    service = _service()
+    runtime = service._create_runtime("test-pickup-approach", TOPOLOGY, CONFIG)
+    robot = runtime.state["robots"][0]
+    target = node_to_cell_id(TOPOLOGY, "node-storage")
+
+    assert service._robot_path_to(runtime, robot, target, 17, stop_adjacent=True) is True
+    assert robot["path"][-1] != target
+    _, end_row, end_col = parse_cell_id(robot["path"][-1])
+    _, target_row, target_col = parse_cell_id(target)
+    assert abs(end_row - target_row) + abs(end_col - target_col) == 1
+    assert robot["targetCellId"] == target
+    assert robot["targetLayer"] == 17
+
+
 def test_ctu_pickup_increments_load_and_advances_to_next_line():
     service = _service()
     runtime = service._create_runtime("test-pickup", TOPOLOGY, CONFIG)
@@ -411,8 +427,17 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
     runtime.state["tasks"] = [task]
 
     service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "lifting"
+    assert robot["handlingAction"]["targetLayer"] == 3
+    assert robot["load"] == 0
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "extending"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "stowing"
+    service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["currentLineIndex"] == 1
     assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-storage-2")
@@ -442,9 +467,11 @@ def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
     robot["currentCellId"] = node_to_cell_id(TOPOLOGY, "node-storage")
     runtime.state["tasks"] = [task]
 
-    service._advance_robot_phase(runtime, robot, task)
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["phase"] == "delivery_to_port"
     assert robot["targetCellId"] == "cell-r5-c6"
@@ -496,6 +523,61 @@ def test_reroute_ctu_avoids_occupied_cell_and_keeps_target():
     assert robot["targetCellId"] == "cell-r0-c2"
 
 
+def test_ctu_yields_to_adjacent_free_cell_when_no_reroute_is_available():
+    topology = {
+        "id": "yield-topology",
+        "name": "Yield",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": 2, "cols": 3, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 2}],
+        "cells": [],
+        "nodes": [{"id": "r1", "type": "ctu_robot", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU"}],
+    }
+    config = deepcopy(CONFIG)
+    config["topologyId"] = topology["id"]
+    config["robots"] = [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True}]
+    service = _service()
+    runtime = service._create_runtime("yield-test", topology, config)
+    robot = runtime.state["robots"][0]
+    robot["targetCellId"] = "cell-r0-c2"
+
+    occupied = {"cell-r0-c0", "cell-r0-c1"}
+    reserved = set()
+    assert service._yield_ctu(runtime, robot, occupied, reserved) is True
+    assert robot["currentCellId"] == "cell-r1-c0"
+    assert robot["targetCellId"] == "cell-r0-c2"
+    assert robot["yieldTicks"] == 2
+    assert "cell-r1-c0" in occupied
+    assert "cell-r0-c0" not in occupied
+
+
+def test_completed_robot_returns_to_standby_while_other_tasks_are_unfinished(monkeypatch):
+    service = _service()
+    runtime = service._create_runtime("standby-return", TOPOLOGY, deepcopy(CONFIG))
+    robot = runtime.state["robots"][0]
+    task = runtime.state["tasks"][0]
+    task.update({"status": "assigned", "phase": "delivery_to_port", "assignedRobotId": robot["id"]})
+    runtime.state["tasks"].append({"id": "other-task", "status": "assigned"})
+    robot.update(
+        {
+            "currentCellId": "cell-r1-c5",
+            "currentNode": "cell-r1-c5",
+            "currentRow": 1,
+            "currentCol": 5,
+            "currentTaskId": task["id"],
+        }
+    )
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+
+    service._advance_robot_phase(runtime, robot, task)
+
+    assert task["status"] == "completed"
+    assert robot["returningToStandby"] is True
+    assert robot["status"] == "returning"
+    assert robot["targetCellId"] == robot["homeCellId"]
+    assert len(robot["path"]) > 1
+
+
 def test_tick_payload_only_includes_inventory_when_inventory_changes():
     service = _service()
     runtime = RunRuntime(
@@ -518,3 +600,143 @@ def test_tick_payload_only_includes_inventory_when_inventory_changes():
     runtime.state["tick"] = 3
     third = service._tick_payload(runtime)
     assert third["inventory"] == runtime.state["inventory"]
+
+
+def test_runtime_continues_past_nominal_duration_until_tasks_finish(monkeypatch):
+    service = _service()
+    runtime = RunRuntime(
+        run_id="duration-test",
+        topology={},
+        config={"durationTicks": 1, "maxDurationTicks": 10},
+        state={
+            "tick": 0,
+            "status": "running",
+            "stopReason": None,
+            "tasks": [{"id": "task-long", "status": "assigned"}],
+        },
+        metrics={},
+    )
+
+    def step(current, *, persist, broadcast):
+        current.state["tick"] += 1
+        if current.state["tick"] == 3:
+            current.state["tasks"][0]["status"] = "completed"
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(service, "_step_runtime", step)
+    monkeypatch.setattr(service, "_persist", lambda _runtime: None)
+    monkeypatch.setattr("app.services.simulation.asyncio.sleep", no_wait)
+
+    asyncio.run(service._loop(runtime))
+
+    assert runtime.state["tick"] == 3
+    assert runtime.state["status"] == "completed"
+    assert runtime.state["stopReason"] is None
+
+
+def test_order_driven_runtime_skips_automatic_faults_and_urgent_insertion():
+    service = _service()
+    config = deepcopy(CONFIG)
+    config["orderGenerator"]["urgentInsertionTick"] = 1
+    config["faultInjection"]["robotFailureTick"] = 1
+    config["faultInjection"]["robotFailureId"] = "r1"
+    runtime = service._create_runtime("order-no-injection", TOPOLOGY, config)
+    runtime.state["orderDriven"] = True
+    initial_task_ids = [task["id"] for task in runtime.state["tasks"]]
+
+    service._inject_urgent_order(runtime, 1)
+    service._inject_faults(runtime, 1)
+
+    assert [task["id"] for task in runtime.state["tasks"]] == initial_task_ids
+    assert runtime.state["robots"][0]["failed"] is False
+    assert runtime.state["robots"][0]["status"] == "idle"
+
+
+def test_order_driven_tasks_keep_order_identity_and_inventory_allocation():
+    service = _service()
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": "cell-r1-c2",
+            "layer": 3,
+            "skuId": "sku-order-1",
+            "skuName": "六角螺栓 M8",
+            "spec": "M8",
+            "qty": 3,
+        },
+        {
+            "nodeId": "node-storage-2",
+            "cellId": "cell-r2-c2",
+            "layer": 5,
+            "skuId": "sku-order-1",
+            "skuName": "六角螺栓 M8",
+            "spec": "M8",
+            "qty": 2,
+        },
+    ]
+    orders = [
+        {
+            "id": "ORD-TEST-001",
+            "priority": "urgent",
+            "targetStation": "出库口 01",
+            "createdAt": "2026-10-21T00:00:00Z",
+            "lines": [
+                {
+                    "id": "line-1",
+                    "skuId": "sku-order-1",
+                    "skuName": "六角螺栓 M8",
+                    "spec": "M8",
+                    "quantity": 2,
+                }
+            ],
+        }
+    ]
+
+    tasks, order_states = service._seed_order_tasks(TOPOLOGY, orders, inventory)
+
+    assert len(tasks) == 1
+    assert tasks[0]["orderId"] == "ORD-TEST-001"
+    assert tasks[0]["urgent"] is True
+    assert len(tasks[0]["lines"]) == 2
+    assert order_states[0]["taskIds"] == [tasks[0]["id"]]
+    assert order_states[0]["status"] == "waiting_dispatch"
+    assert order_states[0]["lines"][0]["allocated"] == 2
+
+
+def test_ctu_order_over_five_boxes_is_split_by_vehicle_capacity():
+    service = _service()
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": "cell-r1-c1",
+            "layer": layer,
+            "skuId": "sku-capacity",
+            "skuName": "容量测试料箱",
+            "qty": 1,
+        }
+        for layer in range(1, 7)
+    ]
+    orders = [
+        {
+            "id": "ORD-CAPACITY",
+            "priority": "normal",
+            "targetStation": "出库口",
+            "createdAt": "2026-10-22T00:00:00Z",
+            "lines": [
+                {
+                    "id": "line-capacity",
+                    "skuId": "sku-capacity",
+                    "skuName": "容量测试料箱",
+                    "quantity": 6,
+                }
+            ],
+        }
+    ]
+
+    tasks, order_states = service._seed_order_tasks(TOPOLOGY, orders, inventory)
+
+    assert [len(task["lines"]) for task in tasks] == [5, 1]
+    assert all(len(task["lines"]) <= ROBOT_CARRY_CAPACITY["ctu"] for task in tasks)
+    assert order_states[0]["totalTasks"] == 2

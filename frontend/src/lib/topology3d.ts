@@ -779,65 +779,100 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       continue
     }
     if (node.type === 'ctu_robot') {
-      // CTU 车：5 层载货位，每层高度与 CTU 库货架层一致（ZONE_LEVEL_HEIGHT.ctu = 0.5），
-      // 做成 4 根立柱 + 5 块搁板的小货架，5 层共 2.5 高
+      // PQ-50 风格 CTU：17 层高度表示升降行程，5 个低位搁板表示单趟载箱容量。
       const levelHeight = ZONE_LEVEL_HEIGHT.ctu
-      const w = CELL * 0.7
-      const d = CELL * 0.7
-      const halfW = w / 2
-      const halfD = d / 2
-      const baseH = 0.12
-      const baseY = y + 0.08
-      const shelfH = 0.08
-      const baseTop = baseY + baseH / 2
-      const rackHeight = CTU_ROBOT_LEVELS * levelHeight
+      const mastHeight = ZONE_LEVELS.ctu * levelHeight
+      const baseTop = y + 0.2
+      const carryStartY = y + 0.72
+      const carryGap = 0.52
 
-      // 底座（车辆底盘）
+      // 红色移动底盘。
       items.push({
         kind: 'box',
         key: node.id,
-        position: [x, baseY, z],
-        size: [w, baseH, d],
-        color,
-        emissive: '#0e7490',
+        position: [x, y + 0.11, z],
+        size: [0.82, 0.2, 0.94],
+        color: '#dc2626',
+        emissive: '#7f1d1d',
+        floor,
+        entity,
+      })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-bumper`,
+        position: [x, y + 0.2, z - 0.43],
+        size: [0.68, 0.24, 0.14],
+        color: '#111827',
+        floor,
+        entity,
+      })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-body`,
+        position: [x, y + 0.25, z + 0.34],
+        size: [0.58, 0.38, 0.28],
+        color: '#b91c1c',
+        emissive: '#7f1d1d',
         floor,
         entity,
       })
 
-      // 4 根立柱（底座顶 → 5 层顶）
-      const postCenterY = baseTop + rackHeight / 2
-      const postOffsets: [number, number][] = [
-        [-halfW + 0.08, -halfD + 0.08],
-        [halfW - 0.08, -halfD + 0.08],
-        [-halfW + 0.08, halfD - 0.08],
-        [halfW - 0.08, halfD - 0.08],
-      ]
-      postOffsets.forEach(([px, pz], i) => {
+      // 双立柱门架覆盖全部 17 层。
+      const mastOffsets = [-0.28, 0.28]
+      mastOffsets.forEach((offsetX, index) => {
         items.push({
           kind: 'box',
-          key: `${node.id}-post-${i}`,
-          position: [x + px, postCenterY, z + pz],
-          size: [0.07, rackHeight, 0.07],
-          color,
-          emissive: '#0e7490',
+          key: `${node.id}-mast-${index}`,
+          position: [x + offsetX, baseTop + mastHeight / 2, z + 0.18],
+          size: [0.075, mastHeight, 0.075],
+          color: '#cbd5e1',
           floor,
           entity,
         })
       })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-mast-top`,
+        position: [x, baseTop + mastHeight, z + 0.18],
+        size: [0.64, 0.1, 0.12],
+        color: '#1f2937',
+        floor,
+        entity,
+      })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-lift-cable`,
+        position: [x, baseTop + mastHeight / 2, z + 0.2],
+        size: [0.035, mastHeight - 0.18, 0.035],
+        color: '#fbbf24',
+        emissive: '#92400e',
+        floor,
+        entity,
+      })
 
-      // 5 块搁板：每层底部一块，层距 = CTU 库货架层高
+      // 五个载箱位及停在最低位的取箱平台。
       for (let i = 0; i < CTU_ROBOT_LEVELS; i += 1) {
         items.push({
           kind: 'box',
-          key: `${node.id}-level-${i}`,
-          position: [x, baseTop + i * levelHeight + shelfH / 2, z],
-          size: [w, shelfH, d],
-          color,
-          emissive: '#0e7490',
+          key: `${node.id}-carry-slot-${i}`,
+          position: [x, carryStartY + i * carryGap - 0.2, z + 0.25],
+          size: [0.62, 0.055, 0.54],
+          color: '#334155',
+          emissive: '#0f172a',
           floor,
           entity,
         })
       }
+      items.push({
+        kind: 'box',
+        key: `${node.id}-lift-platform`,
+        position: [x, y + 0.42, z - 0.02],
+        size: [0.6, 0.12, 0.28],
+        color: '#f97316',
+        emissive: '#9a3412',
+        floor,
+        entity,
+      })
       continue
     }
     if (node.type === 'lift_transfer' || node.type === 'turn_transfer') {

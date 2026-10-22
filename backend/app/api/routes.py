@@ -3,8 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from ..core.config import API_PREFIX
-from ..schemas import SimulationControlResponse, TopologyPayload
-from ..services.goods import build_inventory
+from ..schemas import SimulationControlResponse, SimulationStartRequest, TopologyPayload
+from ..services.goods import build_inventory, load_catalog
 from ..services.runtime import repo, simulation_service
 
 router = APIRouter(prefix=API_PREFIX)
@@ -50,14 +50,22 @@ def goods_inventory(topology_id: str):
     return {"topologyId": topology_id, "slots": build_inventory(topology["payload"])}
 
 
+@router.get("/goods/catalog")
+def goods_catalog():
+    return load_catalog()
+
+
 @router.post("/simulations/start", response_model=SimulationControlResponse)
-async def start_simulation(payload: dict[str, str]):
-    topology_id = payload.get("topologyId", "")
+async def start_simulation(payload: SimulationStartRequest):
+    topology_id = payload.topologyId
     topology = repo.get_topology(topology_id)
     if not topology:
         raise HTTPException(status_code=400, detail="Topology missing")
     try:
-        return await simulation_service.start(topology["payload"])
+        return await simulation_service.start(
+            topology["payload"],
+            [order.model_dump() for order in payload.orders],
+        )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
