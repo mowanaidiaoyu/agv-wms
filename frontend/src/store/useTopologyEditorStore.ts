@@ -648,6 +648,22 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       if (state.activeTool !== 'select') return
       if (kind === 'cell') {
         const cell = state.draft.cells.find((item) => item.id === id)
+        // 输送线出入口区域常与输送带格重叠：点击落在带面/滚筒上时优先选中出入口区域，
+        // 否则事件会被输送带格拦截，导致出入口怎么点都选不中。
+        const portZone = cell
+          ? state.draft.zones.find(
+              (zone) =>
+                zone.type === 'port' &&
+                cell.row >= zone.y &&
+                cell.row < zone.y + zone.height &&
+                cell.col >= zone.x &&
+                cell.col < zone.x + zone.width,
+            )
+          : undefined
+        if (portZone) {
+          set({ selection: { kind: 'zone', id: portZone.id }, notice: null, marquee: null })
+          return
+        }
         if (cell?.type === 'conveyor') {
           const runFloor = cell.floor ?? GROUND_FLOOR
           const run = conveyorRunFromCell(state.draft, id, runFloor)

@@ -21,6 +21,7 @@ import {
   worldX,
   worldZ,
   type SceneBox,
+  type SceneCylinder,
   type SceneEntity,
   type SceneEntityKind,
   type SceneRack,
@@ -136,15 +137,17 @@ function SceneContent({
   const layers = useMemo(() => {
     const boxes: SceneBox[] = []
     const racks: SceneRack[] = []
+    const cylinders: SceneCylinder[] = []
     const slabs: SceneSlab[] = []
     const towers: SceneTower[] = []
     for (const item of spec.items) {
       if (item.kind === 'box') boxes.push(item)
       else if (item.kind === 'rack') racks.push(item)
+      else if (item.kind === 'cyl') cylinders.push(item)
       else if (item.kind === 'slab') slabs.push(item)
       else towers.push(item)
     }
-    return { boxes, racks, slabs, towers }
+    return { boxes, cylinders, racks, slabs, towers }
   }, [spec])
 
   const highlightIds = useMemo(() => {
@@ -240,6 +243,7 @@ function SceneContent({
       <BatchedTopologyMeshes
         boxes={layers.boxes}
         racks={layers.racks}
+        cylinders={layers.cylinders}
         highlightKeys={highlightIds}
         hoveredEntityId={hoverEntity}
         canSelect={canSelect}

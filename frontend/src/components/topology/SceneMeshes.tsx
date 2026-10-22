@@ -7,6 +7,7 @@ import { buildTopologyInstanceGroups, type TopologyInstanceGroup } from '../../l
 import {
   worldToCell,
   type SceneBox,
+  type SceneCylinder,
   type SceneEntityKind,
   type SceneRack,
   type SceneSlab,
@@ -294,6 +295,7 @@ function TopologyInstanceBatch({
     const color = new Color()
     group.parts.forEach((part, index) => {
       dummy.position.set(part.position[0], part.position[1], part.position[2])
+      dummy.rotation.set(part.rotation?.[0] ?? 0, part.rotation?.[1] ?? 0, part.rotation?.[2] ?? 0)
       dummy.scale.set(part.size[0], part.size[1], part.size[2])
       dummy.updateMatrix()
       mesh.setMatrixAt(index, dummy.matrix)
@@ -358,7 +360,11 @@ function TopologyInstanceBatch({
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, group.parts.length]} frustumCulled={false} {...interactionProps}>
-      <boxGeometry args={[1, 1, 1]} />
+      {group.shape === 'cylinder' ? (
+        <cylinderGeometry args={[0.5, 0.5, 1, 16]} />
+      ) : (
+        <boxGeometry args={[1, 1, 1]} />
+      )}
       {group.style.wire ? (
         <meshBasicMaterial color="#ffffff" wireframe transparent opacity={group.style.opacity} />
       ) : (
@@ -379,6 +385,7 @@ function TopologyInstanceBatch({
 export const BatchedTopologyMeshes = memo(function BatchedTopologyMeshes({
   boxes,
   racks,
+  cylinders,
   highlightKeys,
   hoveredEntityId,
   canSelect,
@@ -387,13 +394,17 @@ export const BatchedTopologyMeshes = memo(function BatchedTopologyMeshes({
 }: {
   boxes: SceneBox[]
   racks: SceneRack[]
+  cylinders: SceneCylinder[]
   highlightKeys: ReadonlySet<string>
   hoveredEntityId: string | null
   canSelect: boolean
   onEntityDown: (kind: SceneEntityKind, id: string, floor: string) => void
   setHoverEntity: (id: string | null) => void
 }) {
-  const groups = useMemo(() => buildTopologyInstanceGroups(boxes, racks), [boxes, racks])
+  const groups = useMemo(
+    () => buildTopologyInstanceGroups(boxes, racks, cylinders),
+    [boxes, cylinders, racks],
+  )
   return groups.map((group) => (
     <TopologyInstanceBatch
       key={group.key}

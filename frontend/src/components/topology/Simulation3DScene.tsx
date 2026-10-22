@@ -13,6 +13,7 @@ import {
   buildGoodsSceneBoxes,
   buildSceneSpec,
   robotWorldPosition,
+  type SceneCylinder,
 } from '../../lib/topology3d'
 import type { GoodsSlot, SimulationRobot, SimulationTask, TopologyPayload } from '../../types'
 
@@ -149,16 +150,18 @@ function Simulation3DScene({
   const layers = useMemo(() => {
     const boxes = [] as Extract<(typeof spec.items)[number], { kind: 'box' }>[]
     const racks = [] as Extract<(typeof spec.items)[number], { kind: 'rack' }>[]
+    const cylinders: SceneCylinder[] = []
     const slabs = [] as Extract<(typeof spec.items)[number], { kind: 'slab' }>[]
     const towers = [] as Extract<(typeof spec.items)[number], { kind: 'tower' }>[]
     for (const item of spec.items) {
       if (item.entity?.kind === 'node' && liveRobotIds.has(item.entity.id)) continue
       if (item.kind === 'box') boxes.push(item)
       else if (item.kind === 'rack') racks.push(item)
+      else if (item.kind === 'cyl') cylinders.push(item)
       else if (item.kind === 'slab') slabs.push(item)
       else towers.push(item)
     }
-    return { boxes, racks, slabs, towers }
+    return { boxes, cylinders, racks, slabs, towers }
   }, [liveRobotIds, spec])
 
   // 库存引用仅在货物真正变化时改变，因此商品实例层不会随每个 tick 重建。
@@ -208,6 +211,7 @@ function Simulation3DScene({
       <BatchedTopologyMeshes
         boxes={layers.boxes}
         racks={layers.racks}
+        cylinders={layers.cylinders}
         highlightKeys={EMPTY_HIGHLIGHTS}
         hoveredEntityId={null}
         canSelect={false}
