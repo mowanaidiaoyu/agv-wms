@@ -618,6 +618,10 @@
 .shuttle-demo-badge { padding: 7px 9px; border: 1px solid rgba(34, 211, 238, 0.35); border-radius: 8px; color: #67e8f9; background: rgba(8, 47, 73, 0.36); font-size: 12px; text-align: center; }
 .shuttle-transfer-marker-label { display: block; padding: 5px 8px; border: 1px solid #f8fafc; border-radius: 999px; color: #f8fafc; background: rgba(15, 23, 42, 0.92); box-shadow: 0 0 16px rgba(34, 211, 238, 0.45); font-size: 10px; font-weight: 800; white-space: nowrap; }
 .shuttle-transfer-stats dd { max-width: 210px; overflow-wrap: anywhere; }
+.shuttle-transfer-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.shuttle-transfer-vehicle-card { display: grid; gap: 8px; margin: 0; padding: 12px; border: 1px solid rgba(56, 189, 248, 0.22); border-radius: 11px; background: rgba(15, 23, 42, 0.55); }
+.shuttle-transfer-vehicle-card legend { padding: 0 6px; color: #67e8f9; font-weight: 700; }
+.shuttle-transfer-task-row { display: grid; grid-template-columns: 1fr 1.25fr 1.25fr 0.8fr; gap: 6px; align-items: center; padding: 7px 9px; border-radius: 8px; background: rgba(30, 41, 59, 0.65); font-size: 12px; }
 
 @media (max-width: 1050px) {
   .path-demo-layout { grid-template-columns: 1fr; }

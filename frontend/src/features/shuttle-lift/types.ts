@@ -351,7 +351,7 @@ export interface ShuttleTimedTrajectorySample {
   world_y: number
   world_z: number
   track_node_id: string | null
-  action: 'start' | 'wait' | 'turn' | 'move' | 'lift_enter' | 'lift' | 'lift_exit'
+  action: 'start' | 'wait' | 'turn' | 'move' | 'lift_enter' | 'lift' | 'lift_exit' | 'pick_service' | 'drop_service'
   lift_id: string | null
   edge_from: string | null
   edge_to: string | null
@@ -398,6 +398,15 @@ export interface ShuttleMultiVehicleResult {
   horizontal_distance_cells: number
   visited_states: number
   planning_status: 'planned'
+  pickup?: ShuttleTrackNode | null
+  source_location_id?: string | null
+  destination_location_id?: string | null
+  sku_id?: string | null
+  quantity?: number | null
+  pickup_service_start_seconds?: number | null
+  pickup_service_end_seconds?: number | null
+  drop_service_start_seconds?: number | null
+  drop_service_end_seconds?: number | null
 }
 
 export type ShuttlePlanningEventType =
@@ -544,6 +553,8 @@ export type ShuttleMultiMotionPhase =
   | 'moving_up'
   | 'moving_down'
   | 'exiting_lift'
+  | 'picking'
+  | 'dropping'
   | 'arrived'
 
 export interface ShuttleMultiPlaybackSample extends Omit<ShuttlePlaybackSample, 'phase'> {
@@ -669,6 +680,7 @@ export interface ShuttleDemoInventoryLedgerEntry {
   vehicle_load_after: number
   data_source: 'synthetic_demo'
   created_at: string
+  simulation_time_seconds?: number | null
 }
 
 export interface ShuttleTransferTask {
@@ -702,4 +714,39 @@ export interface ShuttleTransferTask {
   ledger: ShuttleDemoInventoryLedgerEntry[]
   created_at: string
   updated_at: string
+  batch_id?: string | null
+  priority?: number
+  runtime_phase?: 'reserved' | 'moving_to_pickup' | 'picking' | 'moving_to_dropoff' | 'dropping' | 'delivered' | 'failed' | 'cancelled' | null
+}
+
+export interface ShuttleMultiTransferVehicleRequest {
+  vehicle_id: string
+  priority: number
+  algorithm: PathDemoAlgorithm
+  current_track_node_id: string
+  source_location_id: string
+  destination_location_id: string
+  sku_id: string
+  quantity: number
+}
+
+export interface ShuttleMultiTransferBatch {
+  batch_id: string
+  idempotency_key: string
+  topology_id: string
+  topology_revision: string
+  shuttle_config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
+  status: 'reserved' | 'planned' | 'running' | 'completed' | 'failed' | 'cancelled'
+  plan: ShuttleMultiPlanResponse | null
+  simulation_elapsed_seconds: number
+  pickup_service_seconds: number
+  drop_service_seconds: number
+  service_contract_revision: 'shuttle-multi-transfer-service-v1'
+  failure_reason: string | null
+  data_source: 'synthetic_demo'
+  tasks: ShuttleTransferTask[]
+  created_at: string
+  updated_at: string
+  completed_at?: string | null
 }

@@ -69,6 +69,8 @@ function samplePhase(
   if (action === 'lift_enter') return 'entering_lift' as const
   if (action === 'lift_exit') return 'exiting_lift' as const
   if (action === 'lift') return next.world_y >= previous.world_y ? 'moving_up' as const : 'moving_down' as const
+  if (action === 'pick_service') return 'picking' as const
+  if (action === 'drop_service') return 'dropping' as const
   return 'moving_track' as const
 }
 
@@ -235,5 +237,7 @@ export const shuttleMultiMotionLabel: Record<ShuttleMultiPlaybackSample['phase']
   moving_up: '正在上升',
   moving_down: '正在下降',
   exiting_lift: '驶出提升机',
+  picking: '取货服务中',
+  dropping: '卸货服务中',
   arrived: '已到达',
 }

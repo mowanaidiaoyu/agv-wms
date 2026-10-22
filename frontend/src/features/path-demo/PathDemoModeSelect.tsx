@@ -11,7 +11,7 @@ const SHUTTLE_MODE_OPTIONS: Array<{ value: PathDemoMode; label: string }> = [
   { value: 'shuttle_single', label: '四向车单车轨迹（同层 / 跨层）' },
   { value: 'shuttle_multi_preset', label: '四向车预设多车（A/B/C）' },
   { value: 'shuttle_multi_custom', label: '四向车自定义多车（2–4 辆）' },
-  { value: 'shuttle_stock_transfer', label: 'SKU 货物搬运（单车演示）' },
+  { value: 'shuttle_stock_transfer', label: 'SKU 货物搬运（单车 / 多车）' },
 ]
 
 const CTU_MODE_OPTIONS: Array<{ value: PathDemoMode; label: string }> = [

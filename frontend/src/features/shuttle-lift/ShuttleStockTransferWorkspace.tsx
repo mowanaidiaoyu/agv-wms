@@ -15,6 +15,7 @@ import type {
   ShuttleLevel,
   ShuttleTransferTask,
 } from './types'
+import { ShuttleMultiStockTransferWorkspace } from './ShuttleMultiStockTransferWorkspace'
 
 const PathDemo3DScene = lazy(() => import('../path-demo/PathDemo3DScene').then((module) => ({ default: module.PathDemo3DScene })))
 const LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
@@ -29,16 +30,7 @@ function skuBalance(location: ShuttleDemoLocationInventory | null, skuId: string
   return location?.balances.find((item) => item.sku_id === skuId) ?? null
 }
 
-export function ShuttleStockTransferWorkspace({
-  topologyRecord,
-  topologies,
-  onTopologyChange,
-  demoMode,
-  onDemoModeChange,
-  onReturnToPlanning,
-  activeTaskId,
-  onActiveTaskIdChange,
-}: {
+export interface ShuttleStockTransferWorkspaceProps {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
   onTopologyChange: (topologyId: string) => void
@@ -47,7 +39,22 @@ export function ShuttleStockTransferWorkspace({
   onReturnToPlanning: () => void
   activeTaskId: string | null
   onActiveTaskIdChange: (taskId: string | null) => void
-}) {
+  activeBatchId?: string | null
+  onActiveBatchIdChange?: (batchId: string | null) => void
+  onTransferModeChange?: (mode: 'single' | 'multi') => void
+}
+
+export function ShuttleSingleStockTransferWorkspace({
+  topologyRecord,
+  topologies,
+  onTopologyChange,
+  demoMode,
+  onDemoModeChange,
+  onReturnToPlanning,
+  activeTaskId,
+  onActiveTaskIdChange,
+  onTransferModeChange,
+}: ShuttleStockTransferWorkspaceProps) {
   const topologyId = topologyRecord.id
   const tracksQueries = useQueries({ queries: LEVELS.map((level) => ({
     queryKey: ['shuttle-tracks', topologyId, level],
@@ -280,6 +287,10 @@ export function ShuttleStockTransferWorkspace({
           <label>拓扑<select value={topologyId} onChange={(event) => onTopologyChange(event.target.value)}>{topologies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
           <PathDemoModeSelect value={demoMode} onChange={onDemoModeChange} />
           <div className="shuttle-demo-badge">synthetic_demo · 离线逻辑货物搬运</div>
+          <div className="shuttle-transfer-mode-switch" role="group" aria-label="搬运车辆模式">
+            <button className="accent-button" type="button">单车搬运</button>
+            <button className="ghost-button" type="button" onClick={() => onTransferModeChange?.('multi')}>多车协同（2～4 辆）</button>
+          </div>
           <button className="ghost-button" type="button" disabled={initializing} onClick={() => void initialize()}>{initializing ? '正在初始化…' : '初始化模拟库存'}</button>
           <small className="path-demo-note">初始化幂等，不重置已发生的搬运，也不修改 CTU 正式库存。</small>
           {!skusQuery.isLoading && !skusQuery.data?.length ? <p className="path-demo-note">尚无 Shuttle 模拟库存，请先初始化。</p> : null}
@@ -334,4 +345,23 @@ export function ShuttleStockTransferWorkspace({
       </div>
     </div>
   )
+}
+
+export function ShuttleStockTransferWorkspace(props: ShuttleStockTransferWorkspaceProps) {
+  const [transferMode, setTransferMode] = useState<'single' | 'multi'>(
+    props.activeBatchId ? 'multi' : 'single',
+  )
+  useEffect(() => {
+    if (props.activeBatchId) setTransferMode('multi')
+  }, [props.activeBatchId])
+  if (transferMode === 'multi') {
+    return <ShuttleMultiStockTransferWorkspace
+      {...props}
+      onTransferModeChange={setTransferMode}
+    />
+  }
+  return <ShuttleSingleStockTransferWorkspace
+    {...props}
+    onTransferModeChange={setTransferMode}
+  />
 }

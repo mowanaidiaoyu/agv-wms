@@ -50,6 +50,8 @@ import type {
   ShuttleDemoLocationPage,
   ShuttleDemoSkuSummary,
   ShuttleTransferTask,
+  ShuttleMultiTransferBatch,
+  ShuttleMultiTransferVehicleRequest,
 } from '../features/shuttle-lift/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -431,5 +433,31 @@ export const api = {
   },
   cancelShuttleDemoTransfer(taskId: string) {
     return request<ShuttleTransferTask>(`/shuttle/demo-transfers/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' })
+  },
+  createShuttleDemoTransferBatch(payload: {
+    topology_id: string
+    idempotency_key: string
+    vehicle_requests: ShuttleMultiTransferVehicleRequest[]
+    planning_options?: Record<string, unknown>
+  }) {
+    return request<ShuttleMultiTransferBatch>('/shuttle/demo-transfer-batches', {
+      method: 'POST', body: JSON.stringify(payload),
+    })
+  },
+  getShuttleDemoTransferBatch(batchId: string) {
+    return request<ShuttleMultiTransferBatch>(`/shuttle/demo-transfer-batches/${encodeURIComponent(batchId)}`)
+  },
+  advanceShuttleDemoTransferBatch(batchId: string, elapsedSeconds: number) {
+    return request<ShuttleMultiTransferBatch>(`/shuttle/demo-transfer-batches/${encodeURIComponent(batchId)}/advance`, {
+      method: 'POST', body: JSON.stringify({ elapsed_seconds: elapsedSeconds }),
+    })
+  },
+  cancelShuttleDemoTransferBatch(batchId: string) {
+    return request<ShuttleMultiTransferBatch>(`/shuttle/demo-transfer-batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' })
+  },
+  failShuttleDemoTransferBatch(batchId: string, reason: string) {
+    return request<ShuttleMultiTransferBatch>(`/shuttle/demo-transfer-batches/${encodeURIComponent(batchId)}/fail`, {
+      method: 'POST', body: JSON.stringify({ reason }),
+    })
   },
 }

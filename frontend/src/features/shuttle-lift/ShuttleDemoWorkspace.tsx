@@ -26,6 +26,8 @@ interface ShuttleDemoWorkspaceProps {
   onReturnToPlanning: () => void
   activeTransferTaskId: string | null
   onActiveTransferTaskIdChange: (taskId: string | null) => void
+  activeTransferBatchId?: string | null
+  onActiveTransferBatchIdChange?: (batchId: string | null) => void
 }
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
@@ -100,6 +102,8 @@ export function ShuttleDemoWorkspace(props: ShuttleDemoWorkspaceProps) {
       onReturnToPlanning={props.onReturnToPlanning}
       activeTaskId={props.activeTransferTaskId}
       onActiveTaskIdChange={props.onActiveTransferTaskIdChange}
+      activeBatchId={props.activeTransferBatchId}
+      onActiveBatchIdChange={props.onActiveTransferBatchIdChange}
     />
   }
   return <ShuttlePlanningWorkspace {...props} />

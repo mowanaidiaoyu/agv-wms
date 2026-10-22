@@ -51,4 +51,23 @@ describe('shuttle multi playback', () => {
     expect(occupied.status).toBe('occupied')
     expect(occupied.occupantVehicleId).toBe('SHUTTLE-01')
   })
+
+  it('reports persisted Pick and Drop service dwells without moving the vehicle', () => {
+    const serviceVehicle: ShuttleMultiVehicleResult = {
+      ...vehicle,
+      arrival_time_seconds: 4,
+      timed_trajectory: [
+        { ...vehicle.timed_trajectory[0], time_step: 0, time_seconds: 0 },
+        { ...vehicle.timed_trajectory[0], time_step: 4, time_seconds: 1, action: 'pick_service' },
+        { ...vehicle.timed_trajectory[0], time_step: 8, time_seconds: 2, action: 'pick_service' },
+        { ...vehicle.timed_trajectory[2], time_step: 12, time_seconds: 3, action: 'drop_service' },
+        { ...vehicle.timed_trajectory[2], time_step: 16, time_seconds: 4, action: 'drop_service' },
+      ],
+      wait_intervals: [],
+    }
+    const picking = sampleShuttleMultiVehicle(serviceVehicle, plan.topology_id, 1.5, 'running')
+    const dropping = sampleShuttleMultiVehicle(serviceVehicle, plan.topology_id, 3.5, 'running')
+    expect(picking?.phase).toBe('picking')
+    expect(dropping?.phase).toBe('dropping')
+  })
 })

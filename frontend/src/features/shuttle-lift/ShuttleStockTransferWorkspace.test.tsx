@@ -25,6 +25,9 @@ vi.mock('../../lib/api', () => ({ api: {
   getShuttleDemoTransfer: vi.fn(), getShuttleDemoInventoryLocation: vi.fn(),
   createShuttleDemoTransfer: vi.fn(), planStartShuttleDemoTransfer: vi.fn(),
   advanceShuttleDemoTransfer: vi.fn(), cancelShuttleDemoTransfer: vi.fn(),
+  createShuttleDemoTransferBatch: vi.fn(), getShuttleDemoTransferBatch: vi.fn(),
+  advanceShuttleDemoTransferBatch: vi.fn(),
+  cancelShuttleDemoTransferBatch: vi.fn(), failShuttleDemoTransferBatch: vi.fn(),
 } }))
 vi.mock('../path-demo/pathPlayback', () => ({ usePathPlayback: () => playback }))
 vi.mock('../path-demo/PathPlaybackController', () => ({
@@ -68,6 +71,10 @@ const source: ShuttleDemoLocationInventory = {
 const destination: ShuttleDemoLocationInventory = {
   ...source, location_id: 'shuttle-location:zone:L4:r100:c53', level: 4, row: 100, col: 53,
   world_x: 53, world_y: 4, access_track_node_id: 'L4-r100-c51', balances: [balance(5)],
+}
+const destination2: ShuttleDemoLocationInventory = {
+  ...destination, location_id: 'shuttle-location:zone:L4:r100:c51', col: 51,
+  world_x: 51, access_track_node_id: 'L4-r100-c49', balances: [balance(0)],
 }
 const plan: ShuttlePlanResponse = {
   topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2',
@@ -153,7 +160,7 @@ beforeEach(() => {
     const query = options ?? {}
     return {
       topology_id: topology.id, total: query.skuId ? 1 : 2, offset: 0, limit: query.limit ?? 1000,
-      locations: query.skuId ? [source] : [source, destination],
+      locations: query.skuId ? [source] : [source, destination, destination2],
     }
   })
   vi.mocked(api.initializeShuttleDemoInventory).mockResolvedValue({
@@ -169,15 +176,69 @@ beforeEach(() => {
   vi.mocked(api.getShuttleDemoInventoryLocation).mockImplementation(async (_topologyId, locationId) => (
     locationId === source.location_id ? source : destination
   ))
+  vi.mocked(api.createShuttleDemoTransferBatch).mockResolvedValue({
+    batch_id: 'batch-1', idempotency_key: 'idempotency-1', topology_id: topology.id,
+    topology_revision: '2.0.0:hash', shuttle_config_revision: 'shuttle-4l-lift-v2',
+    coordinate_contract_revision: 'shuttle-internal-levels-v1', status: 'failed', plan: null,
+    simulation_elapsed_seconds: 0, pickup_service_seconds: 1, drop_service_seconds: 1,
+    service_contract_revision: 'shuttle-multi-transfer-service-v1',
+    failure_reason: 'test failure', data_source: 'synthetic_demo', tasks: [],
+    created_at: '2026-10-22T00:00:00Z', updated_at: '2026-10-22T00:00:00Z',
+  })
 })
 
 describe('ShuttleStockTransferWorkspace', () => {
+  it('switches within the SKU workspace to a 2-4 vehicle collaborative form', async () => {
+    renderWorkspace()
+    fireEvent.click(await screen.findByRole('button', { name: '多车协同（2～4 辆）' }))
+    expect(await screen.findByLabelText('协同搬运车辆数量')).toHaveValue('2')
+    expect(screen.getByRole('button', { name: '规划并开始多车搬运' })).toBeInTheDocument()
+    expect(await screen.findAllByLabelText(/SHUTTLE-0[12] SKU/)).toHaveLength(2)
+  })
+
+  it('submits one atomic batch request after resolving duplicate starts and terminals', async () => {
+    renderWorkspace()
+    fireEvent.click(await screen.findByRole('button', { name: '多车协同（2～4 辆）' }))
+    await screen.findByLabelText('SHUTTLE-02 车辆起点')
+    fireEvent.change(screen.getByLabelText('SHUTTLE-02 车辆起点'), { target: { value: tracks[0].track_node_id } })
+    fireEvent.change(screen.getByLabelText('SHUTTLE-02 送达货位'), { target: { value: destination2.location_id } })
+    fireEvent.click(screen.getByRole('button', { name: '规划并开始多车搬运' }))
+    await waitFor(() => expect(api.createShuttleDemoTransferBatch).toHaveBeenCalledWith(expect.objectContaining({
+      topology_id: topology.id,
+      vehicle_requests: expect.arrayContaining([
+        expect.objectContaining({ vehicle_id: 'SHUTTLE-01' }),
+        expect.objectContaining({ vehicle_id: 'SHUTTLE-02' }),
+      ]),
+    })))
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+  })
+
+  it('adds and removes collaborative vehicle cards within the 2-4 limit', async () => {
+    renderWorkspace()
+    fireEvent.click(await screen.findByRole('button', { name: '多车协同（2～4 辆）' }))
+    fireEvent.change(await screen.findByLabelText('协同搬运车辆数量'), { target: { value: '4' } })
+    expect(await screen.findByLabelText('SHUTTLE-04 SKU')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('协同搬运车辆数量'), { target: { value: '2' } })
+    await waitFor(() => expect(screen.queryByLabelText('SHUTTLE-04 SKU')).not.toBeInTheDocument())
+  })
+
+  it('aggregates same-source SKU demand before sending a batch request', async () => {
+    renderWorkspace()
+    fireEvent.click(await screen.findByRole('button', { name: '多车协同（2～4 辆）' }))
+    await screen.findByLabelText('SHUTTLE-02 搬运数量')
+    fireEvent.change(screen.getByLabelText('SHUTTLE-01 搬运数量'), { target: { value: '25' } })
+    fireEvent.change(screen.getByLabelText('SHUTTLE-02 搬运数量'), { target: { value: '20' } })
+    expect(screen.getByRole('alert')).toHaveTextContent('共享可用库存不足')
+    expect(screen.getByRole('button', { name: '规划并开始多车搬运' })).toBeDisabled()
+    expect(api.createShuttleDemoTransferBatch).not.toHaveBeenCalled()
+  })
+
   it('exposes SKU transfer as a fourth Shuttle mode', () => {
     const onChange = vi.fn()
     render(<PathDemoModeSelect value="shuttle_single" onChange={onChange} />)
     fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_stock_transfer' } })
     expect(onChange).toHaveBeenCalledWith('shuttle_stock_transfer')
-    expect(screen.getByRole('option', { name: 'SKU 货物搬运（单车演示）' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'SKU 货物搬运（单车 / 多车）' })).toBeInTheDocument()
   })
 
   it('routes the selected transfer mode through the existing Shuttle workspace', async () => {
