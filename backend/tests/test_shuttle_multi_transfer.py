@@ -175,3 +175,35 @@ def test_shared_clock_applies_pick_and_drop_exactly_once(multi_transfer):
         assert event_types.count("pick") == 1
         assert event_types.count("drop") == 1
         assert task["vehicle_load_quantity"] == 0
+        pick = next(item for item in task["ledger"] if item["event_type"] == "pick")
+        drop = next(item for item in task["ledger"] if item["event_type"] == "drop")
+        assert pick["simulation_time_seconds"] == task["pickup_at_seconds"]
+        assert drop["simulation_time_seconds"] == task["dropoff_at_seconds"]
+
+
+def test_cancel_before_pick_atomically_releases_all_batch_reservations(multi_transfer):
+    topology, _, single, service = multi_transfer
+    batch = service.create_and_plan(
+        topology["id"], f"test-{uuid.uuid4().hex}", _request(single, topology["id"]), _options()
+    )
+    cancelled = service.cancel(batch["batch_id"])
+    assert cancelled["status"] == "cancelled"
+    assert all(task["status"] == "cancelled" for task in cancelled["tasks"])
+    assert all(task["ledger"][-1]["event_type"] == "release" for task in cancelled["tasks"])
+
+
+def test_failure_after_pick_preserves_in_transit_load(multi_transfer):
+    topology, _, single, service = multi_transfer
+    batch = service.create_and_plan(
+        topology["id"], f"test-{uuid.uuid4().hex}", _request(single, topology["id"]), _options()
+    )
+    first_pick = min(
+        vehicle["pickup_service_end_seconds"] for vehicle in batch["plan"]["vehicles"]
+    )
+    advanced = service.advance(batch["batch_id"], first_pick)
+    assert any(task["vehicle_load_quantity"] > 0 for task in advanced["tasks"])
+    failed = service.fail(batch["batch_id"], "simulated runtime interruption")
+    assert failed["status"] == "failed"
+    loaded = [task for task in failed["tasks"] if task["vehicle_load_quantity"] > 0]
+    assert loaded
+    assert all(task["ledger"][-1]["event_type"] == "failure_in_transit" for task in loaded)

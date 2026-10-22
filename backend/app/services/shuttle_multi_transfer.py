@@ -317,6 +317,10 @@ class ShuttleMultiTransferService(ShuttleDemoTransferService):
                     continue
                 if target_elapsed >= float(task["pickup_at_seconds"]):
                     self._apply_pick(conn, task, now)
+                    conn.execute(
+                        "UPDATE shuttle_demo_inventory_ledger SET simulation_time_seconds=? WHERE event_id=?",
+                        (float(task["pickup_at_seconds"]), task["pick_event_id"]),
+                    )
                     task["vehicle_load_quantity"] = int(task["quantity"])
                     status = "picked"
                     conn.execute(
@@ -331,6 +335,10 @@ class ShuttleMultiTransferService(ShuttleDemoTransferService):
                     )
                 if status in {"picked", "moving_to_dropoff"} and target_elapsed >= float(task["dropoff_at_seconds"]):
                     self._apply_drop(conn, task, now)
+                    conn.execute(
+                        "UPDATE shuttle_demo_inventory_ledger SET simulation_time_seconds=? WHERE event_id=?",
+                        (float(task["dropoff_at_seconds"]), task["drop_event_id"]),
+                    )
                     status = "delivered"
                     conn.execute(
                         "UPDATE shuttle_demo_transfer_tasks SET status='delivered', vehicle_load_quantity=0, updated_at=? WHERE task_id=?",
@@ -346,8 +354,12 @@ class ShuttleMultiTransferService(ShuttleDemoTransferService):
             ).fetchone()[0]
             batch_status = "completed" if remaining == 0 else "running"
             conn.execute(
-                "UPDATE shuttle_demo_transfer_batches SET status=?, simulation_elapsed_seconds=?, updated_at=? WHERE batch_id=?",
-                (batch_status, target_elapsed, now, batch_id),
+                """
+                UPDATE shuttle_demo_transfer_batches SET status=?, simulation_elapsed_seconds=?,
+                  completed_at=CASE WHEN ?='completed' THEN COALESCE(completed_at, ?) ELSE completed_at END,
+                  updated_at=? WHERE batch_id=?
+                """,
+                (batch_status, target_elapsed, batch_status, now, now, batch_id),
             )
             refreshed = dict(conn.execute(
                 "SELECT * FROM shuttle_demo_transfer_batches WHERE batch_id=?", (batch_id,)
@@ -362,6 +374,87 @@ class ShuttleMultiTransferService(ShuttleDemoTransferService):
             if row is None:
                 raise ShuttleDemoTransferNotFound(f"Transfer batch {batch_id} not found")
             return self._batch_payload(conn, dict(row))
+
+    def cancel(self, batch_id: str) -> dict[str, Any]:
+        return self._terminate_batch(batch_id, "Cancelled by user", cancelled=True)
+
+    def fail(self, batch_id: str, reason: str) -> dict[str, Any]:
+        return self._terminate_batch(batch_id, reason, cancelled=False)
+
+    def _terminate_batch(
+        self, batch_id: str, reason: str, *, cancelled: bool
+    ) -> dict[str, Any]:
+        now = utc_now()
+        with get_conn(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            batch_row = conn.execute(
+                "SELECT * FROM shuttle_demo_transfer_batches WHERE batch_id=?", (batch_id,)
+            ).fetchone()
+            if batch_row is None:
+                raise ShuttleDemoTransferNotFound(f"Transfer batch {batch_id} not found")
+            batch = dict(batch_row)
+            if batch["status"] in {"completed", "failed", "cancelled"}:
+                return self._batch_payload(conn, batch)
+            has_in_transit = False
+            for row in conn.execute(
+                "SELECT * FROM shuttle_demo_transfer_tasks WHERE batch_id=? ORDER BY priority, vehicle_id",
+                (batch_id,),
+            ).fetchall():
+                task = dict(row)
+                if task["status"] in {"delivered", "failed", "cancelled"}:
+                    continue
+                pre_pick = task["status"] in {
+                    "created", "reserved", "planned", "moving_to_pickup"
+                }
+                if pre_pick:
+                    cursor = conn.execute(
+                        """
+                        UPDATE shuttle_demo_inventory SET quantity_reserved=quantity_reserved-?, updated_at=?
+                        WHERE topology_id=? AND location_id=? AND sku_id=? AND quantity_reserved>=?
+                        """,
+                        (
+                            task["quantity"], now, task["topology_id"], task["source_location_id"],
+                            task["sku_id"], task["quantity"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ShuttleDemoTransferConflict("Batch reservation cannot be released safely")
+                    after = self._raw_balance(
+                        conn, task["topology_id"], task["source_location_id"], task["sku_id"]
+                    )
+                    self._insert_ledger(
+                        conn, f"{task['task_id']}:release", task["task_id"], task["topology_id"],
+                        task["source_location_id"], task["sku_id"], "release", task["quantity"],
+                        0, -int(task["quantity"]), 0, after, 0, now,
+                    )
+                    next_status = "cancelled" if cancelled else "failed"
+                else:
+                    task_has_in_transit = int(task["vehicle_load_quantity"]) > 0
+                    has_in_transit = has_in_transit or task_has_in_transit
+                    if task_has_in_transit:
+                        self._insert_ledger(
+                            conn, f"{task['task_id']}:failure-in-transit", task["task_id"],
+                            task["topology_id"], None, task["sku_id"], "failure_in_transit",
+                            task["quantity"], 0, 0, 0, None,
+                            int(task["vehicle_load_quantity"]), now,
+                        )
+                    next_status = "failed"
+                conn.execute(
+                    "UPDATE shuttle_demo_transfer_tasks SET status=?, failure_reason=?, updated_at=? WHERE task_id=?",
+                    (next_status, reason, now, task["task_id"]),
+                )
+            batch_status = "failed" if has_in_transit or not cancelled else "cancelled"
+            conn.execute(
+                """
+                UPDATE shuttle_demo_transfer_batches SET status=?, failure_reason=?,
+                  completed_at=COALESCE(completed_at, ?), updated_at=? WHERE batch_id=?
+                """,
+                (batch_status, reason, now, now, batch_id),
+            )
+            refreshed = dict(conn.execute(
+                "SELECT * FROM shuttle_demo_transfer_batches WHERE batch_id=?", (batch_id,)
+            ).fetchone())
+            return self._batch_payload(conn, refreshed)
 
     def _fail_before_pick_batch(self, batch_id: str, reason: str) -> None:
         now = utc_now()

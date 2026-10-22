@@ -364,6 +364,7 @@ def init_db(db_path: Path = DB_PATH) -> None:
               drop_service_seconds REAL NOT NULL,
               service_contract_revision TEXT NOT NULL,
               failure_reason TEXT,
+              completed_at TEXT,
               data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -380,6 +381,9 @@ def init_db(db_path: Path = DB_PATH) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_shuttle_demo_transfer_tasks_batch "
             "ON shuttle_demo_transfer_tasks (batch_id, priority, vehicle_id)"
+        )
+        _ensure_column(
+            conn, "shuttle_demo_inventory_ledger", "simulation_time_seconds", "REAL"
         )
         _ensure_column(
             conn, "shuttle_storage_locations", "shuttle_config_revision",

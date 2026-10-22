@@ -118,6 +118,7 @@ class ShuttleDemoInventoryLedgerEntry(BaseModel):
     vehicle_load_after: int = Field(ge=0)
     data_source: Literal["synthetic_demo"]
     created_at: str
+    simulation_time_seconds: float | None = Field(default=None, ge=0)
 
 
 class ShuttleTransferTask(BaseModel):
@@ -212,3 +213,4 @@ class ShuttleMultiTransferBatch(BaseModel):
     tasks: list[ShuttleTransferTask]
     created_at: str
     updated_at: str
+    completed_at: str | None = None

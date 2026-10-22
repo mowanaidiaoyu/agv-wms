@@ -475,6 +475,30 @@ def advance_shuttle_demo_transfer_batch(
         raise _translate_transfer_error(exc) from exc
 
 
+@router.post(
+    "/demo-transfer-batches/{batch_id}/cancel",
+    response_model=ShuttleMultiTransferBatch,
+)
+def cancel_shuttle_demo_transfer_batch(batch_id: str):
+    try:
+        return _multi_transfer_service().cancel(batch_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post(
+    "/demo-transfer-batches/{batch_id}/fail",
+    response_model=ShuttleMultiTransferBatch,
+)
+def fail_shuttle_demo_transfer_batch(
+    batch_id: str, request: ShuttleTransferFailRequest
+):
+    try:
+        return _multi_transfer_service().fail(batch_id, request.reason)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
 @router.post("/plan", response_model=ShuttlePlanResponse)
 def create_shuttle_plan(request: ShuttlePlanRequest):
     _, graph, validation = _context(request.topology_id)
