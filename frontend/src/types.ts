@@ -155,6 +155,7 @@ export interface SimulationTaskLine {
 
 export interface SimulationTask {
   id: string
+  orderId?: string | null
   robotType: RobotType
   mode: 'direct' | 'cross_zone'
   status: string
@@ -178,6 +179,58 @@ export interface SimulationTask {
   createdTick: number
   startedTick: number | null
   completedTick: number | null
+}
+
+export type SimulationOrderPriority = 'normal' | 'urgent'
+export type SimulationOrderStatus =
+  | 'ready'
+  | 'waiting_dispatch'
+  | 'executing'
+  | 'completed'
+  | 'exception'
+
+export interface SimulationOrderLineInput {
+  id: string
+  skuId: string
+  skuName: string
+  spec?: string | null
+  quantity: number
+}
+
+export interface SimulationOrderInput {
+  id: string
+  priority: SimulationOrderPriority
+  targetStation: string
+  createdAt: string
+  lines: SimulationOrderLineInput[]
+}
+
+export interface SimulationOrder extends SimulationOrderInput {
+  status: SimulationOrderStatus
+  statusLabel: string
+  taskIds: string[]
+  totalTasks: number
+  completedTasks: number
+  progress: number
+  missingQuantity?: number
+  startedTick?: number | null
+  completedTick?: number | null
+  lines: Array<SimulationOrderLineInput & { allocated?: number; picked?: number }>
+}
+
+export interface GoodsCatalogSku {
+  skuId: string
+  name: string
+  spec?: string | null
+  grade?: string | null
+  material?: string | null
+  largeCategory?: string | null
+  subclass?: string | null
+}
+
+export interface GoodsCatalog {
+  version: number
+  skus: GoodsCatalogSku[]
 }
 
 export interface SimulationAlert {
@@ -218,10 +271,13 @@ export interface GoodsInventory {
 export interface SimulationState {
   id: string
   status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed'
+  stopReason?: 'user' | 'safety_limit' | null
+  orderDriven?: boolean
   tick: number
   topologyId: string
   robots: SimulationRobot[]
   tasks: SimulationTask[]
+  orders?: SimulationOrder[]
   inventory?: GoodsSlot[]
   alerts: SimulationAlert[]
   queues: SimulationQueues

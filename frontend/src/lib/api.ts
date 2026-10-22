@@ -1,5 +1,7 @@
 import type {
   GoodsInventory,
+  GoodsCatalog,
+  SimulationOrderInput,
   SimulationMetrics,
   SimulationState,
   StoredRecord,
@@ -60,10 +62,10 @@ export const api = {
       method: 'DELETE',
     })
   },
-  startSimulation(topologyId: string) {
+  startSimulation(topologyId: string, orders: SimulationOrderInput[] = []) {
     return request<{ runId: string; status: string }>('/simulations/start', {
       method: 'POST',
-      body: JSON.stringify({ topologyId }),
+      body: JSON.stringify({ topologyId, orders }),
     })
   },
   pauseSimulation(runId: string) {
@@ -83,5 +85,8 @@ export const api = {
   },
   getGoodsInventory(topologyId: string) {
     return request<GoodsInventory>(`/goods/inventory/${topologyId}`)
+  },
+  getGoodsCatalog() {
+    return request<GoodsCatalog>('/goods/catalog')
   },
 }

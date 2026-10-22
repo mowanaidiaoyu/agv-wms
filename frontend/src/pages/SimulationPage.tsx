@@ -1,26 +1,35 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   ArrowLeft,
   Bell,
   Bot,
+  CheckCircle2,
   ClipboardList,
   Gauge,
   Loader2,
+  LocateFixed,
   PanelRightOpen,
   Pause,
   Play,
+  Plus,
   Square,
   X,
   Zap,
 } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { KpiGrid } from '../components/KpiGrid'
+import {
+  OrderComposer,
+  OrderRail,
+  OrderTimeline,
+} from '../components/simulation/OrderWorkspace'
 import { useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
+import { createDemoOrders } from '../lib/orders'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationAlert } from '../types'
+import type { SimulationAlert, SimulationOrderInput } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
@@ -73,10 +82,29 @@ export function SimulationPage() {
   const [starting, setStarting] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
+  const [orderComposerOpen, setOrderComposerOpen] = useState(false)
+  const [ordersCollapsed, setOrdersCollapsed] = useState(false)
+  const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
+  const [selectedOrderId, setSelectedOrderId] = useState('')
+  const [focusRequest, setFocusRequest] = useState(0)
+  const [pickupNotice, setPickupNotice] = useState<{
+    id: string
+    expectedSkuName: string
+    actualSkuName: string
+    location: string
+    robotId: string
+    verified: boolean
+  } | null>(null)
+  const seededOrdersRef = useRef(false)
+  const observedPickedRef = useRef(new Map<string, number>())
 
   const topologiesQuery = useQuery({
     queryKey: ['topologies'],
     queryFn: api.listTopologies,
+  })
+  const catalogQuery = useQuery({
+    queryKey: ['goods', 'catalog'],
+    queryFn: api.getGoodsCatalog,
   })
   const socketConnected = useSimulationSocket(selectedRunId)
 
@@ -121,12 +149,68 @@ export function SimulationPage() {
     }
   }, [candidateState?.topologyId, resetRun, resolvedTopologyId])
 
+  useEffect(() => {
+    observedPickedRef.current.clear()
+    setPickupNotice(null)
+  }, [selectedRunId])
+
+  useEffect(() => {
+    if (!currentState) return
+    for (const task of currentState.tasks) {
+      const previous = observedPickedRef.current.get(task.id) ?? 0
+      if (task.picked > previous && task.orderId === selectedOrderId) {
+        const pickedLine = task.lines[Math.max(0, task.picked - 1)]
+        const assignedRobot = currentState.robots.find((robot) => robot.id === task.assignedRobotId)
+        const actualSlot = assignedRobot?.carrying?.[Math.max(0, (assignedRobot.carrying?.length ?? 1) - 1)]
+        setPickupNotice({
+          id: `${task.id}-${task.picked}`,
+          expectedSkuName: pickedLine?.skuName || pickedLine?.skuId || '指定货物',
+          actualSkuName: actualSlot?.skuName || actualSlot?.skuId || '未检测到载货',
+          location: pickedLine ? `${pickedLine.nodeId} · 第 ${pickedLine.layer} 层` : task.sourceCellId,
+          robotId: task.assignedRobotId || 'CTU',
+          verified: Boolean(actualSlot?.skuId && actualSlot.skuId === pickedLine?.skuId),
+        })
+      }
+      observedPickedRef.current.set(task.id, task.picked)
+    }
+  }, [currentState, selectedOrderId])
+
+  useEffect(() => {
+    if (!pickupNotice) return
+    const timer = window.setTimeout(() => setPickupNotice(null), 3200)
+    return () => window.clearTimeout(timer)
+  }, [pickupNotice])
+
   const topologyQuery = useQuery({
     queryKey: ['topology', topologyIdForBoard],
     queryFn: () => api.getTopology(topologyIdForBoard),
     enabled: Boolean(topologyIdForBoard),
   })
   const floors = topologyQuery.data?.payload.meta.floors?.length ? topologyQuery.data.payload.meta.floors : ['1F']
+
+  useEffect(() => {
+    if (seededOrdersRef.current || !catalogQuery.data?.skus.length) return
+    seededOrdersRef.current = true
+    const demoOrders = createDemoOrders(catalogQuery.data.skus)
+    setLocalOrders(demoOrders)
+    setSelectedOrderId(demoOrders[0]?.id ?? '')
+  }, [catalogQuery.data])
+
+  const displayedOrders = useMemo(
+    () => currentState?.orders?.length
+      ? currentState.orders
+      : localOrders.map((order) => ({
+          ...order,
+          status: 'ready' as const,
+          statusLabel: '待启动',
+          taskIds: [],
+          totalTasks: 0,
+          completedTasks: 0,
+          progress: 0,
+        })),
+    [currentState?.orders, localOrders],
+  )
+  const selectedOrder = displayedOrders.find((order) => order.id === selectedOrderId) ?? displayedOrders[0]
 
   async function startRun() {
     if (starting) return
@@ -138,7 +222,11 @@ export function SimulationPage() {
 
     try {
       setStarting(true)
-      const result = await api.startSimulation(resolvedTopologyId)
+      if (!localOrders.length) {
+        setStartError('请先新建至少一个订单，再启动订单驱动仿真。')
+        return
+      }
+      const result = await api.startSimulation(resolvedTopologyId, localOrders)
       setSelectedRunId(result.runId)
       const nextState = await api.getSimulationState(result.runId)
       setLiveState(nextState)
@@ -171,12 +259,26 @@ export function SimulationPage() {
   const alerts = currentState?.alerts ?? []
   const robots = currentState?.robots ?? []
   const isRunning = currentState?.status === 'running'
-  const runStatusLabel = starting ? '启动中…' : runStatusLabels[currentState?.status ?? 'idle'] ?? currentState?.status ?? '未启动'
-
-  function openDetails(tab: DetailTab) {
-    setDetailTab(tab)
-    setDetailsOpen(true)
-  }
+  const sceneTasks = selectedOrder
+    ? sortedTasks.filter((task) => task.orderId === selectedOrder.id)
+    : sortedTasks
+  const focusTask = sceneTasks.find((task) => task.status === 'assigned')
+    ?? sceneTasks.find((task) => task.status !== 'completed')
+  const focusRobot = focusTask?.assignedRobotId
+    ? robots.find((robot) => robot.id === focusTask.assignedRobotId)
+    : undefined
+  const isPicking = focusTask?.phase === 'pickup_from_ctu' || focusTask?.phase === 'pickup_from_shuttle'
+  const focusLine = isPicking
+    ? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
+    : undefined
+  const runStatusLabel = starting
+    ? '启动中…'
+    : currentState?.status === 'stopped' && currentState.stopReason === 'safety_limit'
+      ? '异常停止'
+      : runStatusLabels[currentState?.status ?? 'idle'] ?? currentState?.status ?? '未启动'
+  const safetyStopMessage = currentState?.status === 'stopped' && currentState.stopReason === 'safety_limit'
+    ? '仿真达到安全运行上限，仍有任务未完成。请在运行详情中检查不可达任务、设备故障或持续交通阻塞。'
+    : ''
 
   return (
     <div className="simulation-workbench">
@@ -203,6 +305,10 @@ export function SimulationPage() {
           <button className="ghost-button" onClick={() => navigate('/topology')} type="button">
             <ArrowLeft size={16} />
             返回编辑
+          </button>
+          <button className="ghost-button simulation-new-order-command" onClick={() => setOrderComposerOpen(true)} disabled={isRunning || starting} type="button">
+            <Plus size={16} />
+            新建订单
           </button>
           <button className="accent-button" onClick={startRun} disabled={!resolvedTopologyId || starting || isRunning} type="button">
             {starting ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
@@ -233,10 +339,19 @@ export function SimulationPage() {
         </div>
       </header>
 
-      <main className="simulation-scene-stage">
-        {startError || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
+      <main className={`simulation-scene-stage ${ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
+        <OrderRail
+          orders={displayedOrders}
+          selectedOrderId={selectedOrder?.id ?? ''}
+          collapsed={ordersCollapsed}
+          onSelect={setSelectedOrderId}
+          onToggle={() => setOrdersCollapsed((collapsed) => !collapsed)}
+          onCreate={() => setOrderComposerOpen(true)}
+        />
+        {startError || safetyStopMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
           <div className="simulation-message-stack">
             {startError ? <p className="form-error">{startError}</p> : null}
+            {safetyStopMessage ? <p className="form-error">{safetyStopMessage}</p> : null}
             {!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists ? (
               <p className="form-error">指定的拓扑不存在或尚未保存，请返回拓扑编辑器重新保存。</p>
             ) : null}
@@ -258,23 +373,39 @@ export function SimulationPage() {
               ))}
             </div>
 
-            <div className="simulation-kpi-strip" aria-label="关键仿真指标">
-              <button type="button" onClick={() => openDetails('metrics')}>
-                <small>吞吐量</small><strong>{currentMetrics?.throughput ?? 0}</strong>
-              </button>
-              <button type="button" onClick={() => openDetails('tasks')}>
-                <small>任务</small><strong>{currentMetrics?.completedTasks ?? 0} / {currentMetrics?.pendingTasks ?? 0}</strong>
-              </button>
-              <button type="button" onClick={() => openDetails('devices')}>
-                <small>设备</small><strong>{currentMetrics?.activeRobots ?? 0} / {currentMetrics?.blockedRobots ?? 0}</strong>
-              </button>
-              <button type="button" onClick={() => openDetails('metrics')}>
-                <small>输送线</small><strong>{Math.round((currentMetrics?.conveyorUtilization ?? 0) * 100)}%</strong>
-              </button>
-              <button type="button" onClick={() => openDetails('alerts')}>
-                <small>异常</small><strong>{(currentMetrics?.deadlocksDetected ?? 0) + (currentMetrics?.congestionEvents ?? 0)}</strong>
-              </button>
-            </div>
+            {focusTask ? (
+              <div className="simulation-task-focus-card" aria-label="当前聚焦任务">
+                <div className="simulation-task-focus-title">
+                  <span>当前聚焦任务</span>
+                  <div>
+                    <b>{focusRobot?.phaseLabel || focusTask.phaseLabel || '等待调度'}</b>
+                    <button type="button" onClick={() => setFocusRequest((request) => request + 1)}>
+                      <LocateFixed size={12} />定位目标
+                    </button>
+                  </div>
+                </div>
+                <div className="simulation-task-focus-main">
+                  <strong>{focusRobot?.id || '等待分配机器人'}</strong>
+                  <i>→</i>
+                  <strong>{focusLine ? `${focusLine.nodeId} · 第 ${focusLine.layer} 层` : `出库交付点 · ${focusTask.deliveryCellId}`}</strong>
+                </div>
+                <div className="simulation-task-focus-goods">
+                  <span>{focusLine?.skuName || focusLine?.skuId || '前往出库交付点'}</span>
+                  <small>{focusRobot ? `车载 ${focusRobot.load}/${focusRobot.capacity} 箱` : '等待设备接单'}</small>
+                </div>
+              </div>
+            ) : null}
+
+            {pickupNotice ? (
+              <div className={`simulation-pickup-notice ${pickupNotice.verified ? '' : 'simulation-pickup-notice-error'}`} role="status">
+                <CheckCircle2 size={19} />
+                <div>
+                  <strong>{pickupNotice.verified ? '取货成功，SKU 校验通过' : '取货异常，SKU 校验不一致'} · {pickupNotice.robotId}</strong>
+                  <span>预期：{pickupNotice.expectedSkuName}</span>
+                  <small>实际：{pickupNotice.actualSkuName}　来源：{pickupNotice.location}</small>
+                </div>
+              </div>
+            ) : null}
 
             <div className="simulation-3d-viewport simulation-main-viewport">
               <Suspense
@@ -289,11 +420,13 @@ export function SimulationPage() {
                   topology={topologyQuery.data.payload}
                   goods={currentState?.inventory ?? []}
                   robots={robots}
-                  tasks={currentState?.tasks ?? []}
+                  tasks={sceneTasks}
                   activeFloor={activeFloor}
+                  focusRequest={focusRequest}
                 />
               </Suspense>
             </div>
+            <OrderTimeline order={selectedOrder} />
           </>
         ) : (
           <div className="simulation-empty-state">
@@ -409,6 +542,16 @@ export function SimulationPage() {
           </div>
         </aside>
         ) : null}
+        <OrderComposer
+          open={orderComposerOpen}
+          catalog={catalogQuery.data?.skus ?? []}
+          onClose={() => setOrderComposerOpen(false)}
+          onSubmit={(order) => {
+            setLocalOrders((orders) => [order, ...orders])
+            setSelectedOrderId(order.id)
+            setOrderComposerOpen(false)
+          }}
+        />
       </main>
     </div>
   )

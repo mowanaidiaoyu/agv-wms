@@ -415,49 +415,50 @@ export const BatchedTopologyMeshes = memo(function BatchedTopologyMeshes({
 export const GoodsBoxes = memo(function GoodsBoxes({
   boxes,
   highlightKeys,
+  focusKeys,
+  dimUnfocused = false,
 }: {
   boxes: SceneBox[]
   highlightKeys?: ReadonlySet<string>
+  /** 当前订单涉及的商品箱；仿真聚焦时统一染成青色，避免 SKU 随机色形成视觉噪声。 */
+  focusKeys?: ReadonlySet<string>
+  /** 聚焦任务时把无关库存降为低亮度库存底色。 */
+  dimUnfocused?: boolean
 }) {
   const meshRef = useRef<InstancedMesh>(null)
   const invalidate = useThree((state) => state.invalidate)
-  const previousHighlightsRef = useRef<ReadonlySet<string>>(new Set())
-  const indexByKey = useMemo(() => new Map(boxes.map((box, index) => [box.key, index])), [boxes])
 
   useEffect(() => {
     const mesh = meshRef.current
     if (!mesh) return
     const dummy = new Object3D()
-    const color = new Color()
     boxes.forEach((box, i) => {
       dummy.position.set(box.position[0], box.position[1], box.position[2])
       dummy.scale.set(box.size[0], box.size[1], box.size[2])
       dummy.updateMatrix()
       mesh.setMatrixAt(i, dummy.matrix)
-      mesh.setColorAt(i, color.set(box.color))
     })
     mesh.instanceMatrix.needsUpdate = true
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-    previousHighlightsRef.current = new Set()
     invalidate()
   }, [boxes, invalidate])
 
   useEffect(() => {
     const mesh = meshRef.current
     if (!mesh) return
-    const nextHighlights = highlightKeys ?? new Set<string>()
-    const affected = new Set<string>([...previousHighlightsRef.current, ...nextHighlights])
-    if (!affected.size) return
     const color = new Color()
-    for (const key of affected) {
-      const index = indexByKey.get(key)
-      if (index === undefined) continue
-      mesh.setColorAt(index, color.set(nextHighlights.has(key) ? HIGHLIGHT : boxes[index].color))
-    }
+    boxes.forEach((box, index) => {
+      const nextColor = highlightKeys?.has(box.key)
+        ? HIGHLIGHT
+        : focusKeys?.has(box.key)
+          ? '#22d3ee'
+          : dimUnfocused
+            ? '#183348'
+            : box.color
+      mesh.setColorAt(index, color.set(nextColor))
+    })
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-    previousHighlightsRef.current = nextHighlights
     invalidate()
-  }, [boxes, highlightKeys, indexByKey, invalidate])
+  }, [boxes, dimUnfocused, focusKeys, highlightKeys, invalidate])
 
   return (
     <instancedMesh ref={meshRef} args={[undefined, undefined, boxes.length]} frustumCulled={false}>

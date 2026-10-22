@@ -51,5 +51,7 @@ def build_simulation_config(topology: dict[str, Any]) -> dict[str, Any]:
             "conveyorCellId": first_conveyor,
         },
         "seed": 7,
+        # 90 tick 仅作为原统计周期；任务未完成时继续运行，2000 tick 是异常保护上限。
         "durationTicks": 90,
+        "maxDurationTicks": 2000,
     }

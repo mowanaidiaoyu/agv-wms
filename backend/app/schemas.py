@@ -78,3 +78,24 @@ class TopologyPayload(BaseModel):
 class SimulationControlResponse(BaseModel):
     runId: str
     status: SimulationStatus
+
+
+class SimulationOrderLineInput(BaseModel):
+    id: str
+    skuId: str
+    skuName: str
+    spec: str | None = None
+    quantity: int = Field(default=1, ge=1, le=20)
+
+
+class SimulationOrderInput(BaseModel):
+    id: str
+    priority: Literal["normal", "urgent"] = "normal"
+    targetStation: str = "出库口"
+    createdAt: str
+    lines: list[SimulationOrderLineInput] = Field(min_length=1)
+
+
+class SimulationStartRequest(BaseModel):
+    topologyId: str
+    orders: list[SimulationOrderInput] = Field(default_factory=list)
