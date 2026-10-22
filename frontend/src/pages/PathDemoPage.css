@@ -452,22 +452,6 @@
 }
 .shuttle-vehicle-status-list button.is-selected { border-color: #22d3ee; background: rgba(8, 47, 73, 0.55); }
 .shuttle-lift-status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.shuttle-contract-card {
-  display: grid;
-  gap: 5px;
-  padding: 10px;
-  border: 1px solid rgba(34, 211, 238, 0.35);
-  border-radius: 9px;
-  background: rgba(8, 47, 73, 0.28);
-  color: #cbd5e1;
-  font-size: 12px;
-}
-.shuttle-contract-card strong { color: #67e8f9; font-size: 13px; }
-.shuttle-contract-card summary { cursor: pointer; }
-.shuttle-contract-card p { margin: 2px 0 0; color: #94a3b8; line-height: 1.45; }
-.shuttle-contract-card .is-verified { color: #86efac; }
-.shuttle-contract-card .is-blocked { color: #fda4af; }
-
 .shuttle-storage-audit {
   display: grid;
   gap: 9px;

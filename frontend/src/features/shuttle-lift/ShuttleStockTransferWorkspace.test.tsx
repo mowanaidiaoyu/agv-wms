@@ -97,7 +97,6 @@ function renderWorkspace(options: {
   onDemoModeChange?: ReturnType<typeof vi.fn>
   onReturnToPlanning?: ReturnType<typeof vi.fn>
   onActiveTaskIdChange?: ReturnType<typeof vi.fn>
-  onOpenAdvancedManagement?: ReturnType<typeof vi.fn>
   activeTaskId?: string | null
 } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
@@ -105,7 +104,6 @@ function renderWorkspace(options: {
   const onDemoModeChange = options.onDemoModeChange ?? vi.fn()
   const onReturnToPlanning = options.onReturnToPlanning ?? vi.fn()
   const onActiveTaskIdChange = options.onActiveTaskIdChange ?? vi.fn()
-  const onOpenAdvancedManagement = options.onOpenAdvancedManagement ?? vi.fn()
   render(<QueryClientProvider client={client}><ShuttleStockTransferWorkspace
     topologyRecord={record} topologies={[record, otherRecord]}
     onTopologyChange={onTopologyChange}
@@ -114,9 +112,8 @@ function renderWorkspace(options: {
     onReturnToPlanning={onReturnToPlanning}
     activeTaskId={options.activeTaskId ?? null}
     onActiveTaskIdChange={onActiveTaskIdChange}
-    onOpenAdvancedManagement={onOpenAdvancedManagement}
   /></QueryClientProvider>)
-  return { onTopologyChange, onDemoModeChange, onReturnToPlanning, onActiveTaskIdChange, onOpenAdvancedManagement }
+  return { onTopologyChange, onDemoModeChange, onReturnToPlanning, onActiveTaskIdChange }
 }
 
 function StatefulTransferWorkspace() {
@@ -130,7 +127,6 @@ function StatefulTransferWorkspace() {
     onReturnToPlanning={vi.fn()}
     activeTaskId={activeTaskId}
     onActiveTaskIdChange={setActiveTaskId}
-    onOpenAdvancedManagement={vi.fn()}
   />
 }
 
@@ -190,7 +186,7 @@ describe('ShuttleStockTransferWorkspace', () => {
         topologyRecord={record} topologies={[record]} onTopologyChange={vi.fn()}
         demoMode="shuttle_stock_transfer" onDemoModeChange={vi.fn()}
         onReturnToPlanning={vi.fn()} activeTransferTaskId={null}
-        onActiveTransferTaskIdChange={vi.fn()} onOpenAdvancedManagement={vi.fn()}
+        onActiveTransferTaskIdChange={vi.fn()}
       />
     </QueryClientProvider>)
     expect(await screen.findByText('SKU 货物搬运')).toBeInTheDocument()
@@ -390,10 +386,11 @@ describe('ShuttleStockTransferWorkspace', () => {
     expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
   })
 
-  it('keeps advanced storage modeling available as a separate workspace', async () => {
-    const { onOpenAdvancedManagement } = renderWorkspace()
-    fireEvent.click(await screen.findByRole('button', { name: '打开高级建模与审核' }))
-    expect(onOpenAdvancedManagement).toHaveBeenCalledTimes(1)
+  it('does not render the removed advanced modeling card', async () => {
+    renderWorkspace()
+    await screen.findByText('SKU 货物搬运')
+    expect(screen.queryByText('高级建模与审核')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '打开高级建模与审核' })).not.toBeInTheDocument()
   })
 
   it('returns to the previous planning mode without mutating task or inventory state', async () => {

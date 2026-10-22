@@ -101,7 +101,6 @@ function renderWorkspace(onDemoMode = vi.fn(), demoMode: 'shuttle_single' | 'shu
       onReturnToPlanning={vi.fn()}
       activeTransferTaskId={null}
       onActiveTransferTaskIdChange={vi.fn()}
-      onOpenAdvancedManagement={vi.fn()}
     />
   </QueryClientProvider>)
 }
@@ -138,7 +137,8 @@ beforeEach(() => {
 describe('ShuttleDemoWorkspace', () => {
   it('shows four real levels, fixed lifts, and the isolated shuttle scene', async () => {
     renderWorkspace()
-    expect(await screen.findByText('四层真实轨道 · Lift-A / Lift-B')).toBeInTheDocument()
+    expect(await screen.findByText('四向车路径规划')).toBeInTheDocument()
+    expect(screen.queryByText('四层真实轨道 · Lift-A / Lift-B')).not.toBeInTheDocument()
     expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_single')
     expect(screen.queryByRole('button', { name: '进入 CTU 平面道路与多车实验' })).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-track-count', '12'))

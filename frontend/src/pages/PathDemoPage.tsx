@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
 import { PathDemoModeSelect } from '../features/path-demo/PathDemoModeSelect'
 import type { PathDemoMode } from '../features/path-demo/PathDemoModeSelect'
@@ -97,7 +97,6 @@ function normalizeVehicles(vehicles: MultiPathVehicleRequest[]): MultiPathVehicl
 }
 
 export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicleType?: VehicleType } = {}) {
-  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const [topologyId, setTopologyId] = useState('')
@@ -499,7 +498,6 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
           onReturnToPlanning={() => selectDemoMode(previousShuttlePlanningModeRef.current)}
           activeTransferTaskId={searchParams.get('task')}
           onActiveTransferTaskIdChange={setActiveTransferTaskId}
-          onOpenAdvancedManagement={() => navigate('/topology')}
         />
       ) : (
       <div className="path-demo-layout">

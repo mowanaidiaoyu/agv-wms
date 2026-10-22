@@ -38,7 +38,6 @@ export function ShuttleStockTransferWorkspace({
   onReturnToPlanning,
   activeTaskId,
   onActiveTaskIdChange,
-  onOpenAdvancedManagement,
 }: {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
@@ -48,7 +47,6 @@ export function ShuttleStockTransferWorkspace({
   onReturnToPlanning: () => void
   activeTaskId: string | null
   onActiveTaskIdChange: (taskId: string | null) => void
-  onOpenAdvancedManagement: () => void
 }) {
   const topologyId = topologyRecord.id
   const tracksQueries = useQueries({ queries: LEVELS.map((level) => ({
@@ -312,7 +310,6 @@ export function ShuttleStockTransferWorkspace({
             <div><dt>货物守恒</dt><dd>{conservedBefore === null ? '—' : `${conservedBefore} → ${conservedNow}`}</dd></div>
           </dl>
           <section className="path-demo-camera-controls"><div className="path-demo-camera-heading"><strong>视角控制</strong><span className={`path-demo-view-badge is-${cameraViewMode}`}>{cameraViewMode === 'follow' ? '跟随' : '自由'}</span></div><div className="path-demo-camera-buttons"><button className="ghost-button" type="button" disabled={!cameraSample} onClick={() => requestCamera('locate')}>定位四向车</button><button className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'} type="button" disabled={!cameraSample} onClick={() => setCameraViewMode((value) => value === 'follow' ? 'free' : 'follow')}>跟随四向车</button><button className="ghost-button" type="button" disabled={!source} onClick={() => source && requestCamera('focus-point', [source.world_x, source.world_y, source.world_z])}>查看取货位</button><button className="ghost-button" type="button" disabled={!destination} onClick={() => destination && requestCamera('focus-point', [destination.world_x, destination.world_y, destination.world_z])}>查看目标货位</button><button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCamera('overview') }}>仓库全景</button><button className={rackXray ? 'accent-button' : 'ghost-button'} type="button" onClick={() => setRackXray((value) => !value)}>透视货架：{rackXray ? '开' : '关'}</button></div></section>
-          <details className="shuttle-contract-card"><summary><strong>高级建模与审核</strong></summary><p>演示资格只证明真实货架候选与真实 ShuttleGraph 的程序邻接、连通和车体包围盒检查；正式物理 Pick Face 仍为未审核。</p><button className="ghost-button" type="button" onClick={onOpenAdvancedManagement}>打开高级建模与审核</button></details>
         </>}
       </aside>
       <div className="path-demo-viewport" aria-label="四向车 SKU 货物搬运 3D 演示">
