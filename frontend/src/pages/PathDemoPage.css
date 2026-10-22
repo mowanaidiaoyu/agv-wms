@@ -513,6 +513,7 @@
 
 .shuttle-storage-audit-heading strong { color: #fed7aa; }
 .shuttle-storage-audit-heading .is-blocked { color: #fda4af; font-size: 12px; }
+.shuttle-storage-audit-heading .is-approved { color: #86efac; font-size: 12px; }
 .shuttle-storage-audit p { margin: 0; font-size: 12px; line-height: 1.55; }
 .shuttle-storage-audit-warning { color: #fdba74; }
 
@@ -540,6 +541,102 @@
 .shuttle-storage-audit code { overflow-wrap: anywhere; color: #e2e8f0; }
 .shuttle-storage-audit li span,
 .shuttle-storage-audit small { color: #94a3b8; }
+.shuttle-storage-filter-row,
+.shuttle-storage-review-form,
+.shuttle-dropoff-config {
+  display: grid;
+  gap: 8px;
+}
+.shuttle-storage-filter-row { grid-template-columns: 110px minmax(0, 1fr); }
+.shuttle-storage-filter-row label,
+.shuttle-storage-review-form label,
+.shuttle-dropoff-config label {
+  display: grid;
+  gap: 4px;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+.shuttle-storage-filter-row input,
+.shuttle-storage-filter-row select,
+.shuttle-storage-review-form input,
+.shuttle-storage-review-form select,
+.shuttle-storage-review-form textarea,
+.shuttle-dropoff-config input,
+.shuttle-dropoff-config select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 6px;
+  padding: 7px 8px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.88);
+}
+.shuttle-storage-review-form textarea { min-height: 60px; resize: vertical; }
+.shuttle-trial-candidates { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.shuttle-trial-candidates strong { width: 100%; color: #fde68a; font-size: 12px; }
+.shuttle-trial-candidates button,
+.shuttle-storage-candidate-list button {
+  border: 1px solid rgba(251, 146, 60, 0.28);
+  border-radius: 7px;
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.62);
+  cursor: pointer;
+}
+.shuttle-trial-candidates button { padding: 6px 8px; font-size: 11px; }
+.shuttle-storage-candidate-list {
+  display: grid;
+  gap: 6px;
+  max-height: 250px;
+  overflow: auto;
+  padding-right: 3px;
+}
+.shuttle-storage-candidate-list > span { color: #94a3b8; font-size: 11px; }
+.shuttle-storage-candidate-list button { display: grid; gap: 3px; padding: 7px; text-align: left; }
+.shuttle-storage-candidate-list button strong { color: #fed7aa; overflow-wrap: anywhere; }
+.shuttle-storage-candidate-list button span { color: #94a3b8; font-size: 10px; }
+.shuttle-storage-candidate-list button.is-selected {
+  border-color: #facc15;
+  background: rgba(113, 63, 18, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(250, 204, 21, 0.25);
+}
+.shuttle-storage-review-form,
+.shuttle-dropoff-config {
+  padding: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 8px;
+  background: rgba(8, 47, 73, 0.22);
+}
+.shuttle-geometry-check,
+.shuttle-mapping-result {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+.shuttle-geometry-check.is-valid,
+.shuttle-mapping-result.is-simulation_approved { border: 1px solid rgba(34, 197, 94, 0.42); background: rgba(20, 83, 45, 0.3); }
+.shuttle-geometry-check.is-invalid,
+.shuttle-mapping-result.is-rejected,
+.shuttle-mapping-result.is-topology_version_mismatch { border: 1px solid rgba(244, 63, 94, 0.42); background: rgba(136, 19, 55, 0.24); }
+.shuttle-mapping-result.is-draft { border: 1px solid rgba(245, 158, 11, 0.38); background: rgba(120, 53, 15, 0.24); }
+.shuttle-explicit-confirm { grid-template-columns: auto 1fr; align-items: start; }
+.shuttle-explicit-confirm input { width: auto; margin-top: 2px; }
+.shuttle-review-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.shuttle-review-actions .danger { border-color: rgba(244, 63, 94, 0.45); color: #fda4af; }
+.shuttle-storage-marker-label {
+  display: block;
+  max-width: 230px;
+  padding: 4px 7px;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  color: #fef3c7;
+  background: rgba(69, 26, 3, 0.92);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.42);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
 .shuttle-level-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .shuttle-stats dd { max-width: 210px; overflow-wrap: anywhere; }
 .shuttle-lift-label,

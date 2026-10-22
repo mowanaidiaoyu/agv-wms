@@ -95,6 +95,9 @@ export interface ShuttleStorageCandidate {
   storage_level: ShuttleLevel
   row: number
   col: number
+  world_x: number
+  world_y: number
+  world_z: number
   pick_face: 'unknown'
   access_track_node_id: null
   potential_access_track_node_ids: string[]
@@ -103,6 +106,128 @@ export interface ShuttleStorageCandidate {
   data_source: 'topology_shuttle_slot_candidate'
   execution_allowed: false
   blocker_codes: string[]
+  access_options: ShuttleAccessOption[]
+  persisted_status: ShuttleStorageReviewStatus | 'topology_version_mismatch' | null
+}
+
+export type ShuttlePickFace = 'north' | 'south' | 'east' | 'west'
+export type ShuttleStorageReviewStatus = 'draft' | 'simulation_approved' | 'rejected' | 'physical_verified'
+
+export interface ShuttleAccessOption {
+  track_node_id: string
+  shuttle_level: ShuttleLevel
+  row: number
+  col: number
+  world_x: number
+  world_y: number
+  world_z: number
+  required_pick_face: ShuttlePickFace
+  required_heading_radians: number
+  connected_to_lift_network: boolean
+  vehicle_clearance_cells: number
+  geometry_clear: boolean
+  validation_codes: string[]
+}
+
+export interface ShuttleStorageCandidatePage {
+  topology_id: string
+  topology_revision: string
+  contract_version: 'shuttle-storage-contract/v1'
+  total: number
+  offset: number
+  limit: number
+  candidates: ShuttleStorageCandidate[]
+}
+
+export interface ShuttleStorageTrialArea {
+  topology_id: string
+  topology_revision: string
+  candidates: ShuttleStorageCandidate[]
+  selection_rule: string
+  execution_allowed: false
+}
+
+export interface ShuttleMappingValidation {
+  valid: boolean
+  location_id: string
+  access_track_node_id: string | null
+  pick_face: ShuttlePickFace | null
+  topology_revision: string
+  topology_content_sha256: string
+  shuttle_config_revision: string
+  same_level: boolean
+  adjacent_track: boolean
+  pick_face_matches: boolean
+  geometry_clear: boolean
+  operation_clearance_cells: number | null
+  connected_to_lift_network: boolean
+  reachable: boolean
+  mapping_conflict: boolean
+  codes: string[]
+  reasons: string[]
+}
+
+export interface ShuttleStorageLocationRecord {
+  location_id: string
+  topology_id: string
+  topology_revision: string
+  topology_content_sha256: string
+  shuttle_config_revision: string
+  zone_id: string
+  level: ShuttleLevel
+  row: number
+  col: number
+  geometry_source: 'topology_shuttle_slot_candidate'
+  pick_face: ShuttlePickFace | null
+  access_track_node_id: string | null
+  status: ShuttleStorageReviewStatus
+  effective_status: ShuttleStorageReviewStatus | 'topology_version_mismatch'
+  execution_allowed: boolean
+  validation: ShuttleMappingValidation
+  reviewer: string
+  review_note: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ShuttleStorageReviewHistory {
+  review_id: number
+  topology_id: string
+  location_id: string
+  decision: 'draft' | 'simulation_approved' | 'rejected'
+  reviewer: string
+  review_note: string | null
+  pick_face: ShuttlePickFace | null
+  access_track_node_id: string | null
+  topology_revision: string
+  shuttle_config_revision: string
+  validation: ShuttleMappingValidation
+  created_at: string
+}
+
+export interface ShuttleDemoDropoffRecord {
+  dropoff_id: string
+  topology_id: string
+  topology_revision: string
+  topology_content_sha256: string
+  shuttle_config_revision: string
+  track_node_id: string
+  label: string
+  status: 'draft' | 'simulation_approved' | 'rejected'
+  effective_status: 'draft' | 'simulation_approved' | 'rejected' | 'topology_version_mismatch'
+  execution_allowed: boolean
+  validation: {
+    valid: boolean
+    track_node_id: string
+    parking_space_clear: boolean
+    reachable_from_location_ids: string[]
+    reasons: string[]
+  }
+  reviewer: string
+  review_note: string | null
+  data_source: 'synthetic_demo'
+  created_at: string
+  updated_at: string
 }
 
 export interface ShuttleStorageAuditResponse {

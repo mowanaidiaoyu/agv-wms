@@ -31,6 +31,11 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     selectedAccessCellId,
     onAccessCandidateSelect,
     roadSemanticCells,
+    shuttleStorageCandidates,
+    selectedShuttleStorageLocationId,
+    selectedShuttleAccessTrackNodeId,
+    onShuttleStorageCandidateSelect,
+    onShuttleAccessTrackSelect,
   }: {
     cameraViewMode: CameraViewMode
     cameraActionRequest: CameraActionRequest | null
@@ -50,6 +55,11 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
     selectedAccessCellId?: string | null
     onAccessCandidateSelect?: (accessCellId: string) => void
     roadSemanticCells?: Array<{ road_cell_id: string }>
+    shuttleStorageCandidates?: Array<{ location_id: string; access_options: Array<{ track_node_id: string }> }>
+    selectedShuttleStorageLocationId?: string | null
+    selectedShuttleAccessTrackNodeId?: string | null
+    onShuttleStorageCandidateSelect?: (locationId: string) => void
+    onShuttleAccessTrackSelect?: (trackNodeId: string) => void
   }) => (
     <div>
       <div
@@ -72,6 +82,9 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
         data-access-candidates={accessCandidates?.map((candidate) => candidate.access_cell_id).join(',') ?? ''}
         data-selected-access-cell={selectedAccessCellId ?? ''}
         data-road-semantic-cells={roadSemanticCells?.map((cell) => cell.road_cell_id).join(',') ?? ''}
+        data-shuttle-storage-candidates={shuttleStorageCandidates?.map((candidate) => candidate.location_id).join(',') ?? ''}
+        data-selected-shuttle-storage={selectedShuttleStorageLocationId ?? ''}
+        data-selected-shuttle-access={selectedShuttleAccessTrackNodeId ?? ''}
       />
       <button
         type="button"
@@ -80,6 +93,8 @@ vi.mock('../features/path-demo/PathDemo3DScene', () => ({
       >mock road cell</button>
       <button type="button" data-testid="mock-storage-node" onClick={() => onInventoryNodeSelect?.('storage-a')}>mock storage node</button>
       <button type="button" data-testid="mock-access-candidate" onClick={() => onAccessCandidateSelect?.('cell-r1-c1')}>mock access candidate</button>
+      <button type="button" data-testid="mock-shuttle-storage" onClick={() => onShuttleStorageCandidateSelect?.('shuttle-location:zone-shuttle:L1:r100:c9')}>mock shuttle storage</button>
+      <button type="button" data-testid="mock-shuttle-access" onClick={() => onShuttleAccessTrackSelect?.('L1-r100-c7')}>mock shuttle access</button>
     </div>
   ),
 }))
@@ -104,6 +119,15 @@ vi.mock('../lib/api', () => ({
     getShuttleTracks: vi.fn(),
     getShuttleLifts: vi.fn(),
     getShuttleStorageAudit: vi.fn(),
+    getShuttleStorageCandidates: vi.fn(),
+    getShuttleStorageTrialArea: vi.fn(),
+    listShuttleStorageMappings: vi.fn(),
+    saveShuttleStorageDraft: vi.fn(),
+    reviewShuttleStorageMapping: vi.fn(),
+    getShuttleStorageReviewHistory: vi.fn(),
+    listShuttleDemoDropoffs: vi.fn(),
+    saveShuttleDemoDropoffDraft: vi.fn(),
+    reviewShuttleDemoDropoff: vi.fn(),
     planShuttlePath: vi.fn(),
     getShuttleMultiScenarios: vi.fn(),
     planShuttleMulti: vi.fn(),
@@ -173,6 +197,23 @@ const inventoryLocation = {
   }],
   access_mapping: { topology_id: topology.id, storage_node_id: 'storage-a', access_cell_id: 'cell-r1-c1', status: 'configured' as const, source: 'manual_verified', validated_at: '2026-10-20T00:00:00Z' },
   data_sources: ['synthetic_demo'],
+}
+
+const shuttleStorageCandidate = {
+  location_id: 'shuttle-location:zone-shuttle:L1:r100:c9', topology_id: topology.id,
+  topology_revision: '2.0.0:hash', zone_id: 'zone-shuttle', floor: '1F', storage_level: 1 as const,
+  row: 100, col: 9, world_x: 9, world_y: shuttleLevelToWorldY(1), world_z: 1,
+  pick_face: 'unknown' as const, access_track_node_id: null,
+  potential_access_track_node_ids: ['L1-r100-c7'], access_mapping_status: 'unverified' as const,
+  review_status: 'draft' as const, data_source: 'topology_shuttle_slot_candidate' as const,
+  execution_allowed: false as const, blocker_codes: ['missing_pick_face'], persisted_status: null,
+  access_options: [{
+    track_node_id: 'L1-r100-c7', shuttle_level: 1 as const, row: 100, col: 7,
+    world_x: 7, world_y: shuttleLevelToWorldY(1), world_z: 1,
+    required_pick_face: 'west' as const, required_heading_radians: 0,
+    connected_to_lift_network: true, vehicle_clearance_cells: 1.04,
+    geometry_clear: true, validation_codes: [],
+  }],
 }
 
 const makePlan = (algorithm: 'astar' | 'dijkstra') => ({
@@ -353,6 +394,17 @@ beforeEach(() => {
     required_human_review: ['confirm storage identity'],
     candidate_preview: [],
   })
+  vi.mocked(api.getShuttleStorageCandidates).mockResolvedValue({
+    topology_id: topology.id, topology_revision: '2.0.0:hash', contract_version: 'shuttle-storage-contract/v1',
+    total: 1, offset: 0, limit: 100, candidates: [shuttleStorageCandidate],
+  })
+  vi.mocked(api.getShuttleStorageTrialArea).mockResolvedValue({
+    topology_id: topology.id, topology_revision: '2.0.0:hash', candidates: [shuttleStorageCandidate],
+    selection_rule: 'program-safe candidate for human review only', execution_allowed: false,
+  })
+  vi.mocked(api.listShuttleStorageMappings).mockResolvedValue([])
+  vi.mocked(api.listShuttleDemoDropoffs).mockResolvedValue([])
+  vi.mocked(api.getShuttleStorageReviewHistory).mockResolvedValue([])
   vi.mocked(api.previewSyntheticInventorySupplement).mockResolvedValue({
     topology_id: topology.id, eligible_location_count: 0, requested_location_count: 100,
     estimated_insert_count: 0, fill_all: false,
@@ -391,14 +443,16 @@ beforeEach(() => {
     lift_candidate_count: 2, lift_selection_basis: [],
     levels: [1, 2, 3, 4].map((level) => ({ shuttle_level: level as 1 | 2 | 3 | 4, node_count: 1, component_count: 1, component_sizes: [1] })), warnings: [],
   })
-  vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => ({
+  vi.mocked(api.getShuttleTracks).mockImplementation(async (_topologyId, level) => {
+    const levels = level ? [level] : [1, 2, 3, 4] as const
+    return {
     topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1',
-    nodes: [{
-      topology_id: topology.id, zone_id: 'zone-shuttle', track_node_id: `L${level}-r100-c7`, shuttle_level: level!,
-      row: 100, col: 7, world_x: 7, world_y: shuttleLevelToWorldY(level!), world_z: 1,
-      track_type: 'straight', traversable: true, neighbors: [],
-    }],
-  }))
+    nodes: levels.map((item) => ({
+      topology_id: topology.id, zone_id: 'zone-shuttle', track_node_id: `L${item}-r100-c7`, shuttle_level: item,
+      row: 100, col: 7, world_x: 7, world_y: shuttleLevelToWorldY(item), world_z: 1,
+      track_type: 'straight' as const, traversable: true, neighbors: [],
+    })),
+  }})
   vi.mocked(api.getShuttleLifts).mockResolvedValue({
     topology_id: topology.id, topology_revision: '2.0.0:hash', config_revision: 'shuttle-4l-lift-v2', coordinate_contract_revision: 'shuttle-internal-levels-v1', planning_enabled: true, lifts: [], warnings: [],
   })
@@ -804,8 +858,18 @@ describe('PathDemoPage', () => {
     await waitFor(() => expect(screen.getByText('正库存')).toBeInTheDocument())
     expect(screen.getByText('12', { selector: 'strong' })).toBeInTheDocument()
     expect(screen.getByLabelText('搜索 SKU 或库位')).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '四向车货位审计' })).toHaveTextContent('执行阻塞')
+    expect(screen.getByRole('region', { name: '四向车货位配置' })).toHaveTextContent('等待人工审核')
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'true')
+    await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute(
+      'data-shuttle-storage-candidates', shuttleStorageCandidate.location_id,
+    ))
+    fireEvent.click(screen.getByTestId('mock-shuttle-storage'))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-shuttle-storage', shuttleStorageCandidate.location_id)
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute(
+      'data-camera-target', `${shuttleStorageCandidate.world_x},${shuttleStorageCandidate.world_y + 0.45},${shuttleStorageCandidate.world_z}`,
+    )
+    fireEvent.click(screen.getByTestId('mock-shuttle-access'))
+    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-shuttle-access', 'L1-r100-c7')
     expect(await screen.findByRole('region', { name: 'CTU 道路语义审计' })).toHaveTextContent('CTU road 1')
     fireEvent.click(screen.getByRole('button', { name: '高亮道路语义图层' }))
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-road-semantic-cells', 'cell-r1-c1')

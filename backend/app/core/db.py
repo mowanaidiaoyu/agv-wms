@@ -18,6 +18,12 @@ def _ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
 def init_db(db_path: Path = DB_PATH) -> None:
     _ensure_parent(db_path)
     conn = sqlite3.connect(db_path)
@@ -154,7 +160,107 @@ def init_db(db_path: Path = DB_PATH) -> None:
               ON warehouse_inventory (topology_id, sku_id);
             CREATE INDEX IF NOT EXISTS idx_inventory_storage_node
               ON warehouse_inventory (topology_id, storage_node_id);
+
+            CREATE TABLE IF NOT EXISTS shuttle_storage_locations (
+              topology_id TEXT NOT NULL,
+              location_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              topology_content_sha256 TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              zone_id TEXT NOT NULL,
+              level INTEGER NOT NULL CHECK (level BETWEEN 1 AND 4),
+              row INTEGER NOT NULL,
+              col INTEGER NOT NULL,
+              geometry_source TEXT NOT NULL,
+              pick_face TEXT CHECK (pick_face IN ('north', 'south', 'east', 'west')),
+              access_track_node_id TEXT,
+              status TEXT NOT NULL CHECK (
+                status IN ('draft', 'simulation_approved', 'rejected', 'physical_verified')
+              ),
+              validation_payload TEXT NOT NULL,
+              reviewer TEXT NOT NULL,
+              review_note TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (topology_id, location_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_storage_locations_status
+              ON shuttle_storage_locations (topology_id, status, level, zone_id);
+
+            CREATE TABLE IF NOT EXISTS shuttle_storage_reviews (
+              review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              topology_id TEXT NOT NULL,
+              location_id TEXT NOT NULL,
+              decision TEXT NOT NULL CHECK (
+                decision IN ('draft', 'simulation_approved', 'rejected')
+              ),
+              reviewer TEXT NOT NULL,
+              review_note TEXT,
+              pick_face TEXT,
+              access_track_node_id TEXT,
+              topology_revision TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              validation_payload TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_storage_reviews_location
+              ON shuttle_storage_reviews (topology_id, location_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_dropoffs (
+              topology_id TEXT NOT NULL,
+              dropoff_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              topology_content_sha256 TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              track_node_id TEXT NOT NULL,
+              label TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (
+                status IN ('draft', 'simulation_approved', 'rejected')
+              ),
+              validation_payload TEXT NOT NULL,
+              reviewer TEXT NOT NULL,
+              review_note TEXT,
+              data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (topology_id, dropoff_id),
+              UNIQUE (topology_id, track_node_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_dropoff_reviews (
+              review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              topology_id TEXT NOT NULL,
+              dropoff_id TEXT NOT NULL,
+              decision TEXT NOT NULL CHECK (
+                decision IN ('draft', 'simulation_approved', 'rejected')
+              ),
+              reviewer TEXT NOT NULL,
+              review_note TEXT,
+              track_node_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              validation_payload TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             """
+        )
+        _ensure_column(
+            conn, "shuttle_storage_locations", "shuttle_config_revision",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        _ensure_column(
+            conn, "shuttle_storage_reviews", "shuttle_config_revision",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        _ensure_column(
+            conn, "shuttle_demo_dropoffs", "shuttle_config_revision",
+            "TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        _ensure_column(
+            conn, "shuttle_demo_dropoff_reviews", "shuttle_config_revision",
+            "TEXT NOT NULL DEFAULT 'unknown'",
         )
         conn.commit()
     finally:

@@ -6,7 +6,8 @@ import type { TopologyPayload } from '../../types'
 import { InventoryOverlay } from '../inventory/InventoryOverlay'
 import type { CtuRoadSemanticCell, StorageAccessCandidate } from '../inventory/types'
 import { ShuttleLift3D } from '../shuttle-lift/ShuttleLift3D'
-import type { ShuttleVisualizationState } from '../shuttle-lift/types'
+import { ShuttleStorageReviewOverlay } from '../shuttle-lift/ShuttleStorageReviewOverlay'
+import type { ShuttleDemoDropoffRecord, ShuttleStorageCandidate, ShuttleTrackNode, ShuttleVisualizationState } from '../shuttle-lift/types'
 import { CameraFollowController } from './CameraFollowController'
 import { PathDemo3DOverlay } from './PathDemo3DOverlay'
 import { RoadCellSelectionLayer } from './RoadCellSelectionLayer'
@@ -145,6 +146,13 @@ export function PathDemo3DScene({
   roadSemanticCells = [],
   shuttleVisualization,
   shuttleRackXray = false,
+  shuttleStorageCandidates = [],
+  selectedShuttleStorageLocationId = null,
+  selectedShuttleAccessTrackNodeId = null,
+  onShuttleStorageCandidateSelect,
+  onShuttleAccessTrackSelect,
+  shuttleDemoDropoffs = [],
+  shuttleStorageTracks = [],
 }: {
   topology: TopologyPayload
   activeFloor: string
@@ -172,6 +180,13 @@ export function PathDemo3DScene({
   roadSemanticCells?: CtuRoadSemanticCell[]
   shuttleVisualization?: ShuttleVisualizationState
   shuttleRackXray?: boolean
+  shuttleStorageCandidates?: ShuttleStorageCandidate[]
+  selectedShuttleStorageLocationId?: string | null
+  selectedShuttleAccessTrackNodeId?: string | null
+  onShuttleStorageCandidateSelect?: (locationId: string) => void
+  onShuttleAccessTrackSelect?: (trackNodeId: string) => void
+  shuttleDemoDropoffs?: ShuttleDemoDropoffRecord[]
+  shuttleStorageTracks?: ShuttleTrackNode[]
 }) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const storageNodeIds = useMemo(
@@ -236,6 +251,17 @@ export function PathDemo3DScene({
         conflictWorld={conflictWorld}
       />
       {shuttleVisualization ? <ShuttleLift3D state={shuttleVisualization} /> : null}
+      {inventoryMode ? (
+        <ShuttleStorageReviewOverlay
+          candidates={shuttleStorageCandidates}
+          selectedLocationId={selectedShuttleStorageLocationId}
+          selectedAccessTrackNodeId={selectedShuttleAccessTrackNodeId}
+          onCandidateSelect={onShuttleStorageCandidateSelect}
+          onAccessTrackSelect={onShuttleAccessTrackSelect}
+          dropoffs={shuttleDemoDropoffs}
+          tracks={shuttleStorageTracks}
+        />
+      ) : null}
       <RoadCellSelectionLayer
         topology={topology}
         activeFloor={activeFloor}

@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import math
+import hashlib
+import json
 from typing import Any
 
 from .shuttle_topology import (
     DEFAULT_FLOOR,
     SHUTTLE_LEVELS,
+    ShuttleConfigStore,
     build_shuttle_track_graph,
+    shuttle_slot_world_position,
     shuttle_slot_mask,
     topology_revision,
+    validate_shuttle_configuration,
 )
 
 
 CONTRACT_VERSION = "shuttle-storage-contract/v1"
 DATA_SOURCE = "topology_shuttle_slot_candidate"
+RACK_HALF_EXTENT = 0.96
+SHUTTLE_HALF_WIDTH = 0.46
+SHUTTLE_HALF_DEPTH = 0.41
+_CANDIDATE_CACHE: dict[str, list[dict[str, Any]]] = {}
 
 
 def _candidate_id(zone_id: str, level: int, row: int, col: int) -> str:
@@ -29,6 +39,74 @@ def _adjacent_track_nodes(
     return sorted(node_id for node_id in candidates if node_id in graph)
 
 
+def _pick_face(rack_row: int, rack_col: int, track_row: int, track_col: int) -> str:
+    if track_row < rack_row:
+        return "north"
+    if track_row > rack_row:
+        return "south"
+    if track_col < rack_col:
+        return "west"
+    return "east"
+
+
+def _access_options(
+    topology: dict[str, Any],
+    graph: dict[str, dict[str, Any]],
+    lift_reachable_nodes: set[str],
+    level: int,
+    row: int,
+    col: int,
+) -> list[dict[str, Any]]:
+    rack_x, _, rack_z = shuttle_slot_world_position(topology, level, row, col)
+    options: list[dict[str, Any]] = []
+    for node_id in _adjacent_track_nodes(graph, level, row, col):
+        node = graph[node_id]
+        face = _pick_face(row, col, int(node["row"]), int(node["col"]))
+        along_x = int(node["row"]) == row
+        vehicle_half_extent = SHUTTLE_HALF_WIDTH if along_x else SHUTTLE_HALF_DEPTH
+        clearance = 2.0 - RACK_HALF_EXTENT - vehicle_half_extent
+        delta_x = rack_x - float(node["world_x"])
+        delta_z = rack_z - float(node["world_z"])
+        connected = node_id in lift_reachable_nodes
+        codes = ["real_shuttle_track", "same_level", "orthogonally_adjacent"]
+        if clearance >= 0.35:
+            codes.append("vehicle_bbox_clear")
+        if connected:
+            codes.append("connected_to_verified_lift_network")
+        options.append(
+            {
+                "track_node_id": node_id,
+                "shuttle_level": level,
+                "row": int(node["row"]),
+                "col": int(node["col"]),
+                "world_x": float(node["world_x"]),
+                "world_y": float(node["world_y"]),
+                "world_z": float(node["world_z"]),
+                "required_pick_face": face,
+                "required_heading_radians": math.atan2(delta_x, delta_z),
+                "connected_to_lift_network": connected,
+                "vehicle_clearance_cells": round(clearance, 3),
+                "geometry_clear": clearance >= 0.35,
+                "validation_codes": codes,
+            }
+        )
+    return options
+
+
+def _reachable_from_lifts(
+    graph: dict[str, dict[str, Any]], lift_nodes: set[str]
+) -> set[str]:
+    pending = [node_id for node_id in lift_nodes if node_id in graph]
+    visited = set(pending)
+    while pending:
+        current = pending.pop()
+        for neighbor in graph[current]["neighbors"]:
+            if neighbor not in visited:
+                visited.add(neighbor)
+                pending.append(neighbor)
+    return visited
+
+
 def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str, Any]]:
     """Derive non-executable rack-level candidates from the same slot geometry as the renderer.
 
@@ -36,8 +114,29 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
     face, an approved access track node, or a Shuttle inventory identity, so every record stays
     in draft/unverified state until researcher B supplies and reviews those semantics.
     """
-    graph = build_shuttle_track_graph(topology)
     revision = topology_revision(topology)
+    shuttle_config = ShuttleConfigStore().load(str(topology["id"]))
+    config_digest = hashlib.sha256(
+        json.dumps(shuttle_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    cache_key = f"{revision}:{config_digest}"
+    cached = _CANDIDATE_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    # The full 666 catalog contains thousands of nested geometry records. Keep one
+    # immutable revision at a time so version-change validation cannot double the
+    # process memory while constructing the replacement catalog.
+    _CANDIDATE_CACHE.clear()
+    graph = build_shuttle_track_graph(topology)
+    validation = validate_shuttle_configuration(
+        topology, shuttle_config, graph
+    )
+    lift_nodes = {
+        node_id
+        for lift in validation.get("lifts", [])
+        for node_id in lift.get("level_entrances", {}).values()
+    }
+    lift_reachable_nodes = _reachable_from_lifts(graph, lift_nodes)
     topology_id = str(topology["id"])
     result: list[dict[str, Any]] = []
     for zone in sorted(
@@ -56,6 +155,12 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
                     if mask & (1 << (level - 1)):
                         continue
                     potential_access = _adjacent_track_nodes(graph, level, row, col)
+                    access_options = _access_options(
+                        topology, graph, lift_reachable_nodes, level, row, col
+                    )
+                    world_x, world_y, world_z = shuttle_slot_world_position(
+                        topology, level, row, col
+                    )
                     blocker_codes = ["missing_pick_face", "unverified_access_mapping"]
                     if not potential_access:
                         blocker_codes.append("no_adjacent_track_candidate")
@@ -69,6 +174,9 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
                             "storage_level": level,
                             "row": row,
                             "col": col,
+                            "world_x": world_x,
+                            "world_y": world_y,
+                            "world_z": world_z,
                             "pick_face": "unknown",
                             "access_track_node_id": None,
                             "potential_access_track_node_ids": potential_access,
@@ -77,9 +185,13 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
                             "data_source": DATA_SOURCE,
                             "execution_allowed": False,
                             "blocker_codes": blocker_codes,
+                            "access_options": access_options,
+                            "persisted_status": None,
                         }
                     )
-    return sorted(result, key=lambda item: item["location_id"])
+    result = sorted(result, key=lambda item: item["location_id"])
+    _CANDIDATE_CACHE[cache_key] = result
+    return result
 
 
 def audit_shuttle_storage(topology: dict[str, Any], preview_limit: int = 12) -> dict[str, Any]:

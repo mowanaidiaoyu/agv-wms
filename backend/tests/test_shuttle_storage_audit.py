@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api import shuttle as shuttle_api
 from app.main import app
+from app.core.repository import Repository
 from app.services.shuttle_storage_audit import (
     audit_shuttle_storage,
     build_shuttle_storage_candidates,
@@ -104,8 +105,12 @@ def test_shuttle_storage_audit_api_is_read_only_and_reports_the_blocker(
 
 def test_shuttle_storage_candidate_api_never_returns_verified_access_mapping(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
-    monkeypatch.setattr(shuttle_api, "repo", _FakeRepository(_topology()))
+    topology = _topology()
+    repository = Repository(tmp_path / "shuttle-storage-candidates.db")
+    repository.upsert_topology(topology["id"], topology["name"], topology)
+    monkeypatch.setattr(shuttle_api, "repo", repository)
     with TestClient(app) as client:
         response = client.get(
             "/api/v1/shuttle/topologies/topology-6ceb4920/storage-candidates",

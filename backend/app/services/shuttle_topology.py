@@ -80,6 +80,13 @@ def shuttle_slot_mask(topology: dict[str, Any], zone: dict[str, Any], row: int, 
     return _slot_mask(zone, row, col, _cell_lookup(topology))
 
 
+def shuttle_slot_world_position(
+    topology: dict[str, Any], level: int, row: int, col: int
+) -> tuple[float, float, float]:
+    """Return the center used by Shuttle rack slots and track nodes."""
+    return _world_position(topology, level, row, col)
+
+
 def _track_type(position: tuple[int, int], positions: set[tuple[int, int]]) -> str:
     row, col = position
     directions = [

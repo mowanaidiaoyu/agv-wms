@@ -8,7 +8,11 @@ from ..services.runtime import repo
 from ..services.shuttle_pathfinding import plan_shuttle_path
 from ..services.shuttle_storage_audit import (
     audit_shuttle_storage,
-    page_shuttle_storage_candidates,
+)
+from ..services.shuttle_storage_review import (
+    ShuttleStorageConflictError,
+    ShuttleStorageNotFoundError,
+    ShuttleStorageReviewService,
 )
 from ..services.shuttle_multi_planner import (
     ShuttleMultiPlanningError,
@@ -38,10 +42,31 @@ from ..shuttle_multi_schemas import (
 from ..shuttle_storage_schemas import (
     ShuttleStorageAuditResponse,
     ShuttleStorageCandidatePage,
+    ShuttleStorageCandidate,
+    ShuttleStorageDraftRequest,
+    ShuttleStorageLocationRecord,
+    ShuttleStorageReviewHistory,
+    ShuttleStorageReviewRequest,
+    ShuttleTrialAreaResponse,
+    ShuttleDemoDropoffDraftRequest,
+    ShuttleDemoDropoffRecord,
+    ShuttleDemoDropoffReviewRequest,
 )
 
 
 router = APIRouter(prefix="/shuttle", tags=["shuttle-offline-demo"])
+
+
+def _review_service() -> ShuttleStorageReviewService:
+    return ShuttleStorageReviewService(repo)
+
+
+def _translate_review_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ShuttleStorageNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ShuttleStorageConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
 
 
 def _context(topology_id: str):
@@ -122,15 +147,131 @@ def get_shuttle_storage_candidates(
     zone_id: str | None = Query(default=None, min_length=1),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
+    search: str | None = Query(default=None, min_length=1),
+    has_adjacent_track: bool | None = Query(default=None),
 ):
-    record, _, _ = _context(topology_id)
-    return page_shuttle_storage_candidates(
-        record["payload"],
-        level=level,
-        zone_id=zone_id,
-        offset=offset,
-        limit=limit,
-    )
+    try:
+        return _review_service().list_candidates(
+            topology_id, level=level, zone_id=zone_id, search=search,
+            has_adjacent_track=has_adjacent_track, offset=offset, limit=limit,
+        )
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-candidates/{location_id}",
+    response_model=ShuttleStorageCandidate,
+)
+def get_shuttle_storage_candidate(topology_id: str, location_id: str):
+    try:
+        return _review_service().get_candidate(topology_id, location_id)
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-trial-area",
+    response_model=ShuttleTrialAreaResponse,
+)
+def get_shuttle_storage_trial_area(topology_id: str):
+    try:
+        return _review_service().trial_area(topology_id)
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-mappings",
+    response_model=list[ShuttleStorageLocationRecord],
+)
+def list_shuttle_storage_mappings(topology_id: str):
+    try:
+        return _review_service().list_mappings(topology_id)
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.post(
+    "/topologies/{topology_id}/storage-mappings/drafts",
+    response_model=ShuttleStorageLocationRecord,
+)
+def save_shuttle_storage_mapping_draft(topology_id: str, request: ShuttleStorageDraftRequest):
+    try:
+        return _review_service().save_draft(
+            topology_id, request.location_id, request.pick_face,
+            request.access_track_node_id, request.reviewer, request.review_note,
+        )
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.post(
+    "/topologies/{topology_id}/storage-mappings/{location_id}/review",
+    response_model=ShuttleStorageLocationRecord,
+)
+def review_shuttle_storage_mapping(
+    topology_id: str, location_id: str, request: ShuttleStorageReviewRequest
+):
+    try:
+        return _review_service().review_mapping(
+            topology_id, location_id, request.decision, request.reviewer,
+            request.review_note, request.explicit_confirmation,
+        )
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/storage-mappings/{location_id}/history",
+    response_model=list[ShuttleStorageReviewHistory],
+)
+def get_shuttle_storage_mapping_history(topology_id: str, location_id: str):
+    try:
+        return _review_service().review_history(topology_id, location_id)
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/demo-dropoffs",
+    response_model=list[ShuttleDemoDropoffRecord],
+)
+def list_shuttle_demo_dropoffs(topology_id: str):
+    try:
+        return _review_service().list_dropoffs(topology_id)
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.post(
+    "/topologies/{topology_id}/demo-dropoffs/drafts",
+    response_model=ShuttleDemoDropoffRecord,
+)
+def save_shuttle_demo_dropoff_draft(topology_id: str, request: ShuttleDemoDropoffDraftRequest):
+    try:
+        return _review_service().save_dropoff_draft(
+            topology_id, request.track_node_id, request.label,
+            request.reviewer, request.review_note,
+        )
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
+
+
+@router.post(
+    "/topologies/{topology_id}/demo-dropoffs/{dropoff_id}/review",
+    response_model=ShuttleDemoDropoffRecord,
+)
+def review_shuttle_demo_dropoff(
+    topology_id: str, dropoff_id: str, request: ShuttleDemoDropoffReviewRequest
+):
+    try:
+        return _review_service().review_dropoff(
+            topology_id, dropoff_id, request.decision, request.reviewer,
+            request.review_note, request.explicit_confirmation,
+        )
+    except Exception as exc:
+        raise _translate_review_error(exc) from exc
 
 
 @router.post("/plan", response_model=ShuttlePlanResponse)

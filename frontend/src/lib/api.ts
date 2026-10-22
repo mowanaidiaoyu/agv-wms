@@ -36,6 +36,13 @@ import type {
   ShuttlePlanRequest,
   ShuttlePlanResponse,
   ShuttleStorageAuditResponse,
+  ShuttleStorageCandidate,
+  ShuttleStorageCandidatePage,
+  ShuttleStorageLocationRecord,
+  ShuttleStorageReviewHistory,
+  ShuttleStorageTrialArea,
+  ShuttleDemoDropoffRecord,
+  ShuttlePickFace,
   ShuttleTopologyLevelsResponse,
   ShuttleTracksResponse,
 } from '../features/shuttle-lift/types'
@@ -265,6 +272,82 @@ export const api = {
   getShuttleStorageAudit(topologyId: string) {
     return request<ShuttleStorageAuditResponse>(
       `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-audit`,
+    )
+  },
+  getShuttleStorageCandidates(
+    topologyId: string,
+    options: { level?: number; search?: string; hasAdjacentTrack?: boolean; limit?: number } = {},
+  ) {
+    const query = new URLSearchParams()
+    if (options.level) query.set('level', String(options.level))
+    if (options.search) query.set('search', options.search)
+    if (options.hasAdjacentTrack !== undefined) query.set('has_adjacent_track', String(options.hasAdjacentTrack))
+    query.set('limit', String(options.limit ?? 100))
+    return request<ShuttleStorageCandidatePage>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-candidates?${query}`,
+    )
+  },
+  getShuttleStorageCandidate(topologyId: string, locationId: string) {
+    return request<ShuttleStorageCandidate>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-candidates/${encodeURIComponent(locationId)}`,
+    )
+  },
+  getShuttleStorageTrialArea(topologyId: string) {
+    return request<ShuttleStorageTrialArea>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-trial-area`,
+    )
+  },
+  listShuttleStorageMappings(topologyId: string) {
+    return request<ShuttleStorageLocationRecord[]>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-mappings`,
+    )
+  },
+  saveShuttleStorageDraft(
+    topologyId: string,
+    payload: { location_id: string; pick_face: ShuttlePickFace; access_track_node_id: string; reviewer: string; review_note?: string },
+  ) {
+    return request<ShuttleStorageLocationRecord>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-mappings/drafts`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    )
+  },
+  reviewShuttleStorageMapping(
+    topologyId: string,
+    locationId: string,
+    payload: { decision: 'simulation_approved' | 'rejected'; reviewer: string; review_note?: string; explicit_confirmation: boolean },
+  ) {
+    return request<ShuttleStorageLocationRecord>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-mappings/${encodeURIComponent(locationId)}/review`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    )
+  },
+  getShuttleStorageReviewHistory(topologyId: string, locationId: string) {
+    return request<ShuttleStorageReviewHistory[]>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/storage-mappings/${encodeURIComponent(locationId)}/history`,
+    )
+  },
+  listShuttleDemoDropoffs(topologyId: string) {
+    return request<ShuttleDemoDropoffRecord[]>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-dropoffs`,
+    )
+  },
+  saveShuttleDemoDropoffDraft(
+    topologyId: string,
+    payload: { track_node_id: string; label: string; reviewer: string; review_note?: string },
+  ) {
+    return request<ShuttleDemoDropoffRecord>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-dropoffs/drafts`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    )
+  },
+  reviewShuttleDemoDropoff(
+    topologyId: string,
+    dropoffId: string,
+    payload: { decision: 'simulation_approved' | 'rejected'; reviewer: string; review_note?: string; explicit_confirmation: boolean },
+  ) {
+    return request<ShuttleDemoDropoffRecord>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-dropoffs/${encodeURIComponent(dropoffId)}/review`,
+      { method: 'POST', body: JSON.stringify(payload) },
     )
   },
   planShuttlePath(payload: ShuttlePlanRequest) {

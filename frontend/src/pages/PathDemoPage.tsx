@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
 import { PathDemoModeSelect } from '../features/path-demo/PathDemoModeSelect'
@@ -38,6 +38,7 @@ import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPan
 import type { StorageInventoryLocation } from '../features/inventory/types'
 import { ShuttleDemoWorkspace } from '../features/shuttle-lift/ShuttleDemoWorkspace'
 import { ShuttleStorageAuditPanel } from '../features/shuttle-lift/ShuttleStorageAuditPanel'
+import type { ShuttleStorageCandidate } from '../features/shuttle-lift/types'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -94,6 +95,10 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const [vehicleType, setVehicleType] = useState<VehicleType>(initialVehicleType)
   const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
   const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
+  const [shuttleStorageLevel, setShuttleStorageLevel] = useState(1)
+  const [shuttleStorageSearch, setShuttleStorageSearch] = useState('')
+  const [selectedShuttleStorageLocationId, setSelectedShuttleStorageLocationId] = useState<string | null>(null)
+  const [selectedShuttleAccessTrackNodeId, setSelectedShuttleAccessTrackNodeId] = useState<string | null>(null)
   const [roadSemanticOverlayEnabled, setRoadSemanticOverlayEnabled] = useState(false)
   const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
   const [startCellId, setStartCellId] = useState('')
@@ -163,6 +168,50 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
     queryFn: () => api.getShuttleStorageAudit(topologyId),
     enabled: workspaceMode === 'inventory' && Boolean(topologyId),
   })
+  const shuttleStorageCandidatesQuery = useQuery({
+    queryKey: ['shuttle-storage-candidates', topologyId, shuttleStorageLevel, shuttleStorageSearch.trim()],
+    queryFn: () => api.getShuttleStorageCandidates(topologyId, {
+      level: shuttleStorageLevel,
+      search: shuttleStorageSearch.trim() || undefined,
+      hasAdjacentTrack: true,
+      limit: 100,
+    }),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleStorageTrialAreaQuery = useQuery({
+    queryKey: ['shuttle-storage-trial-area', topologyId],
+    queryFn: () => api.getShuttleStorageTrialArea(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleStorageMappingsQuery = useQuery({
+    queryKey: ['shuttle-storage-mappings', topologyId],
+    queryFn: () => api.listShuttleStorageMappings(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleDemoDropoffsQuery = useQuery({
+    queryKey: ['shuttle-demo-dropoffs', topologyId],
+    queryFn: () => api.listShuttleDemoDropoffs(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleStorageTracksQuery = useQuery({
+    queryKey: ['shuttle-storage-tracks', topologyId],
+    queryFn: () => api.getShuttleTracks(topologyId),
+    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
+  })
+  const shuttleStorageSceneCandidates = useMemo(() => {
+    const candidates = [...(shuttleStorageCandidatesQuery.data?.candidates ?? [])]
+    const selected = shuttleStorageTrialAreaQuery.data?.candidates.find(
+      (candidate) => candidate.location_id === selectedShuttleStorageLocationId,
+    )
+    if (selected && !candidates.some((candidate) => candidate.location_id === selected.location_id)) {
+      candidates.push(selected)
+    }
+    return candidates
+  }, [
+    selectedShuttleStorageLocationId,
+    shuttleStorageCandidatesQuery.data?.candidates,
+    shuttleStorageTrialAreaQuery.data?.candidates,
+  ])
   const stockedInventoryNodeIds = useMemo(
     () => new Set(
       (inventoryLocationsQuery.data ?? [])
@@ -388,6 +437,25 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
     ])
   }
 
+  const selectShuttleAccessTrack = useCallback((trackNodeId: string) => {
+    setSelectedShuttleAccessTrackNodeId(trackNodeId || null)
+  }, [])
+
+  const locateShuttleStorageCandidate = (candidate: ShuttleStorageCandidate) => {
+    setSelectedShuttleStorageLocationId(candidate.location_id)
+    setSelectedShuttleAccessTrackNodeId(null)
+    setCameraViewMode('free')
+    requestCameraAction('focus-point', [candidate.world_x, candidate.world_y + 0.45, candidate.world_z])
+  }
+
+  const locateShuttleTrack = (trackNodeId: string) => {
+    const track = shuttleStorageTracksQuery.data?.nodes.find((item) => item.track_node_id === trackNodeId)
+    if (!track) return
+    setSelectedShuttleAccessTrackNodeId(trackNodeId)
+    setCameraViewMode('free')
+    requestCameraAction('focus-point', [track.world_x, track.world_y + 0.35, track.world_z])
+  }
+
   const locateConflictEvent = (event: MultiPathConflictEvent, seekToEvent: boolean) => {
     if (!topologyRecord) return
     const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
@@ -521,6 +589,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
             setTopologyId(nextTopologyId)
             setSelectedInventoryNodeId(null)
             setSelectedAccessCellId(null)
+            setSelectedShuttleStorageLocationId(null)
+            setSelectedShuttleAccessTrackNodeId(null)
             setStartCellId('')
             setGoalCellId('')
             setPresetVehicles([])
@@ -544,6 +614,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
                 setTopologyId(event.target.value)
                 setSelectedInventoryNodeId(null)
                 setSelectedAccessCellId(null)
+                setSelectedShuttleStorageLocationId(null)
+                setSelectedShuttleAccessTrackNodeId(null)
                 setStartCellId('')
                 setGoalCellId('')
                 setPresetVehicles([])
@@ -887,9 +959,31 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
           ) : (
             <>
               <ShuttleStorageAuditPanel
+                topologyId={topologyId}
                 audit={shuttleStorageAuditQuery.data}
                 loading={shuttleStorageAuditQuery.isLoading}
                 error={shuttleStorageAuditQuery.isError ? String(shuttleStorageAuditQuery.error) : null}
+                candidates={shuttleStorageCandidatesQuery.data?.candidates ?? []}
+                candidateTotal={shuttleStorageCandidatesQuery.data?.total ?? 0}
+                candidatesLoading={shuttleStorageCandidatesQuery.isLoading}
+                candidatesError={shuttleStorageCandidatesQuery.isError ? String(shuttleStorageCandidatesQuery.error) : null}
+                trialArea={shuttleStorageTrialAreaQuery.data}
+                mappings={shuttleStorageMappingsQuery.data ?? []}
+                dropoffs={shuttleDemoDropoffsQuery.data ?? []}
+                tracks={shuttleStorageTracksQuery.data?.nodes ?? []}
+                level={shuttleStorageLevel}
+                search={shuttleStorageSearch}
+                selectedLocationId={selectedShuttleStorageLocationId}
+                selectedAccessTrackNodeId={selectedShuttleAccessTrackNodeId}
+                onLevelChange={setShuttleStorageLevel}
+                onSearchChange={setShuttleStorageSearch}
+                onCandidateSelect={(candidate) => {
+                  setSelectedShuttleStorageLocationId(candidate.location_id)
+                  setSelectedShuttleAccessTrackNodeId(null)
+                }}
+                onAccessTrackSelect={selectShuttleAccessTrack}
+                onLocateCandidate={locateShuttleStorageCandidate}
+                onLocateTrack={locateShuttleTrack}
               />
               <StorageInventoryPanel
               topologyId={topologyId}
@@ -945,6 +1039,19 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
                   locateAccessCell(accessCellId)
                 }}
                 roadSemanticCells={roadSemanticOverlayEnabled ? ctuRoadAuditQuery.data?.road_cells ?? [] : []}
+                shuttleRackXray={Boolean(selectedShuttleStorageLocationId)}
+                shuttleStorageCandidates={shuttleStorageSceneCandidates}
+                selectedShuttleStorageLocationId={selectedShuttleStorageLocationId}
+                selectedShuttleAccessTrackNodeId={selectedShuttleAccessTrackNodeId}
+                onShuttleStorageCandidateSelect={(locationId) => {
+                  const candidate = shuttleStorageSceneCandidates.find(
+                    (item) => item.location_id === locationId,
+                  )
+                  if (candidate) locateShuttleStorageCandidate(candidate)
+                }}
+                onShuttleAccessTrackSelect={locateShuttleTrack}
+                shuttleDemoDropoffs={shuttleDemoDropoffsQuery.data ?? []}
+                shuttleStorageTracks={shuttleStorageTracksQuery.data?.nodes ?? []}
               />
             </Suspense>
           ) : (
