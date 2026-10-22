@@ -25,6 +25,7 @@ from ..services.shuttle_multi_planner import (
     failed_shuttle_multi_response,
     plan_shuttle_multi,
 )
+from ..services.shuttle_multi_transfer import ShuttleMultiTransferService
 from ..services.shuttle_topology import (
     SHUTTLE_COORDINATE_CONTRACT_REVISION,
     ShuttleConfigStore,
@@ -68,6 +69,8 @@ from ..shuttle_transfer_schemas import (
     ShuttleTransferCreateRequest,
     ShuttleTransferFailRequest,
     ShuttleTransferTask,
+    ShuttleMultiTransferBatch,
+    ShuttleMultiTransferCreateRequest,
 )
 
 
@@ -80,6 +83,10 @@ def _review_service() -> ShuttleStorageReviewService:
 
 def _transfer_service() -> ShuttleDemoTransferService:
     return ShuttleDemoTransferService(repo)
+
+
+def _multi_transfer_service() -> ShuttleMultiTransferService:
+    return ShuttleMultiTransferService(repo)
 
 
 def _translate_review_error(exc: Exception) -> HTTPException:
@@ -430,6 +437,40 @@ def fail_shuttle_demo_transfer(task_id: str, request: ShuttleTransferFailRequest
 def get_shuttle_demo_transfer_ledger(task_id: str):
     try:
         return _transfer_service().list_ledger(task_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfer-batches", response_model=ShuttleMultiTransferBatch)
+def create_shuttle_demo_transfer_batch(request: ShuttleMultiTransferCreateRequest):
+    try:
+        return _multi_transfer_service().create_and_plan(
+            request.topology_id,
+            request.idempotency_key,
+            [item.model_dump() for item in request.vehicle_requests],
+            request.planning_options.model_dump(),
+        )
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get("/demo-transfer-batches/{batch_id}", response_model=ShuttleMultiTransferBatch)
+def get_shuttle_demo_transfer_batch(batch_id: str):
+    try:
+        return _multi_transfer_service().get_batch(batch_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post(
+    "/demo-transfer-batches/{batch_id}/advance",
+    response_model=ShuttleMultiTransferBatch,
+)
+def advance_shuttle_demo_transfer_batch(
+    batch_id: str, request: ShuttleTransferAdvanceRequest
+):
+    try:
+        return _multi_transfer_service().advance(batch_id, request.elapsed_seconds)
     except Exception as exc:
         raise _translate_transfer_error(exc) from exc
 

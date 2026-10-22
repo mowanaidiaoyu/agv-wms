@@ -6,6 +6,7 @@ import itertools
 import json
 import math
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -430,6 +431,40 @@ def _goal_is_safe(
     return _candidate_conflict(samples, reserved, safety_distance) is None
 
 
+def _goal_window_is_safe(
+    node: dict[str, Any],
+    arrival_tick: int,
+    hold_ticks: int,
+    reserved: list[dict[str, Any]],
+    safety_distance: float,
+) -> bool:
+    """Validate a finite service dwell without turning it into terminal occupancy."""
+    position = _position(node)
+    samples = [
+        _pose(tick, position, node_id=node["track_node_id"], action="wait")
+        for tick in range(arrival_tick, arrival_tick + hold_ticks + 1)
+    ]
+    return _candidate_conflict(samples, reserved, safety_distance) is None
+
+
+def _service_action(
+    node: dict[str, Any], start_tick: int, duration_ticks: int, action: str
+) -> dict[str, Any]:
+    position = _position(node)
+    return {
+        "kind": action,
+        "from_node": node["track_node_id"],
+        "to_node": node["track_node_id"],
+        "end_tick": start_tick + duration_ticks,
+        "next_direction": None,
+        "samples": [
+            _pose(tick, position, node_id=node["track_node_id"], action=action)
+            for tick in range(start_tick, start_tick + duration_ticks + 1)
+        ],
+        "distance_cells": 0.0,
+    }
+
+
 def _reconstruct_actions(
     came_from: dict[tuple[Any, ...], tuple[tuple[Any, ...], dict[str, Any]]],
     state: tuple[Any, ...],
@@ -451,6 +486,10 @@ def _search_vehicle(
     lift_schedules: dict[str, list[dict[str, Any]]],
     options: dict[str, Any],
     tracker: ConflictTracker,
+    *,
+    start_tick: int = 0,
+    goal_hold_ticks: int = 0,
+    persistent_goal: bool = True,
 ) -> tuple[list[dict[str, Any]], int]:
     start_id = str(vehicle["start_track_node_id"])
     goal_id = str(vehicle["target_track_node_id"])
@@ -466,9 +505,11 @@ def _search_vehicle(
     )[: int(options["max_lift_candidates"])]
     initial_levels = {key: int(value) for key, value in options["lift_initial_levels"].items()}
     sequence = itertools.count()
-    start_state = (start_id, None, 0, False)
+    start_state = (start_id, None, start_tick, False)
     first_priority = _heuristic_ticks(start, goal, available_lifts, time_step_seconds) if vehicle["algorithm"] == "astar" else 0
-    frontier: list[tuple[int, int, int, tuple[Any, ...]]] = [(first_priority, 0, next(sequence), start_state)]
+    frontier: list[tuple[int, int, int, tuple[Any, ...]]] = [
+        (start_tick + first_priority, start_tick, next(sequence), start_state)
+    ]
     visited: set[tuple[Any, ...]] = set()
     came_from: dict[tuple[Any, ...], tuple[tuple[Any, ...], dict[str, Any]]] = {}
     expanded = 0
@@ -490,8 +531,16 @@ def _search_vehicle(
                 max_expanded_states=int(options["max_expanded_states"]),
             )
         current = graph[node_id]
-        if node_id == goal_id and _goal_is_safe(current, tick, reserved, safety_distance):
-            return _reconstruct_actions(came_from, state), expanded
+        if node_id == goal_id:
+            goal_safe = (
+                _goal_is_safe(current, tick, reserved, safety_distance)
+                if persistent_goal
+                else _goal_window_is_safe(
+                    current, tick, goal_hold_ticks, reserved, safety_distance
+                )
+            )
+            if goal_safe and tick + goal_hold_ticks <= int(options["max_time_steps"]):
+                return _reconstruct_actions(came_from, state), expanded
         if tick >= int(options["max_time_steps"]):
             continue
 
@@ -1084,6 +1133,286 @@ def plan_shuttle_multi(
                 "max_lift_candidates": options["max_lift_candidates"],
                 "max_replans": options["max_replans"],
             },
+        },
+    }
+
+
+def plan_shuttle_multi_transfer(
+    graph: dict[str, dict[str, Any]],
+    lifts: list[dict[str, Any]],
+    vehicles: list[dict[str, Any]],
+    options: dict[str, Any],
+    *,
+    topology_id: str,
+    topology_version: str,
+    topology_revision: str,
+    config_revision: str,
+    pickup_service_seconds: float = 1.0,
+    drop_service_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """Plan start -> pickup -> drop as one prioritized reservation problem.
+
+    The two service dwells are part of the reserved trajectory.  The pickup is
+    a finite waypoint; the final drop node keeps the existing persistent goal
+    occupancy rule.  Lift schedules are committed only after both legs of a
+    vehicle have succeeded.
+    """
+    started = time.perf_counter()
+    planning_vehicles = [
+        {
+            "vehicle_id": item["vehicle_id"],
+            "start_track_node_id": item["start_track_node_id"],
+            "target_track_node_id": item["target_track_node_id"],
+            "priority": item["priority"],
+            "algorithm": item["algorithm"],
+        }
+        for item in vehicles
+    ]
+    _validate_inputs(graph, lifts, planning_vehicles, options)
+    for vehicle in vehicles:
+        pickup_id = str(vehicle["pickup_track_node_id"])
+        if pickup_id not in graph or not graph[pickup_id].get("traversable"):
+            raise ShuttleMultiPlanningError(
+                f"Vehicle {vehicle['vehicle_id']} references a non-traversable pickup node: {pickup_id}",
+                failure_code="unreachable_track",
+                vehicle_id=str(vehicle["vehicle_id"]),
+                details={"track_node_id": pickup_id, "endpoint": "pickup_track_node_id"},
+            )
+        for start_id, goal_id, stage in (
+            (vehicle["start_track_node_id"], pickup_id, "to_pickup"),
+            (pickup_id, vehicle["target_track_node_id"], "to_dropoff"),
+        ):
+            spatial = plan_shuttle_path(graph, lifts, start_id, goal_id, vehicle["algorithm"])
+            if spatial["result_status"] != "success":
+                raise ShuttleMultiPlanningError(
+                    f"Vehicle {vehicle['vehicle_id']} has no legal {stage} route: "
+                    f"{spatial.get('failure_reason') or 'unreachable track'}",
+                    failure_code="unreachable_track",
+                    vehicle_id=str(vehicle["vehicle_id"]),
+                    expanded_states=int(spatial.get("visited_states", 0)),
+                    details={"stage": stage, "start_track_node_id": start_id, "target_track_node_id": goal_id},
+                )
+
+    ordered = sorted(vehicles, key=lambda item: (int(item["priority"]), str(item["vehicle_id"])))
+    lift_schedules = {
+        str(lift["lift_id"]): [] for lift in lifts if lift.get("state", "idle") != "unavailable"
+    }
+    reserved: list[dict[str, Any]] = []
+    tracker = ConflictTracker()
+    results: list[dict[str, Any]] = []
+    all_lift_reservations: list[dict[str, Any]] = []
+    all_events: list[dict[str, Any]] = []
+    time_step_seconds = float(options["time_step_seconds"])
+    pickup_ticks = _seconds_to_ticks(pickup_service_seconds, time_step_seconds)
+    drop_ticks = _seconds_to_ticks(drop_service_seconds, time_step_seconds)
+    safety_distance = math.hypot(
+        float(options["vehicle_length_cells"]), float(options["vehicle_width_cells"])
+    ) + float(options["safety_margin_cells"])
+
+    for vehicle in ordered:
+        working_schedules = deepcopy(lift_schedules)
+        first_vehicle = {
+            **vehicle,
+            "target_track_node_id": vehicle["pickup_track_node_id"],
+        }
+        first_actions, first_expanded = _search_vehicle(
+            graph,
+            lifts,
+            first_vehicle,
+            reserved,
+            working_schedules,
+            options,
+            tracker,
+            goal_hold_ticks=pickup_ticks,
+            persistent_goal=False,
+        )
+        first_end_tick = int(first_actions[-1]["end_tick"]) if first_actions else 0
+        pick_action = _service_action(
+            graph[vehicle["pickup_track_node_id"]], first_end_tick, pickup_ticks, "pick_service"
+        )
+        for action in first_actions:
+            reservation = action.get("lift_reservation")
+            if reservation:
+                working_schedules[reservation["lift_id"]].append(reservation)
+
+        second_vehicle = {
+            **vehicle,
+            "start_track_node_id": vehicle["pickup_track_node_id"],
+        }
+        second_actions, second_expanded = _search_vehicle(
+            graph,
+            lifts,
+            second_vehicle,
+            reserved,
+            working_schedules,
+            options,
+            tracker,
+            start_tick=int(pick_action["end_tick"]),
+            persistent_goal=True,
+        )
+        second_end_tick = (
+            int(second_actions[-1]["end_tick"])
+            if second_actions
+            else int(pick_action["end_tick"])
+        )
+        drop_action = _service_action(
+            graph[vehicle["target_track_node_id"]], second_end_tick, drop_ticks, "drop_service"
+        )
+        actions = [*first_actions, pick_action, *second_actions, drop_action]
+        trajectory = _flatten_actions(
+            graph[vehicle["start_track_node_id"]], actions, time_step_seconds
+        )
+        waits = _wait_intervals(trajectory, time_step_seconds)
+        lift_usages: list[dict[str, Any]] = []
+        vehicle_lift_reservations: list[dict[str, Any]] = []
+        for action in [*first_actions, *second_actions]:
+            reservation = action.get("lift_reservation")
+            if not reservation:
+                continue
+            reservation["used_as_alternate"] = False
+            if action in second_actions:
+                working_schedules[reservation["lift_id"]].append(reservation)
+            vehicle_lift_reservations.append(reservation)
+            lift_usages.append(_lift_usage_payload(reservation, time_step_seconds))
+        lift_schedules = working_schedules
+        all_lift_reservations.extend(vehicle_lift_reservations)
+
+        path = [str(vehicle["start_track_node_id"])]
+        horizontal_distance = 0.0
+        for action in actions:
+            horizontal_distance += float(action["distance_cells"])
+            if action["kind"] not in {"wait", "pick_service", "drop_service"} and action["to_node"] != path[-1]:
+                path.append(action["to_node"])
+        wait_time = sum(wait["duration_seconds"] for wait in waits)
+        result = {
+            "vehicle_id": str(vehicle["vehicle_id"]),
+            "priority": int(vehicle["priority"]),
+            "algorithm": vehicle["algorithm"],
+            "start": graph[vehicle["start_track_node_id"]],
+            "pickup": graph[vehicle["pickup_track_node_id"]],
+            "destination": graph[vehicle["target_track_node_id"]],
+            "source_location_id": vehicle.get("source_location_id"),
+            "destination_location_id": vehicle.get("destination_location_id"),
+            "sku_id": vehicle.get("sku_id"),
+            "quantity": vehicle.get("quantity"),
+            "path": path,
+            "timed_trajectory": _external_trajectory(trajectory),
+            "wait_intervals": waits,
+            "lift_usage": lift_usages,
+            "arrival_time_seconds": (len(trajectory) - 1) * time_step_seconds,
+            "wait_time_seconds": wait_time,
+            "horizontal_distance_cells": horizontal_distance,
+            "visited_states": first_expanded + second_expanded,
+            "planning_status": "planned",
+            "pickup_service_start_seconds": first_end_tick * time_step_seconds,
+            "pickup_service_end_seconds": int(pick_action["end_tick"]) * time_step_seconds,
+            "drop_service_start_seconds": second_end_tick * time_step_seconds,
+            "drop_service_end_seconds": int(drop_action["end_tick"]) * time_step_seconds,
+            "_trajectory": trajectory,
+        }
+        results.append(result)
+        reserved.append(
+            {
+                "vehicle_id": str(vehicle["vehicle_id"]),
+                "priority": int(vehicle["priority"]),
+                "trajectory": trajectory,
+            }
+        )
+        all_events.extend(
+            _selected_action_events(str(vehicle["vehicle_id"]), actions, waits, time_step_seconds)
+        )
+
+    safety = validate_shuttle_multi_plan(results, all_lift_reservations, safety_distance)
+    all_events = list(tracker.events.values()) + all_events
+    all_events.sort(key=lambda item: (float(item["simulation_time_seconds"]), str(item["event_type"]), str(item["event_id"])))
+    makespan = max((item["arrival_time_seconds"] for item in results), default=0.0)
+    total_wait = sum(item["wait_time_seconds"] for item in results)
+    usage_by_lift = {
+        lift_id: [item for item in all_lift_reservations if item["lift_id"] == lift_id]
+        for lift_id in ("shuttle-lift-a", "shuttle-lift-b")
+    }
+    unresolved = [] if safety["safe"] else [
+        {key: value for key, value in safety.items() if key != "safe" and value}
+    ]
+    canonical_input = json.dumps(
+        {
+            "topology_revision": topology_revision,
+            "config_revision": config_revision,
+            "vehicles": ordered,
+            "options": options,
+            "pickup_service_seconds": pickup_service_seconds,
+            "drop_service_seconds": drop_service_seconds,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    external_results = [
+        {key: value for key, value in result.items() if key != "_trajectory"}
+        for result in results
+    ]
+    return {
+        "planning_id": f"shuttle-multi-transfer-{hashlib.sha256(canonical_input.encode()).hexdigest()[:16]}",
+        "topology_id": topology_id,
+        "topology_version": topology_version,
+        "topology_revision": topology_revision,
+        "shuttle_config_revision": config_revision,
+        "coordinate_contract_version": SHUTTLE_COORDINATE_CONTRACT_REVISION,
+        "planning_algorithm_version": f"{PLANNING_ALGORITHM_VERSION}-multi-stage-v1",
+        "status": "planning_success" if safety["safe"] else "unsafe",
+        "vehicles": external_results,
+        "events": all_events,
+        "metrics": {
+            "requested_vehicle_count": len(vehicles),
+            "planned_vehicle_count": len(results),
+            "makespan_seconds": makespan,
+            "total_wait_time_seconds": total_wait,
+            "average_wait_time_seconds": total_wait / len(vehicles),
+            "detected_track_node_conflicts": len(tracker.signatures["node"]),
+            "detected_edge_swap_conflicts": len(tracker.signatures["edge"]),
+            "detected_geometric_conflicts": len(tracker.signatures["geometry"]),
+            "lift_resource_contentions": sum(bool(item["contention"]) for item in all_lift_reservations),
+            "lift_a_usage_count": len(usage_by_lift["shuttle-lift-a"]),
+            "lift_b_usage_count": len(usage_by_lift["shuttle-lift-b"]),
+            "lift_a_occupied_seconds": sum((item["exit_end_tick"] - item["reposition_start_tick"]) * time_step_seconds for item in usage_by_lift["shuttle-lift-a"]),
+            "lift_b_occupied_seconds": sum((item["exit_end_tick"] - item["reposition_start_tick"]) * time_step_seconds for item in usage_by_lift["shuttle-lift-b"]),
+            "alternate_lift_selections": 0,
+            "replans_used": 0,
+            "unresolved_conflict_count": sum(value for key, value in safety.items() if key != "safe"),
+            "planning_time_ms": (time.perf_counter() - started) * 1000.0,
+        },
+        "safety_validation": safety,
+        "unresolved_conflicts": unresolved,
+        "failure_reason": None if safety["safe"] else "Final safety validation detected unresolved conflicts.",
+        "vehicle_initial_config": planning_vehicles,
+        "lift_initial_state": options["lift_initial_levels"],
+        "time_contract": {
+            "time_unit": "seconds",
+            "internal_time_unit": "integer_tick",
+            "time_step_seconds": time_step_seconds,
+            "interval_semantics": "half_open_[start,end)",
+            "duration_rounding": "ceiling_never_round_down",
+            "track_speed_cells_per_second": TRACK_SPEED_CELLS_PER_SECOND,
+            "turn_time_seconds": TURN_TIME_SECONDS,
+            "timing_source": "synthetic_demo",
+            "goal_occupancy": "persistent",
+            "vehicle_length_cells": options["vehicle_length_cells"],
+            "vehicle_width_cells": options["vehicle_width_cells"],
+            "safety_distance_cells": safety_distance,
+            "search_limits": {
+                "max_vehicles": options["max_vehicles"],
+                "max_time_steps": options["max_time_steps"],
+                "max_expanded_states": options["max_expanded_states"],
+                "max_lift_candidates": options["max_lift_candidates"],
+                "max_replans": options["max_replans"],
+            },
+        },
+        "transfer_contract": {
+            "version": "shuttle-multi-transfer-service-v1",
+            "pickup_service_seconds": pickup_ticks * time_step_seconds,
+            "drop_service_seconds": drop_ticks * time_step_seconds,
+            "pickup_occupancy": "finite_service_window",
+            "dropoff_occupancy": "persistent_after_service",
+            "inventory_effect": "pick/drop_applied_by_persisted_runtime_only",
         },
     }
 

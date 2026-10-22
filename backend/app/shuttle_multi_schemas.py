@@ -96,7 +96,10 @@ class ShuttleTimedTrajectorySample(BaseModel):
     world_y: float
     world_z: float
     track_node_id: str | None = None
-    action: Literal["start", "wait", "turn", "move", "lift_enter", "lift", "lift_exit"]
+    action: Literal[
+        "start", "wait", "turn", "move", "lift_enter", "lift", "lift_exit",
+        "pick_service", "drop_service",
+    ]
     lift_id: str | None = None
     edge_from: str | None = None
     edge_to: str | None = None
@@ -143,6 +146,15 @@ class ShuttleMultiVehicleResult(BaseModel):
     horizontal_distance_cells: float = Field(ge=0)
     visited_states: int = Field(ge=0)
     planning_status: Literal["planned"] = "planned"
+    pickup: ShuttleTrackNode | None = None
+    source_location_id: str | None = None
+    destination_location_id: str | None = None
+    sku_id: str | None = None
+    quantity: int | None = Field(default=None, gt=0)
+    pickup_service_start_seconds: float | None = Field(default=None, ge=0)
+    pickup_service_end_seconds: float | None = Field(default=None, ge=0)
+    drop_service_start_seconds: float | None = Field(default=None, ge=0)
+    drop_service_end_seconds: float | None = Field(default=None, ge=0)
 
 
 class ShuttlePlanningEvent(BaseModel):
@@ -219,6 +231,7 @@ class ShuttleMultiPlanResponse(BaseModel):
     vehicle_initial_config: list[ShuttleVehicleRequest]
     lift_initial_state: dict[str, ShuttleLevel]
     time_contract: dict[str, Any]
+    transfer_contract: dict[str, Any] | None = None
 
 
 class ShuttleMultiScenario(BaseModel):

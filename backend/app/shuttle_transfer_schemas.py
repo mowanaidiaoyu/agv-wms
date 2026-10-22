@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .shuttle_lift_schemas import ShuttlePlanResponse
+from .shuttle_multi_schemas import ShuttleMultiPlanResponse, ShuttleMultiPlanningOptions
 
 
 ShuttleTransferStatus = Literal[
@@ -148,5 +149,66 @@ class ShuttleTransferTask(BaseModel):
     source_inventory: ShuttleDemoInventoryBalance
     destination_inventory: ShuttleDemoInventoryBalance
     ledger: list[ShuttleDemoInventoryLedgerEntry]
+    created_at: str
+    updated_at: str
+    batch_id: str | None = None
+    priority: int = Field(default=1, ge=1, le=100)
+    runtime_phase: Literal[
+        "reserved", "moving_to_pickup", "picking", "moving_to_dropoff",
+        "dropping", "delivered", "failed", "cancelled",
+    ] | None = None
+
+
+class ShuttleMultiTransferVehicleRequest(BaseModel):
+    vehicle_id: str = Field(min_length=1, max_length=64)
+    priority: int = Field(default=1, ge=1, le=100)
+    algorithm: Literal["astar", "dijkstra"] = "astar"
+    current_track_node_id: str = Field(min_length=1)
+    source_location_id: str = Field(min_length=1)
+    destination_location_id: str = Field(min_length=1)
+    sku_id: str = Field(min_length=1)
+    quantity: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_locations(self) -> "ShuttleMultiTransferVehicleRequest":
+        if self.source_location_id == self.destination_location_id:
+            raise ValueError("source_location_id and destination_location_id must differ")
+        return self
+
+
+class ShuttleMultiTransferCreateRequest(BaseModel):
+    topology_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    vehicle_requests: list[ShuttleMultiTransferVehicleRequest] = Field(
+        min_length=2, max_length=4
+    )
+    planning_options: ShuttleMultiPlanningOptions = Field(
+        default_factory=ShuttleMultiPlanningOptions
+    )
+
+    @model_validator(mode="after")
+    def validate_vehicle_ids(self) -> "ShuttleMultiTransferCreateRequest":
+        vehicle_ids = [item.vehicle_id for item in self.vehicle_requests]
+        if len(vehicle_ids) != len(set(vehicle_ids)):
+            raise ValueError("vehicle_id values must be unique")
+        return self
+
+
+class ShuttleMultiTransferBatch(BaseModel):
+    batch_id: str
+    idempotency_key: str
+    topology_id: str
+    topology_revision: str
+    shuttle_config_revision: str
+    coordinate_contract_revision: Literal["shuttle-internal-levels-v1"]
+    status: Literal["reserved", "planned", "running", "completed", "failed", "cancelled"]
+    plan: ShuttleMultiPlanResponse | None
+    simulation_elapsed_seconds: float = Field(ge=0)
+    pickup_service_seconds: float = Field(gt=0)
+    drop_service_seconds: float = Field(gt=0)
+    service_contract_revision: Literal["shuttle-multi-transfer-service-v1"]
+    failure_reason: str | None
+    data_source: Literal["synthetic_demo"]
+    tasks: list[ShuttleTransferTask]
     created_at: str
     updated_at: str

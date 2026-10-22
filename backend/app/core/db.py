@@ -346,7 +346,40 @@ def init_db(db_path: Path = DB_PATH) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_shuttle_demo_inventory_ledger_task
               ON shuttle_demo_inventory_ledger (task_id, created_at, event_id);
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_transfer_batches (
+              batch_id TEXT PRIMARY KEY,
+              idempotency_key TEXT NOT NULL UNIQUE,
+              request_hash TEXT NOT NULL,
+              topology_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              coordinate_contract_revision TEXT NOT NULL,
+              status TEXT NOT NULL CHECK (status IN (
+                'reserved', 'planned', 'running', 'completed', 'failed', 'cancelled'
+              )),
+              plan_payload TEXT,
+              simulation_elapsed_seconds REAL NOT NULL DEFAULT 0,
+              pickup_service_seconds REAL NOT NULL,
+              drop_service_seconds REAL NOT NULL,
+              service_contract_revision TEXT NOT NULL,
+              failure_reason TEXT,
+              data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_demo_transfer_batches_topology
+              ON shuttle_demo_transfer_batches (topology_id, created_at DESC);
             """
+        )
+        _ensure_column(conn, "shuttle_demo_transfer_tasks", "batch_id", "TEXT")
+        _ensure_column(
+            conn, "shuttle_demo_transfer_tasks", "priority", "INTEGER NOT NULL DEFAULT 1"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_shuttle_demo_transfer_tasks_batch "
+            "ON shuttle_demo_transfer_tasks (batch_id, priority, vehicle_id)"
         )
         _ensure_column(
             conn, "shuttle_storage_locations", "shuttle_config_revision",
