@@ -1,5 +1,6 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { PathPlaybackController } from '../features/path-demo/PathPlaybackController'
 import { PathDemoModeSelect } from '../features/path-demo/PathDemoModeSelect'
 import type { PathDemoMode } from '../features/path-demo/PathDemoModeSelect'
@@ -34,11 +35,7 @@ import type {
 } from '../features/path-demo/types'
 import { api } from '../lib/api'
 import { floorPlaneY, worldX, worldZ } from '../lib/topology3d'
-import { StorageInventoryPanel } from '../features/inventory/StorageInventoryPanel'
-import type { StorageInventoryLocation } from '../features/inventory/types'
 import { ShuttleDemoWorkspace } from '../features/shuttle-lift/ShuttleDemoWorkspace'
-import { ShuttleStorageAuditPanel } from '../features/shuttle-lift/ShuttleStorageAuditPanel'
-import type { ShuttleStorageCandidate } from '../features/shuttle-lift/types'
 import './PathDemoPage.css'
 
 const PathDemo3DScene = lazy(() =>
@@ -60,10 +57,23 @@ const planningStatusLabel = {
 }
 
 type DemoMode = 'single' | 'preset' | 'custom'
-type WorkspaceMode = 'planning' | 'inventory'
 type VehicleType = 'ctu' | 'shuttle'
 type PlanningStatus = keyof typeof planningStatusLabel
 type RoadSelection = { vehicleId: string; kind: RoadSelectionKind } | null
+type ShuttlePathDemoMode = Extract<PathDemoMode, `shuttle_${string}`>
+
+const SHUTTLE_PATH_DEMO_MODES: readonly ShuttlePathDemoMode[] = [
+  'shuttle_single',
+  'shuttle_multi_preset',
+  'shuttle_multi_custom',
+  'shuttle_stock_transfer',
+]
+
+function normalizeShuttleMode(value: string | null): ShuttlePathDemoMode {
+  return SHUTTLE_PATH_DEMO_MODES.includes(value as ShuttlePathDemoMode)
+    ? value as ShuttlePathDemoMode
+    : 'shuttle_single'
+}
 
 function liveVehicleStatusLabel(
   globalStatus: keyof typeof statusLabel,
@@ -87,19 +97,17 @@ function normalizeVehicles(vehicles: MultiPathVehicleRequest[]): MultiPathVehicl
 }
 
 export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicleType?: VehicleType } = {}) {
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const [topologyId, setTopologyId] = useState('')
   const [demoMode, setDemoMode] = useState<DemoMode>('single')
-  const [shuttleDemoMode, setShuttleDemoMode] = useState<PathDemoMode>('shuttle_single')
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('planning')
   const [vehicleType, setVehicleType] = useState<VehicleType>(initialVehicleType)
-  const [selectedInventoryNodeId, setSelectedInventoryNodeId] = useState<string | null>(null)
-  const [selectedAccessCellId, setSelectedAccessCellId] = useState<string | null>(null)
-  const [shuttleStorageLevel, setShuttleStorageLevel] = useState(1)
-  const [shuttleStorageSearch, setShuttleStorageSearch] = useState('')
-  const [selectedShuttleStorageLocationId, setSelectedShuttleStorageLocationId] = useState<string | null>(null)
-  const [selectedShuttleAccessTrackNodeId, setSelectedShuttleAccessTrackNodeId] = useState<string | null>(null)
-  const [roadSemanticOverlayEnabled, setRoadSemanticOverlayEnabled] = useState(false)
+  const requestedShuttleMode = searchParams.get('mode')
+  const shuttleDemoMode = normalizeShuttleMode(requestedShuttleMode)
+  const previousShuttlePlanningModeRef = useRef<ShuttlePathDemoMode>(
+    shuttleDemoMode === 'shuttle_stock_transfer' ? 'shuttle_single' : shuttleDemoMode,
+  )
   const [algorithm, setAlgorithm] = useState<PathDemoAlgorithm>('astar')
   const [startCellId, setStartCellId] = useState('')
   const [goalCellId, setGoalCellId] = useState('')
@@ -120,6 +128,23 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const [selectedConflictEventId, setSelectedConflictEventId] = useState('')
   const requestSequenceRef = useRef(0)
   const setCustomDraft = useMultiPathExperimentStore((state) => state.setCustomDraft)
+
+  useEffect(() => {
+    if (vehicleType !== 'shuttle' || requestedShuttleMode === shuttleDemoMode) return
+    setSearchParams((current) => {
+      const currentMode = current.get('mode')
+      if (SHUTTLE_PATH_DEMO_MODES.includes(currentMode as ShuttlePathDemoMode)) return current
+      const next = new URLSearchParams(current)
+      next.set('mode', shuttleDemoMode)
+      return next
+    }, { replace: true })
+  }, [requestedShuttleMode, setSearchParams, shuttleDemoMode, vehicleType])
+
+  useEffect(() => {
+    if (shuttleDemoMode !== 'shuttle_stock_transfer') {
+      previousShuttlePlanningModeRef.current = shuttleDemoMode
+    }
+  }, [shuttleDemoMode])
 
   useEffect(() => {
     if (!topologiesQuery.data) return
@@ -143,87 +168,6 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
       : topologyListEmpty
         ? '没有可用拓扑'
         : '正在选择默认拓扑…'
-  const inventoryLocationsQuery = useQuery({
-    queryKey: ['inventory-locations', topologyId],
-    queryFn: () => api.listInventoryLocations(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const storageAccessAuditQuery = useQuery({
-    queryKey: ['storage-access-audit', topologyId],
-    queryFn: () => api.getStorageAccessAudit(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const storageAccessCandidatesQuery = useQuery({
-    queryKey: ['storage-access-candidates', topologyId, selectedInventoryNodeId],
-    queryFn: () => api.getStorageAccessCandidates(topologyId, selectedInventoryNodeId!),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId && selectedInventoryNodeId),
-  })
-  const ctuRoadAuditQuery = useQuery({
-    queryKey: ['ctu-road-audit', topologyId],
-    queryFn: () => api.getCtuRoadSemanticAudit(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageAuditQuery = useQuery({
-    queryKey: ['shuttle-storage-audit', topologyId],
-    queryFn: () => api.getShuttleStorageAudit(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageCandidatesQuery = useQuery({
-    queryKey: ['shuttle-storage-candidates', topologyId, shuttleStorageLevel, shuttleStorageSearch.trim()],
-    queryFn: () => api.getShuttleStorageCandidates(topologyId, {
-      level: shuttleStorageLevel,
-      search: shuttleStorageSearch.trim() || undefined,
-      hasAdjacentTrack: true,
-      limit: 100,
-    }),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageTrialAreaQuery = useQuery({
-    queryKey: ['shuttle-storage-trial-area', topologyId],
-    queryFn: () => api.getShuttleStorageTrialArea(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageMappingsQuery = useQuery({
-    queryKey: ['shuttle-storage-mappings', topologyId],
-    queryFn: () => api.listShuttleStorageMappings(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleDemoDropoffsQuery = useQuery({
-    queryKey: ['shuttle-demo-dropoffs', topologyId],
-    queryFn: () => api.listShuttleDemoDropoffs(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageTracksQuery = useQuery({
-    queryKey: ['shuttle-storage-tracks', topologyId],
-    queryFn: () => api.getShuttleTracks(topologyId),
-    enabled: workspaceMode === 'inventory' && Boolean(topologyId),
-  })
-  const shuttleStorageSceneCandidates = useMemo(() => {
-    const candidates = [...(shuttleStorageCandidatesQuery.data?.candidates ?? [])]
-    const selected = shuttleStorageTrialAreaQuery.data?.candidates.find(
-      (candidate) => candidate.location_id === selectedShuttleStorageLocationId,
-    )
-    if (selected && !candidates.some((candidate) => candidate.location_id === selected.location_id)) {
-      candidates.push(selected)
-    }
-    return candidates
-  }, [
-    selectedShuttleStorageLocationId,
-    shuttleStorageCandidatesQuery.data?.candidates,
-    shuttleStorageTrialAreaQuery.data?.candidates,
-  ])
-  const stockedInventoryNodeIds = useMemo(
-    () => new Set(
-      (inventoryLocationsQuery.data ?? [])
-        .filter((location) => location.balances.length > 0)
-        .map((location) => location.storage_node_id),
-    ),
-    [inventoryLocationsQuery.data],
-  )
-  const selectedInventoryLocation = inventoryLocationsQuery.data?.find(
-    (location) => location.storage_node_id === selectedInventoryNodeId,
-  ) ?? null
-
   useEffect(() => {
     if (demoMode !== 'custom' || !topologyRecord) return
     setCustomDraft({
@@ -236,12 +180,12 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const optionsQuery = useQuery({
     queryKey: ['path-demo-options', topologyId],
     queryFn: () => pathDemoApi.options(topologyId),
-    enabled: workspaceMode === 'planning' && vehicleType === 'ctu' && Boolean(topologyId),
+    enabled: vehicleType === 'ctu' && Boolean(topologyId),
   })
   const multiScenariosQuery = useQuery({
     queryKey: ['path-demo-multi-scenarios', topologyId],
     queryFn: () => pathDemoApi.multiScenarios(topologyId),
-    enabled: workspaceMode === 'planning' && vehicleType === 'ctu' && Boolean(topologyId) && demoMode !== 'single',
+    enabled: vehicleType === 'ctu' && Boolean(topologyId) && demoMode !== 'single',
   })
   const roadCells = useMemo(() => multiScenariosQuery.data?.road_cells ?? [], [multiScenariosQuery.data])
   const activeVehicles = useMemo(
@@ -399,63 +343,6 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
     setCameraActionRequest((current) => ({ type, targetWorld, sequence: (current?.sequence ?? 0) + 1 }))
   }
 
-  const locateInventoryLocation = (location: StorageInventoryLocation) => {
-    if (!topologyRecord) return
-    const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
-    const floorIndex = Math.max(0, floors.indexOf(location.floor))
-    setSelectedInventoryNodeId(location.storage_node_id)
-    setSelectedAccessCellId(null)
-    setCameraViewMode('free')
-    requestCameraAction('focus-point', [
-      worldX(location.col, topologyRecord.payload.grid.cols),
-      floorPlaneY(floorIndex) + 0.5,
-      worldZ(location.row, topologyRecord.payload.grid.rows),
-    ])
-  }
-
-  const locateInventoryNode = (storageNodeId: string) => {
-    const location = inventoryLocationsQuery.data?.find((item) => item.storage_node_id === storageNodeId)
-    if (location) locateInventoryLocation(location)
-    else {
-      setSelectedInventoryNodeId(storageNodeId)
-      setSelectedAccessCellId(null)
-    }
-  }
-
-  const locateAccessCell = (accessCellId: string) => {
-    if (!topologyRecord) return
-    const cell = topologyRecord.payload.cells.find((item) => item.id === accessCellId)
-    if (!cell) return
-    const floor = cell.floor ?? '1F'
-    const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
-    const floorIndex = Math.max(0, floors.indexOf(floor))
-    setCameraViewMode('free')
-    requestCameraAction('focus-point', [
-      worldX(cell.col, topologyRecord.payload.grid.cols),
-      floorPlaneY(floorIndex) + 0.22,
-      worldZ(cell.row, topologyRecord.payload.grid.rows),
-    ])
-  }
-
-  const selectShuttleAccessTrack = useCallback((trackNodeId: string) => {
-    setSelectedShuttleAccessTrackNodeId(trackNodeId || null)
-  }, [])
-
-  const locateShuttleStorageCandidate = (candidate: ShuttleStorageCandidate) => {
-    setSelectedShuttleStorageLocationId(candidate.location_id)
-    setSelectedShuttleAccessTrackNodeId(null)
-    setCameraViewMode('free')
-    requestCameraAction('focus-point', [candidate.world_x, candidate.world_y + 0.45, candidate.world_z])
-  }
-
-  const locateShuttleTrack = (trackNodeId: string) => {
-    const track = shuttleStorageTracksQuery.data?.nodes.find((item) => item.track_node_id === trackNodeId)
-    if (!track) return
-    setSelectedShuttleAccessTrackNodeId(trackNodeId)
-    setCameraViewMode('free')
-    requestCameraAction('focus-point', [track.world_x, track.world_y + 0.35, track.world_z])
-  }
-
   const locateConflictEvent = (event: MultiPathConflictEvent, seekToEvent: boolean) => {
     if (!topologyRecord) return
     const floors = topologyRecord.payload.meta.floors?.length ? topologyRecord.payload.meta.floors : ['1F']
@@ -543,13 +430,11 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const markerFloor = demoMode !== 'single'
     ? roadCells.find((cell) => cell.id === activeVehicles[0]?.start_cell_id)?.floor
     : undefined
-  const activeFloor = workspaceMode === 'inventory' && selectedInventoryLocation
-    ? selectedInventoryLocation.floor
-    : multiPlan?.vehicles[0]?.start.floor ?? markerFloor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
+  const activeFloor = multiPlan?.vehicles[0]?.start.floor ?? markerFloor ?? plan?.start.floor ?? optionsQuery.data?.default_start.floor ?? '1F'
   const canPlay = demoMode === 'single' ? trajectory.length > 1 : Boolean(multiPlan && multiPlan.makespan_seconds > 0)
   const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
   const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
-  const isShuttlePlanning = workspaceMode === 'planning' && vehicleType === 'shuttle'
+  const isShuttlePlanning = vehicleType === 'shuttle'
   const isShuttleTransfer = isShuttlePlanning && shuttleDemoMode === 'shuttle_stock_transfer'
   const selectedDemoMode: PathDemoMode = vehicleType === 'shuttle'
     ? shuttleDemoMode
@@ -564,11 +449,24 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
     setSelectionError('')
     if (nextMode.startsWith('shuttle_')) {
       setVehicleType('shuttle')
-      setShuttleDemoMode(nextMode)
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('mode', nextMode)
+        return next
+      })
       return
     }
     setVehicleType('ctu')
     setDemoMode(nextMode === 'ctu_single' ? 'single' : nextMode === 'ctu_multi_preset' ? 'preset' : 'custom')
+  }
+
+  const setActiveTransferTaskId = (taskId: string | null) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      if (taskId) next.set('task', taskId)
+      else next.delete('task')
+      return next
+    }, { replace: true })
   }
 
   return (
@@ -588,10 +486,7 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
           topologies={topologiesQuery.data ?? []}
           onTopologyChange={(nextTopologyId) => {
             setTopologyId(nextTopologyId)
-            setSelectedInventoryNodeId(null)
-            setSelectedAccessCellId(null)
-            setSelectedShuttleStorageLocationId(null)
-            setSelectedShuttleAccessTrackNodeId(null)
+            setActiveTransferTaskId(null)
             setStartCellId('')
             setGoalCellId('')
             setPresetVehicles([])
@@ -599,9 +494,12 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
             setRoadSelection(null)
             invalidatePlan()
           }}
-          onWorkspaceModeChange={setWorkspaceMode}
           demoMode={selectedDemoMode}
           onDemoModeChange={selectDemoMode}
+          onReturnToPlanning={() => selectDemoMode(previousShuttlePlanningModeRef.current)}
+          activeTransferTaskId={searchParams.get('task')}
+          onActiveTransferTaskIdChange={setActiveTransferTaskId}
+          onOpenAdvancedManagement={() => navigate('/topology')}
         />
       ) : (
       <div className="path-demo-layout">
@@ -613,10 +511,6 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
               disabled={topologiesQuery.isPending || topologyLoadFailed || topologyListEmpty}
               onChange={(event) => {
                 setTopologyId(event.target.value)
-                setSelectedInventoryNodeId(null)
-                setSelectedAccessCellId(null)
-                setSelectedShuttleStorageLocationId(null)
-                setSelectedShuttleAccessTrackNodeId(null)
                 setStartCellId('')
                 setGoalCellId('')
                 setPresetVehicles([])
@@ -629,29 +523,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
               {topologyList.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
-          <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={workspaceMode === 'planning'}
-              className={workspaceMode === 'planning' ? 'active' : ''}
-              onClick={() => setWorkspaceMode('planning')}
-            >路径规划</button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={workspaceMode === 'inventory'}
-              className={workspaceMode === 'inventory' ? 'active' : ''}
-              onClick={() => {
-                setWorkspaceMode('inventory')
-                setRoadSelection(null)
-              }}
-            >库存与取货</button>
-          </div>
-          {workspaceMode === 'planning' ? (
-            <PathDemoModeSelect value={selectedDemoMode} onChange={selectDemoMode} />
-          ) : null}
-          {workspaceMode === 'planning' && vehicleType === 'ctu' ? (
+          <PathDemoModeSelect value={selectedDemoMode} onChange={selectDemoMode} />
+          {vehicleType === 'ctu' ? (
             <>
           <label>
             路径算法
@@ -955,57 +828,8 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
             />
           ) : null}
             </>
-          ) : workspaceMode === 'planning' ? (
-            <p className="path-demo-note">正在准备四向车四层规划工作台…</p>
           ) : (
-            <>
-              <ShuttleStorageAuditPanel
-                topologyId={topologyId}
-                audit={shuttleStorageAuditQuery.data}
-                loading={shuttleStorageAuditQuery.isLoading}
-                error={shuttleStorageAuditQuery.isError ? String(shuttleStorageAuditQuery.error) : null}
-                candidates={shuttleStorageCandidatesQuery.data?.candidates ?? []}
-                candidateTotal={shuttleStorageCandidatesQuery.data?.total ?? 0}
-                candidatesLoading={shuttleStorageCandidatesQuery.isLoading}
-                candidatesError={shuttleStorageCandidatesQuery.isError ? String(shuttleStorageCandidatesQuery.error) : null}
-                trialArea={shuttleStorageTrialAreaQuery.data}
-                mappings={shuttleStorageMappingsQuery.data ?? []}
-                dropoffs={shuttleDemoDropoffsQuery.data ?? []}
-                tracks={shuttleStorageTracksQuery.data?.nodes ?? []}
-                level={shuttleStorageLevel}
-                search={shuttleStorageSearch}
-                selectedLocationId={selectedShuttleStorageLocationId}
-                selectedAccessTrackNodeId={selectedShuttleAccessTrackNodeId}
-                onLevelChange={setShuttleStorageLevel}
-                onSearchChange={setShuttleStorageSearch}
-                onCandidateSelect={(candidate) => {
-                  setSelectedShuttleStorageLocationId(candidate.location_id)
-                  setSelectedShuttleAccessTrackNodeId(null)
-                }}
-                onAccessTrackSelect={selectShuttleAccessTrack}
-                onLocateCandidate={locateShuttleStorageCandidate}
-                onLocateTrack={locateShuttleTrack}
-              />
-              <StorageInventoryPanel
-              topologyId={topologyId}
-              selectedStorageNodeId={selectedInventoryNodeId}
-              onSelectStorageNode={(storageNodeId) => {
-                setSelectedInventoryNodeId(storageNodeId)
-                setSelectedAccessCellId(null)
-              }}
-              onLocateStorageNode={locateInventoryLocation}
-              onLocateAccessCell={locateAccessCell}
-              accessAudit={storageAccessAuditQuery.data}
-              accessCandidates={storageAccessCandidatesQuery.data}
-              accessCandidatesLoading={storageAccessCandidatesQuery.isLoading}
-              accessCandidatesError={storageAccessCandidatesQuery.isError ? String(storageAccessCandidatesQuery.error) : null}
-              selectedAccessCellId={selectedAccessCellId}
-              onSelectAccessCandidate={setSelectedAccessCellId}
-              ctuRoadAudit={ctuRoadAuditQuery.data}
-              roadSemanticOverlayEnabled={roadSemanticOverlayEnabled}
-              onToggleRoadSemanticOverlay={() => setRoadSemanticOverlayEnabled((enabled) => !enabled)}
-              />
-            </>
+            <p className="path-demo-note">正在准备四向车四层规划工作台…</p>
           )}
         </aside>
 
@@ -1029,30 +853,6 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
                 onRoadCellSelect={handleRoadCellSelect}
                 onInvalidRoadSelection={() => setSelectionError('该位置不是当前道路连通分量中的可行驶道路格。')}
                 conflictEvent={showNodeConflictVisualization ? selectedConflictEvent : null}
-                inventoryMode={workspaceMode === 'inventory'}
-                selectedInventoryNodeId={selectedInventoryNodeId}
-                stockedInventoryNodeIds={stockedInventoryNodeIds}
-                onInventoryNodeSelect={locateInventoryNode}
-                accessCandidates={storageAccessCandidatesQuery.data?.candidates ?? []}
-                selectedAccessCellId={selectedAccessCellId}
-                onAccessCandidateSelect={(accessCellId) => {
-                  setSelectedAccessCellId(accessCellId)
-                  locateAccessCell(accessCellId)
-                }}
-                roadSemanticCells={roadSemanticOverlayEnabled ? ctuRoadAuditQuery.data?.road_cells ?? [] : []}
-                shuttleRackXray={Boolean(selectedShuttleStorageLocationId)}
-                shuttleStorageCandidates={shuttleStorageSceneCandidates}
-                selectedShuttleStorageLocationId={selectedShuttleStorageLocationId}
-                selectedShuttleAccessTrackNodeId={selectedShuttleAccessTrackNodeId}
-                onShuttleStorageCandidateSelect={(locationId) => {
-                  const candidate = shuttleStorageSceneCandidates.find(
-                    (item) => item.location_id === locationId,
-                  )
-                  if (candidate) locateShuttleStorageCandidate(candidate)
-                }}
-                onShuttleAccessTrackSelect={locateShuttleTrack}
-                shuttleDemoDropoffs={shuttleDemoDropoffsQuery.data ?? []}
-                shuttleStorageTracks={shuttleStorageTracksQuery.data?.nodes ?? []}
               />
             </Suspense>
           ) : (

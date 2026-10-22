@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StoredRecord, TopologyPayload } from '../../types'
 import { api } from '../../lib/api'
@@ -21,6 +22,7 @@ const playback = vi.hoisted(() => ({
 vi.mock('../../lib/api', () => ({ api: {
   getShuttleTracks: vi.fn(), getShuttleLifts: vi.fn(), listShuttleDemoSkus: vi.fn(),
   listShuttleDemoInventoryLocations: vi.fn(), initializeShuttleDemoInventory: vi.fn(),
+  getShuttleDemoTransfer: vi.fn(), getShuttleDemoInventoryLocation: vi.fn(),
   createShuttleDemoTransfer: vi.fn(), planStartShuttleDemoTransfer: vi.fn(),
   advanceShuttleDemoTransfer: vi.fn(), cancelShuttleDemoTransfer: vi.fn(),
 } }))
@@ -90,15 +92,46 @@ const makeTask = (status: ShuttleTransferTask['status'] = 'reserved'): ShuttleTr
   destination_inventory: balance(5), ledger: [], created_at: '2026-10-22T00:00:00Z', updated_at: '2026-10-22T00:00:00Z',
 })
 
-function renderWorkspace(options: { onTopologyChange?: ReturnType<typeof vi.fn>; onWorkspaceModeChange?: ReturnType<typeof vi.fn> } = {}) {
+function renderWorkspace(options: {
+  onTopologyChange?: ReturnType<typeof vi.fn>
+  onDemoModeChange?: ReturnType<typeof vi.fn>
+  onReturnToPlanning?: ReturnType<typeof vi.fn>
+  onActiveTaskIdChange?: ReturnType<typeof vi.fn>
+  onOpenAdvancedManagement?: ReturnType<typeof vi.fn>
+  activeTaskId?: string | null
+} = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   const onTopologyChange = options.onTopologyChange ?? vi.fn()
-  const onWorkspaceModeChange = options.onWorkspaceModeChange ?? vi.fn()
+  const onDemoModeChange = options.onDemoModeChange ?? vi.fn()
+  const onReturnToPlanning = options.onReturnToPlanning ?? vi.fn()
+  const onActiveTaskIdChange = options.onActiveTaskIdChange ?? vi.fn()
+  const onOpenAdvancedManagement = options.onOpenAdvancedManagement ?? vi.fn()
   render(<QueryClientProvider client={client}><ShuttleStockTransferWorkspace
     topologyRecord={record} topologies={[record, otherRecord]}
-    onTopologyChange={onTopologyChange} onWorkspaceModeChange={onWorkspaceModeChange}
+    onTopologyChange={onTopologyChange}
+    demoMode="shuttle_stock_transfer"
+    onDemoModeChange={onDemoModeChange}
+    onReturnToPlanning={onReturnToPlanning}
+    activeTaskId={options.activeTaskId ?? null}
+    onActiveTaskIdChange={onActiveTaskIdChange}
+    onOpenAdvancedManagement={onOpenAdvancedManagement}
   /></QueryClientProvider>)
-  return { onTopologyChange, onWorkspaceModeChange }
+  return { onTopologyChange, onDemoModeChange, onReturnToPlanning, onActiveTaskIdChange, onOpenAdvancedManagement }
+}
+
+function StatefulTransferWorkspace() {
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
+  return <ShuttleStockTransferWorkspace
+    topologyRecord={record}
+    topologies={[record]}
+    onTopologyChange={vi.fn()}
+    demoMode="shuttle_stock_transfer"
+    onDemoModeChange={vi.fn()}
+    onReturnToPlanning={vi.fn()}
+    activeTaskId={activeTaskId}
+    onActiveTaskIdChange={setActiveTaskId}
+    onOpenAdvancedManagement={vi.fn()}
+  />
 }
 
 async function waitForReady() {
@@ -136,6 +169,10 @@ beforeEach(() => {
   vi.mocked(api.planStartShuttleDemoTransfer).mockResolvedValue(makeTask('moving_to_pickup'))
   vi.mocked(api.cancelShuttleDemoTransfer).mockResolvedValue(makeTask('cancelled'))
   vi.mocked(api.advanceShuttleDemoTransfer).mockResolvedValue(makeTask('delivered'))
+  vi.mocked(api.getShuttleDemoTransfer).mockResolvedValue(makeTask('delivered'))
+  vi.mocked(api.getShuttleDemoInventoryLocation).mockImplementation(async (_topologyId, locationId) => (
+    locationId === source.location_id ? source : destination
+  ))
 })
 
 describe('ShuttleStockTransferWorkspace', () => {
@@ -151,7 +188,9 @@ describe('ShuttleStockTransferWorkspace', () => {
     render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <ShuttleDemoWorkspace
         topologyRecord={record} topologies={[record]} onTopologyChange={vi.fn()}
-        onWorkspaceModeChange={vi.fn()} demoMode="shuttle_stock_transfer" onDemoModeChange={vi.fn()}
+        demoMode="shuttle_stock_transfer" onDemoModeChange={vi.fn()}
+        onReturnToPlanning={vi.fn()} activeTransferTaskId={null}
+        onActiveTransferTaskIdChange={vi.fn()} onOpenAdvancedManagement={vi.fn()}
       />
     </QueryClientProvider>)
     expect(await screen.findByText('SKU 货物搬运')).toBeInTheDocument()
@@ -244,7 +283,7 @@ describe('ShuttleStockTransferWorkspace', () => {
   })
 
   it('creates and starts one task with the exact selected inventory identities', async () => {
-    renderWorkspace()
+    const { onActiveTaskIdChange } = renderWorkspace()
     await waitForReady()
     fireEvent.change(screen.getByLabelText('搬运数量'), { target: { value: '3' } })
     fireEvent.click(screen.getByRole('button', { name: '规划并开始模拟搬运' }))
@@ -253,6 +292,19 @@ describe('ShuttleStockTransferWorkspace', () => {
       sku_id: 'SKU-001', quantity: 3, vehicle_id: 'SHUTTLE-01',
     })))
     expect(api.planStartShuttleDemoTransfer).toHaveBeenCalledWith('transfer-1')
+    expect(onActiveTaskIdChange).toHaveBeenCalledWith('transfer-1')
+  })
+
+  it('does not mistake a newly created task URL for a refresh recovery', async () => {
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}>
+      <StatefulTransferWorkspace />
+    </QueryClientProvider>)
+    await waitForReady()
+    fireEvent.click(screen.getByRole('button', { name: '规划并开始模拟搬运' }))
+
+    await waitFor(() => expect(screen.getByTestId('transfer-scene')).toHaveAttribute('data-transfer-status', 'moving_to_pickup'))
+    expect(screen.getByTestId('playback')).toHaveAttribute('data-can-play', 'true')
+    expect(screen.queryByText('当前任务已从后端安全恢复；播放器保持只读暂停，不会重复执行 Pick 或 Drop。')).not.toBeInTheDocument()
   })
 
   it('passes Dijkstra without creating a second path implementation', async () => {
@@ -339,9 +391,40 @@ describe('ShuttleStockTransferWorkspace', () => {
   })
 
   it('keeps advanced storage modeling available as a separate workspace', async () => {
-    const { onWorkspaceModeChange } = renderWorkspace()
+    const { onOpenAdvancedManagement } = renderWorkspace()
     fireEvent.click(await screen.findByRole('button', { name: '打开高级建模与审核' }))
-    expect(onWorkspaceModeChange).toHaveBeenCalledWith('inventory')
+    expect(onOpenAdvancedManagement).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns to the previous planning mode without mutating task or inventory state', async () => {
+    const { onReturnToPlanning } = renderWorkspace()
+    fireEvent.click(await screen.findByRole('button', { name: '返回路径规划' }))
+    expect(onReturnToPlanning).toHaveBeenCalledTimes(1)
+    expect(api.initializeShuttleDemoInventory).not.toHaveBeenCalled()
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.advanceShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.cancelShuttleDemoTransfer).not.toHaveBeenCalled()
+  })
+
+  it('changes the unified Shuttle mode without creating or advancing a transfer', async () => {
+    const { onDemoModeChange } = renderWorkspace()
+    fireEvent.change(await screen.findByLabelText('演示模式'), { target: { value: 'shuttle_multi_custom' } })
+    expect(onDemoModeChange).toHaveBeenCalledWith('shuttle_multi_custom')
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.advanceShuttleDemoTransfer).not.toHaveBeenCalled()
+  })
+
+  it('restores a saved task as a read-only snapshot without replaying Pick or Drop', async () => {
+    renderWorkspace({ activeTaskId: 'transfer-1' })
+    expect(await screen.findByText('当前任务已从后端安全恢复；播放器保持只读暂停，不会重复执行 Pick 或 Drop。')).toBeInTheDocument()
+    expect(api.getShuttleDemoTransfer).toHaveBeenCalledWith('transfer-1')
+    expect(api.getShuttleDemoInventoryLocation).toHaveBeenCalledWith(topology.id, source.location_id)
+    expect(api.getShuttleDemoInventoryLocation).toHaveBeenCalledWith(topology.id, destination.location_id)
+    expect(screen.getByTestId('playback')).toHaveAttribute('data-can-play', 'false')
+    expect(api.initializeShuttleDemoInventory).not.toHaveBeenCalled()
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.planStartShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.advanceShuttleDemoTransfer).not.toHaveBeenCalled()
   })
 
   it('changes topology through the parent-owned selection state', async () => {

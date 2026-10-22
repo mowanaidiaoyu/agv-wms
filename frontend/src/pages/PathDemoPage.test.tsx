@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TopologyPayload } from '../types'
 import { api } from '../lib/api'
@@ -131,6 +132,15 @@ vi.mock('../lib/api', () => ({
     planShuttlePath: vi.fn(),
     getShuttleMultiScenarios: vi.fn(),
     planShuttleMulti: vi.fn(),
+    listShuttleDemoSkus: vi.fn(),
+    listShuttleDemoInventoryLocations: vi.fn(),
+    initializeShuttleDemoInventory: vi.fn(),
+    getShuttleDemoTransfer: vi.fn(),
+    getShuttleDemoInventoryLocation: vi.fn(),
+    createShuttleDemoTransfer: vi.fn(),
+    planStartShuttleDemoTransfer: vi.fn(),
+    advanceShuttleDemoTransfer: vi.fn(),
+    cancelShuttleDemoTransfer: vi.fn(),
   },
 }))
 vi.mock('../features/path-demo/pathDemoApi', () => ({
@@ -337,20 +347,32 @@ const sixVehiclePlan = {
     }
   }),
 }
-function renderPage() {
+function RouterProbe() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  return <div data-testid="router-location" data-search={location.search}>
+    <button type="button" onClick={() => navigate(-1)}>test history back</button>
+    <button type="button" onClick={() => navigate(1)}>test history forward</button>
+  </div>
+}
+
+function renderPathDemoPage(initialVehicleType: 'ctu' | 'shuttle', initialEntry = '/path-demo') {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <PathDemoPage initialVehicleType="ctu" />
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <RouterProbe />
+        <PathDemoPage initialVehicleType={initialVehicleType} />
+      </MemoryRouter>
     </QueryClientProvider>,
   )
 }
 
-function renderDefaultPage() {
-  return render(
-    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <PathDemoPage />
-    </QueryClientProvider>,
-  )
+function renderPage(initialEntry = '/path-demo') {
+  return renderPathDemoPage('ctu', initialEntry)
+}
+
+function renderDefaultPage(initialEntry = '/path-demo') {
+  return renderPathDemoPage('shuttle', initialEntry)
 }
 
 async function enterCustomModeWithSixVehicles() {
@@ -464,6 +486,10 @@ beforeEach(() => {
       { scenario_id: 'lift-conflict', name: '场景 C：Lift-A 资源竞争', description: '提升机', vehicle_requests: [], evidence: {} },
     ],
   })
+  vi.mocked(api.listShuttleDemoSkus).mockResolvedValue([])
+  vi.mocked(api.listShuttleDemoInventoryLocations).mockResolvedValue({
+    topology_id: topology.id, total: 0, offset: 0, limit: 5000, locations: [],
+  })
   vi.mocked(pathDemoApi.options).mockResolvedValue(options)
   vi.mocked(pathDemoApi.plan).mockImplementation(async (_topology, _start, _goal, algorithm) => makePlan(algorithm))
   vi.mocked(pathDemoApi.multiScenarios).mockResolvedValue(multiScenarios)
@@ -484,33 +510,34 @@ describe('PathDemoPage', () => {
     expect(pathDemoApi.options).not.toHaveBeenCalled()
   })
 
-  it('switches directly among the three Shuttle panels without exposing a redundant CTU entry', async () => {
+  it('switches directly among all four Shuttle panels and returns to the previous planning mode', async () => {
     renderDefaultPage()
     const mode = await screen.findByLabelText('演示模式')
 
+    expect(within(mode).getAllByRole('option')).toHaveLength(4)
     fireEvent.change(mode, { target: { value: 'shuttle_multi_preset' } })
-    const shuttleScenario = await screen.findByLabelText('四向车预设场景')
-    await waitFor(() => expect(shuttleScenario).toHaveValue('parallel'))
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_multi_preset'))
     fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_multi_custom' } })
-    expect(await screen.findByText('车辆配置（2/4）')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '添加车辆' }))
-    expect(await screen.findByText('车辆配置（3/4）')).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: /CTU/ })).not.toBeInTheDocument()
-  })
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_multi_custom'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_stock_transfer' } })
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_stock_transfer'))
+    fireEvent.click(await screen.findByRole('button', { name: '返回路径规划' }))
 
+    expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_multi_custom')
+    expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_multi_custom')
+    expect(api.initializeShuttleDemoInventory).not.toHaveBeenCalled()
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.advanceShuttleDemoTransfer).not.toHaveBeenCalled()
+  })
   it('leaves the loading state and renders 666 after the topology request succeeds with Shuttle mode installed', async () => {
     renderPage()
 
     expect(await screen.findByTestId('path-demo-scene')).toBeInTheDocument()
-    expect(within(screen.getByRole('tablist', { name: '工作台模式' })).getAllByRole('tab')).toHaveLength(2)
-    expect(screen.getByRole('tab', { name: '路径规划' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
     expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single')
-    expect(screen.queryByRole('button', { name: '返回四向车路径规划' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('拓扑')).toHaveValue(topology.id)
-    expect(screen.queryByText('正在读取拓扑…')).not.toBeInTheDocument()
     expect(pathDemoApi.options).toHaveBeenCalledWith(topology.id)
   })
-
   it('exits loading and exposes retry when the topology endpoint is unavailable', async () => {
     vi.mocked(api.listTopologies).mockRejectedValueOnce(new TypeError('Failed to fetch'))
     renderPage()
@@ -847,103 +874,59 @@ describe('PathDemoPage', () => {
     expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-vehicle-ids', '')
   })
 
-  it('shares the selected topology with inventory mode and locates real storage and access coordinates', async () => {
-    renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
+  it('removes the redundant inventory tab without deleting inventory services', async () => {
+    const { container } = renderDefaultPage()
+    await screen.findByLabelText('演示模式')
 
-    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
-
-    await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topology.id))
-    expect(api.listInventoryLocations).toHaveBeenCalledWith(topology.id)
-    await waitFor(() => expect(screen.getByText('正库存')).toBeInTheDocument())
-    expect(screen.getByText('12', { selector: 'strong' })).toBeInTheDocument()
-    expect(screen.getByLabelText('搜索 SKU 或库位')).toBeInTheDocument()
-    expect(screen.getByRole('region', { name: '四向车货位配置' })).toHaveTextContent('等待人工审核')
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'true')
-    await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute(
-      'data-shuttle-storage-candidates', shuttleStorageCandidate.location_id,
-    ))
-    fireEvent.click(screen.getByTestId('mock-shuttle-storage'))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-shuttle-storage', shuttleStorageCandidate.location_id)
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute(
-      'data-camera-target', `${shuttleStorageCandidate.world_x},${shuttleStorageCandidate.world_y + 0.45},${shuttleStorageCandidate.world_z}`,
-    )
-    fireEvent.click(screen.getByTestId('mock-shuttle-access'))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-shuttle-access', 'L1-r100-c7')
-    expect(await screen.findByRole('region', { name: 'CTU 道路语义审计' })).toHaveTextContent('CTU road 1')
-    fireEvent.click(screen.getByRole('button', { name: '高亮道路语义图层' }))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-road-semantic-cells', 'cell-r1-c1')
-
-    fireEvent.click(screen.getByTestId('mock-storage-node'))
-    expect(await screen.findByText('标准紧固件套装')).toBeInTheDocument()
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-inventory-node', 'storage-a')
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '0.5,0.5,0.5')
-    await waitFor(() => expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-access-candidates', 'cell-r1-c1'))
-
-    fireEvent.click(screen.getByTestId('mock-access-candidate'))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-selected-access-cell', 'cell-r1-c1')
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')
-
-    fireEvent.click(screen.getByRole('button', { name: '查看停靠点' }))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-camera-target', '-0.5,0.22,0.5')
-
-    fireEvent.click(screen.getByRole('tab', { name: '路径规划' }))
-    expect(screen.getByTestId('path-demo-scene')).toHaveAttribute('data-inventory-mode', 'false')
-    expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
+    expect(container.querySelector('.path-demo-workspace-tabs')).toBeNull()
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument()
+    expect(api.getInventorySummary).not.toHaveBeenCalled()
+    expect(api.listInventoryLocations).not.toHaveBeenCalled()
   })
 
-  it('shows inventory API failures without affecting the planning workspace', async () => {
-    vi.mocked(api.getInventorySummary).mockRejectedValueOnce(new Error('summary unavailable'))
-    vi.mocked(api.listInventoryLocations).mockRejectedValueOnce(new Error('locations unavailable'))
-    renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
-
-    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('库存加载失败')
-
-    fireEvent.click(screen.getByRole('tab', { name: '路径规划' }))
-    expect(screen.getByLabelText('演示模式')).toBeInTheDocument()
+  it.each([
+    'shuttle_single',
+    'shuttle_multi_preset',
+    'shuttle_multi_custom',
+    'shuttle_stock_transfer',
+  ] as const)('restores %s from a direct URL', async (mode) => {
+    renderDefaultPage(`/path-demo?mode=${mode}`)
+    expect(await screen.findByLabelText('演示模式')).toHaveValue(mode)
+    expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', `?mode=${mode}`)
   })
 
-  it('switches inventory queries with topology ID and ignores the late previous response', async () => {
-    const topologyB = { ...topology, id: 'topology-b', name: 'Warehouse B' }
-    vi.mocked(api.listTopologies).mockResolvedValue([
-      { id: topology.id, name: topology.name, payload: topology },
-      { id: topologyB.id, name: topologyB.name, payload: topologyB },
-    ])
-    const summaryForOld = {
-      topology_id: topology.id, storage_location_count: 1, stocked_location_count: 1,
-      positive_inventory_location_count: 1, unconfigured_location_count: 0, zero_inventory_location_count: 0,
-      sku_count: 1, quantity_on_hand: 12, quantity_reserved: 2, quantity_available: 10,
-      data_sources: ['synthetic_demo'],
-    }
-    const summaryForB = { ...summaryForOld, topology_id: topologyB.id, quantity_on_hand: 77, quantity_available: 75 }
-    let resolveOldSummary: ((value: typeof summaryForOld) => void) | undefined
-    let resolveOldLocations: ((value: typeof inventoryLocation[]) => void) | undefined
-    vi.mocked(api.getInventorySummary).mockImplementation((topologyId) => (
-      topologyId === topology.id
-        ? new Promise((resolve) => { resolveOldSummary = resolve })
-        : Promise.resolve(summaryForB)
-    ))
-    vi.mocked(api.listInventoryLocations).mockImplementation((topologyId) => (
-      topologyId === topology.id
-        ? new Promise((resolve) => { resolveOldLocations = resolve })
-        : Promise.resolve([])
-    ))
+  it('normalizes an invalid mode to the legal Shuttle default', async () => {
+    renderDefaultPage('/path-demo?mode=not-a-real-mode')
+    expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_single')
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_single'))
+  })
 
-    renderPage()
-    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('ctu_single'))
-    fireEvent.click(screen.getByRole('tab', { name: '库存与取货' }))
-    fireEvent.change(screen.getByLabelText('拓扑'), { target: { value: topologyB.id } })
+  it('uses router history for Shuttle mode back and forward navigation', async () => {
+    renderDefaultPage('/path-demo?mode=shuttle_single')
+    const mode = await screen.findByLabelText('演示模式')
+    fireEvent.change(mode, { target: { value: 'shuttle_multi_preset' } })
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_multi_preset'))
+    fireEvent.change(screen.getByLabelText('演示模式'), { target: { value: 'shuttle_multi_custom' } })
+    await waitFor(() => expect(screen.getByTestId('router-location')).toHaveAttribute('data-search', '?mode=shuttle_multi_custom'))
 
-    await waitFor(() => expect(api.getInventorySummary).toHaveBeenCalledWith(topologyB.id))
-    await waitFor(() => expect(screen.getByText('77', { selector: 'strong' })).toBeInTheDocument())
-    await act(async () => {
-      resolveOldSummary?.(summaryForOld)
-      resolveOldLocations?.([inventoryLocation])
-    })
-    expect(screen.getByText('77', { selector: 'strong' })).toBeInTheDocument()
-    expect(screen.queryByText('12', { selector: 'strong' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'test history back' }))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_multi_preset'))
+    fireEvent.click(screen.getByRole('button', { name: 'test history forward' }))
+    await waitFor(() => expect(screen.getByLabelText('演示模式')).toHaveValue('shuttle_multi_custom'))
+  })
+
+  it('refreshes the SKU mode without initializing inventory or replaying a transfer', async () => {
+    const first = renderDefaultPage('/path-demo?mode=shuttle_stock_transfer')
+    expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_stock_transfer')
+    first.unmount()
+
+    renderDefaultPage('/path-demo?mode=shuttle_stock_transfer')
+    expect(await screen.findByLabelText('演示模式')).toHaveValue('shuttle_stock_transfer')
+    expect(api.initializeShuttleDemoInventory).not.toHaveBeenCalled()
+    expect(api.createShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.planStartShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.advanceShuttleDemoTransfer).not.toHaveBeenCalled()
+    expect(api.cancelShuttleDemoTransfer).not.toHaveBeenCalled()
   })
 })
 

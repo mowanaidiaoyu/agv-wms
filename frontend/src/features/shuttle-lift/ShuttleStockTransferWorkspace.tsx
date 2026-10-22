@@ -3,6 +3,8 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import type { StoredRecord, TopologyPayload } from '../../types'
 import { api } from '../../lib/api'
 import { PathPlaybackController } from '../path-demo/PathPlaybackController'
+import { PathDemoModeSelect } from '../path-demo/PathDemoModeSelect'
+import type { PathDemoMode } from '../path-demo/PathDemoModeSelect'
 import type { CameraActionRequest, CameraViewMode } from '../path-demo/cameraControls'
 import { usePathPlayback } from '../path-demo/pathPlayback'
 import type { PathDemoAlgorithm } from '../path-demo/types'
@@ -31,12 +33,22 @@ export function ShuttleStockTransferWorkspace({
   topologyRecord,
   topologies,
   onTopologyChange,
-  onWorkspaceModeChange,
+  demoMode,
+  onDemoModeChange,
+  onReturnToPlanning,
+  activeTaskId,
+  onActiveTaskIdChange,
+  onOpenAdvancedManagement,
 }: {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
   onTopologyChange: (topologyId: string) => void
-  onWorkspaceModeChange: (mode: 'planning' | 'inventory') => void
+  demoMode: PathDemoMode
+  onDemoModeChange: (mode: PathDemoMode) => void
+  onReturnToPlanning: () => void
+  activeTaskId: string | null
+  onActiveTaskIdChange: (taskId: string | null) => void
+  onOpenAdvancedManagement: () => void
 }) {
   const topologyId = topologyRecord.id
   const tracksQueries = useQueries({ queries: LEVELS.map((level) => ({
@@ -67,11 +79,19 @@ export function ShuttleStockTransferWorkspace({
   const [cameraViewMode, setCameraViewMode] = useState<CameraViewMode>('free')
   const [cameraActionRequest, setCameraActionRequest] = useState<CameraActionRequest | null>(null)
   const [autoStart, setAutoStart] = useState(false)
+  const [recoveredReadOnly, setRecoveredReadOnly] = useState(false)
   const requestSequence = useRef(0)
   const cameraSequence = useRef(0)
   const advanceInFlight = useRef(false)
+  const locallyCreatedTaskId = useRef<string | null>(null)
   const tracks = useMemo(() => tracksQueries.flatMap((query) => query.data?.nodes ?? []), [tracksQueries])
   const lifts = useMemo(() => liftsQuery.data?.lifts ?? [], [liftsQuery.data])
+  const restoredTaskQuery = useQuery({
+    queryKey: ['shuttle-demo-transfer-task', activeTaskId],
+    queryFn: () => api.getShuttleDemoTransfer(activeTaskId!),
+    enabled: Boolean(activeTaskId),
+    refetchOnWindowFocus: false,
+  })
 
   useEffect(() => {
     const ids = skusQuery.data?.map((sku) => sku.sku_id) ?? []
@@ -102,18 +122,51 @@ export function ShuttleStockTransferWorkspace({
       ? current : destinations.find((item) => item.location_id !== sourceLocationId)?.location_id ?? '')
   }, [destinations, sourceLocationId, task])
 
-  const source = sources.find((item) => item.location_id === sourceLocationId) ?? null
-  const destination = destinations.find((item) => item.location_id === destinationLocationId) ?? null
+  const taskSourceQuery = useQuery({
+    queryKey: ['shuttle-demo-transfer-source', topologyId, task?.source_location_id],
+    queryFn: () => api.getShuttleDemoInventoryLocation(topologyId, task!.source_location_id),
+    enabled: Boolean(task?.source_location_id),
+  })
+  const taskDestinationQuery = useQuery({
+    queryKey: ['shuttle-demo-transfer-destination', topologyId, task?.destination_location_id],
+    queryFn: () => api.getShuttleDemoInventoryLocation(topologyId, task!.destination_location_id),
+    enabled: Boolean(task?.destination_location_id),
+  })
+  const source = taskSourceQuery.data ?? sources.find((item) => item.location_id === sourceLocationId) ?? null
+  const destination = taskDestinationQuery.data ?? destinations.find((item) => item.location_id === destinationLocationId) ?? null
   const sourceBalance = skuBalance(source, selectedSkuId)
   const destinationBalance = skuBalance(destination, selectedSkuId)
   const duration = task?.plan?.estimated_duration_seconds ?? 0
   const playback = usePathPlayback(duration, task?.task_id ?? `${topologyId}:transfer-empty`)
   const startPlayback = playback.start
+  const resetPlayback = playback.reset
   const sample = useMemo(
     () => sampleShuttlePlan(task?.plan ?? null, playback.state.elapsedSeconds, playback.state.status),
     [playback.state.elapsedSeconds, playback.state.status, task?.plan],
   )
   const cameraSample = useMemo(() => shuttleCameraSample(sample), [sample])
+
+  useEffect(() => {
+    const restored = restoredTaskQuery.data
+    if (!restored || task?.task_id === restored.task_id || locallyCreatedTaskId.current === restored.task_id) return
+    if (restored.topology_id !== topologyId) {
+      setError(`任务 ${restored.task_id} 属于其他拓扑，未加载到当前工作台。`)
+      return
+    }
+    setTask(restored)
+    setSelectedSkuId(restored.sku_id)
+    setSourceLocationId(restored.source_location_id)
+    setDestinationLocationId(restored.destination_location_id)
+    setQuantity(restored.quantity)
+    setAlgorithm(restored.algorithm)
+    setBefore({
+      source: restored.source_inventory.quantity_on_hand,
+      destination: restored.destination_inventory.quantity_on_hand + restored.vehicle_load_quantity,
+    })
+    setRecoveredReadOnly(true)
+    setAutoStart(false)
+    resetPlayback()
+  }, [resetPlayback, restoredTaskQuery.data, task?.task_id, topologyId])
 
   useEffect(() => {
     if (autoStart && duration > 0) {
@@ -123,7 +176,7 @@ export function ShuttleStockTransferWorkspace({
   }, [autoStart, duration, startPlayback])
 
   useEffect(() => {
-    if (!task || advanceInFlight.current || task.pickup_at_seconds === null || task.dropoff_at_seconds === null) return
+    if (recoveredReadOnly || !task || advanceInFlight.current || task.pickup_at_seconds === null || task.dropoff_at_seconds === null) return
     let milestone: number | null = null
     if (['moving_to_pickup', 'planned', 'reserved'].includes(task.status)
       && playback.state.elapsedSeconds >= task.pickup_at_seconds) milestone = task.pickup_at_seconds
@@ -140,13 +193,16 @@ export function ShuttleStockTransferWorkspace({
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : String(caught)))
       .finally(() => { advanceInFlight.current = false })
-  }, [destinationsQuery, playback.state.elapsedSeconds, skusQuery, sourcesQuery, task])
+  }, [destinationsQuery, playback.state.elapsedSeconds, recoveredReadOnly, skusQuery, sourcesQuery, task])
 
   const clearTask = () => {
     requestSequence.current += 1
     setTask(null)
     setBefore(null)
+    setRecoveredReadOnly(false)
     setError('')
+    locallyCreatedTaskId.current = null
+    onActiveTaskIdChange(null)
     playback.reset()
   }
 
@@ -166,7 +222,7 @@ export function ShuttleStockTransferWorkspace({
     if (!source || !destination || !sourceBalance) return
     const sequence = requestSequence.current + 1
     requestSequence.current = sequence
-    setSubmitting(true); setError(''); setTask(null); playback.reset()
+    setSubmitting(true); setError(''); setTask(null); setRecoveredReadOnly(false); playback.reset()
     setBefore({ source: sourceBalance.quantity_on_hand, destination: destinationBalance?.quantity_on_hand ?? 0 })
     try {
       const currentTrack = tracks.some((node) => node.track_node_id === 'L1-r100-c7')
@@ -181,6 +237,9 @@ export function ShuttleStockTransferWorkspace({
         vehicle_id: 'SHUTTLE-01',
         current_track_node_id: currentTrack,
       })
+      locallyCreatedTaskId.current = created.task_id
+      setTask(created)
+      onActiveTaskIdChange(created.task_id)
       const started = await api.planStartShuttleDemoTransfer(created.task_id)
       if (requestSequence.current !== sequence) return
       setTask(started)
@@ -219,8 +278,9 @@ export function ShuttleStockTransferWorkspace({
         {sidebarCollapsed ? (
           <button className="ghost-button shuttle-sidebar-rail" type="button" aria-label="展开配置侧栏" onClick={() => setSidebarCollapsed(false)}>☰</button>
         ) : <>
-          <div className="shuttle-panel-heading"><strong>SKU 货物搬运</strong><button className="ghost-button" type="button" onClick={() => setSidebarCollapsed(true)}>收起侧栏</button></div>
+          <div className="shuttle-panel-heading"><strong>SKU 货物搬运</strong><button className="ghost-button" type="button" onClick={onReturnToPlanning}>返回路径规划</button><button className="ghost-button" type="button" onClick={() => setSidebarCollapsed(true)}>收起侧栏</button></div>
           <label>拓扑<select value={topologyId} onChange={(event) => onTopologyChange(event.target.value)}>{topologies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+          <PathDemoModeSelect value={demoMode} onChange={onDemoModeChange} />
           <div className="shuttle-demo-badge">synthetic_demo · 离线逻辑货物搬运</div>
           <button className="ghost-button" type="button" disabled={initializing} onClick={() => void initialize()}>{initializing ? '正在初始化…' : '初始化模拟库存'}</button>
           <small className="path-demo-note">初始化幂等，不重置已发生的搬运，也不修改 CTU 正式库存。</small>
@@ -239,7 +299,9 @@ export function ShuttleStockTransferWorkspace({
           {quantity > available && source ? <p className="path-demo-error" role="alert">起点可用库存不足：当前可用 {available}。</p> : null}
           <button className="accent-button path-demo-plan-button" type="button" disabled={!canSubmit} onClick={() => void submit()}>{submitting ? '正在校验并规划…' : '规划并开始模拟搬运'}</button>
           {error ? <p className="path-demo-error" role="alert">{error}</p> : null}
-          <PathPlaybackController state={playback.state} canPlay={duration > 0} onStart={playback.start} onPause={playback.pause} onResume={playback.resume} onReset={playback.reset} onRateChange={playback.setRate} />
+          {restoredTaskQuery.isError ? <p className="path-demo-error" role="alert">任务状态读取失败：{restoredTaskQuery.error instanceof Error ? restoredTaskQuery.error.message : String(restoredTaskQuery.error)}</p> : null}
+          {recoveredReadOnly ? <p className="path-demo-note" role="status">当前任务已从后端安全恢复；播放器保持只读暂停，不会重复执行 Pick 或 Drop。</p> : null}
+          <PathPlaybackController state={playback.state} canPlay={duration > 0 && !recoveredReadOnly} onStart={playback.start} onPause={playback.pause} onResume={playback.resume} onReset={playback.reset} onRateChange={playback.setRate} />
           {task && !['delivered', 'failed', 'cancelled'].includes(task.status) ? <button className="ghost-button danger" type="button" onClick={() => void cancel()}>取消当前任务</button> : null}
           <dl className="path-demo-stats shuttle-transfer-stats">
             <div><dt>任务状态</dt><dd>{task ? statusLabel[task.status] : '待创建'}</dd></div>
@@ -250,7 +312,7 @@ export function ShuttleStockTransferWorkspace({
             <div><dt>货物守恒</dt><dd>{conservedBefore === null ? '—' : `${conservedBefore} → ${conservedNow}`}</dd></div>
           </dl>
           <section className="path-demo-camera-controls"><div className="path-demo-camera-heading"><strong>视角控制</strong><span className={`path-demo-view-badge is-${cameraViewMode}`}>{cameraViewMode === 'follow' ? '跟随' : '自由'}</span></div><div className="path-demo-camera-buttons"><button className="ghost-button" type="button" disabled={!cameraSample} onClick={() => requestCamera('locate')}>定位四向车</button><button className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'} type="button" disabled={!cameraSample} onClick={() => setCameraViewMode((value) => value === 'follow' ? 'free' : 'follow')}>跟随四向车</button><button className="ghost-button" type="button" disabled={!source} onClick={() => source && requestCamera('focus-point', [source.world_x, source.world_y, source.world_z])}>查看取货位</button><button className="ghost-button" type="button" disabled={!destination} onClick={() => destination && requestCamera('focus-point', [destination.world_x, destination.world_y, destination.world_z])}>查看目标货位</button><button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCamera('overview') }}>仓库全景</button><button className={rackXray ? 'accent-button' : 'ghost-button'} type="button" onClick={() => setRackXray((value) => !value)}>透视货架：{rackXray ? '开' : '关'}</button></div></section>
-          <details className="shuttle-contract-card"><summary><strong>高级建模与审核</strong></summary><p>演示资格只证明真实货架候选与真实 ShuttleGraph 的程序邻接、连通和车体包围盒检查；正式物理 Pick Face 仍为未审核。</p><button className="ghost-button" type="button" onClick={() => onWorkspaceModeChange('inventory')}>打开高级建模与审核</button></details>
+          <details className="shuttle-contract-card"><summary><strong>高级建模与审核</strong></summary><p>演示资格只证明真实货架候选与真实 ShuttleGraph 的程序邻接、连通和车体包围盒检查；正式物理 Pick Face 仍为未审核。</p><button className="ghost-button" type="button" onClick={onOpenAdvancedManagement}>打开高级建模与审核</button></details>
         </>}
       </aside>
       <div className="path-demo-viewport" aria-label="四向车 SKU 货物搬运 3D 演示">

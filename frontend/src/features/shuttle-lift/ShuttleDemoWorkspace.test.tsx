@@ -90,15 +90,18 @@ const multiPlan: ShuttleMultiPlanResponse = {
   safety_validation: { node_conflicts: 0, edge_conflicts: 0, geometric_conflicts: 0, lift_resource_conflicts: 0, timing_violations: 0, safe: true }, unresolved_conflicts: [], failure_reason: null, failure: null, vehicle_initial_config: multiVehicleRequests, lift_initial_state: { 'shuttle-lift-a': 1, 'shuttle-lift-b': 1 }, time_contract: { time_step_seconds: 0.25 },
 }
 
-function renderWorkspace(onMode = vi.fn(), onDemoMode = vi.fn(), demoMode: 'shuttle_single' | 'shuttle_multi_preset' | 'shuttle_multi_custom' = 'shuttle_single') {
+function renderWorkspace(onDemoMode = vi.fn(), demoMode: 'shuttle_single' | 'shuttle_multi_preset' | 'shuttle_multi_custom' = 'shuttle_single') {
   return render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
     <ShuttleDemoWorkspace
       topologyRecord={record}
       topologies={[record]}
       onTopologyChange={vi.fn()}
-      onWorkspaceModeChange={onMode}
       demoMode={demoMode}
       onDemoModeChange={onDemoMode}
+      onReturnToPlanning={vi.fn()}
+      activeTransferTaskId={null}
+      onActiveTransferTaskIdChange={vi.fn()}
+      onOpenAdvancedManagement={vi.fn()}
     />
   </QueryClientProvider>)
 }
@@ -197,9 +200,8 @@ describe('ShuttleDemoWorkspace', () => {
       data_source: 'topology_slot_aisles', verification_status: 'topology_version_mismatch', planning_enabled: false, levels: [], warnings: ['版本不匹配'],
       lift_candidate_count: 0, lift_selection_basis: [],
     })
-    const onMode = vi.fn()
     const onDemoMode = vi.fn()
-    renderWorkspace(onMode, onDemoMode)
+    renderWorkspace(onDemoMode)
     expect(await screen.findByText('当前轨道或提升机配置未通过程序验证，已禁止运行。')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划跨层路径' })).toBeDisabled()
     expect(screen.queryByRole('option', { name: /CTU/ })).not.toBeInTheDocument()
@@ -211,7 +213,7 @@ describe('ShuttleDemoWorkspace', () => {
     let resolvePlan!: (value: ShuttlePlanResponse) => void
     vi.mocked(api.planShuttlePath).mockReturnValueOnce(new Promise((resolve) => { resolvePlan = resolve }))
     const onDemoMode = vi.fn()
-    renderWorkspace(vi.fn(), onDemoMode)
+    renderWorkspace(onDemoMode)
     await waitFor(() => expect(screen.getByLabelText('四向车终点轨道节点')).toHaveValue('L4-r100-c51'))
 
     fireEvent.click(screen.getByRole('button', { name: '规划跨层路径' }))
@@ -301,7 +303,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('loads preset A/B/C and sends the exact selected vehicles to the real multi API', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    renderWorkspace(vi.fn(), 'shuttle_multi_preset')
     expect(await screen.findByRole('option', { name: '场景 B：同层交叉轨道竞争' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('四向车预设场景'), { target: { value: 'track-conflict' } })
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
@@ -314,7 +316,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('keeps the unified clock but omits event cards and raw diagnostic JSON', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    renderWorkspace(vi.fn(), 'shuttle_multi_preset')
     await screen.findByRole('option', { name: '场景 A：分层无冲突并行运行' })
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
     const timeline = await screen.findByLabelText('统一仿真时间轴')
@@ -326,7 +328,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('keeps preset A/B/C plannable after removing the event log UI', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    renderWorkspace(vi.fn(), 'shuttle_multi_preset')
     await screen.findByRole('option', { name: '场景 C：Lift-A 资源竞争' })
     const selector = screen.getByLabelText('四向车预设场景')
     for (const [callCount, scenarioValue] of ['parallel', 'track-conflict', 'lift-conflict'].entries()) {
@@ -338,7 +340,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('keeps the selected Shuttle stable and supports config/sidebar collapsing', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    renderWorkspace(vi.fn(), 'shuttle_multi_preset')
     await screen.findByRole('option', { name: '场景 A：分层无冲突并行运行' })
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
     const selector = await screen.findByLabelText('选择跟随四向车')
@@ -351,7 +353,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('keeps custom vehicle algorithms independent and enforces the 2–4 vehicle boundary', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_custom')
+    renderWorkspace(vi.fn(), 'shuttle_multi_custom')
     expect(await screen.findByText('车辆配置（2/4）')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('SHUTTLE-02 路径算法'), { target: { value: 'dijkstra' } })
     fireEvent.click(screen.getByRole('button', { name: '添加车辆' }))
@@ -366,7 +368,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('marks every repeated terminal near its vehicle and blocks the request until corrected', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_custom')
+    renderWorkspace(vi.fn(), 'shuttle_multi_custom')
     await screen.findByText('车辆配置（2/4）')
 
     fireEvent.change(screen.getByLabelText('SHUTTLE-02 终点层'), { target: { value: '4' } })
@@ -388,7 +390,7 @@ describe('ShuttleDemoWorkspace', () => {
   })
 
   it('shows a structured search limit explanation and removes an obsolete playable plan', async () => {
-    renderWorkspace(vi.fn(), vi.fn(), 'shuttle_multi_preset')
+    renderWorkspace(vi.fn(), 'shuttle_multi_preset')
     await screen.findByRole('option', { name: '场景 A：分层无冲突并行运行' })
     fireEvent.click(screen.getByRole('button', { name: '开始多车规划' }))
     await waitFor(() => expect(screen.getByTestId('shuttle-scene')).toHaveAttribute('data-multi-plan', 'shuttle-multi-test'))

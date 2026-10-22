@@ -15,16 +15,18 @@ import { ShuttleStockTransferWorkspace } from './ShuttleStockTransferWorkspace'
 import type { ShuttleLevel, ShuttleMultiPlanResponse, ShuttleMultiVehicleRequest, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
 const PathDemo3DScene = lazy(() => import('../path-demo/PathDemo3DScene').then((module) => ({ default: module.PathDemo3DScene })))
-type WorkspaceMode = 'planning' | 'inventory'
 type ScenarioId = 'parallel' | 'track-conflict' | 'lift-conflict'
 type ShuttleDraft = ShuttleMultiVehicleRequest & { start_level: ShuttleLevel; target_level: ShuttleLevel }
 interface ShuttleDemoWorkspaceProps {
   topologyRecord: StoredRecord<TopologyPayload>
   topologies: Array<StoredRecord<TopologyPayload>>
   onTopologyChange: (topologyId: string) => void
-  onWorkspaceModeChange: (mode: WorkspaceMode) => void
   demoMode: PathDemoMode
   onDemoModeChange: (mode: PathDemoMode) => void
+  onReturnToPlanning: () => void
+  activeTransferTaskId: string | null
+  onActiveTransferTaskIdChange: (taskId: string | null) => void
+  onOpenAdvancedManagement: () => void
 }
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
@@ -94,13 +96,18 @@ export function ShuttleDemoWorkspace(props: ShuttleDemoWorkspaceProps) {
       topologyRecord={props.topologyRecord}
       topologies={props.topologies}
       onTopologyChange={props.onTopologyChange}
-      onWorkspaceModeChange={props.onWorkspaceModeChange}
+      demoMode={props.demoMode}
+      onDemoModeChange={props.onDemoModeChange}
+      onReturnToPlanning={props.onReturnToPlanning}
+      activeTaskId={props.activeTransferTaskId}
+      onActiveTaskIdChange={props.onActiveTransferTaskIdChange}
+      onOpenAdvancedManagement={props.onOpenAdvancedManagement}
     />
   }
   return <ShuttlePlanningWorkspace {...props} />
 }
 
-function ShuttlePlanningWorkspace({ topologyRecord, topologies, onTopologyChange, onWorkspaceModeChange, demoMode, onDemoModeChange }: ShuttleDemoWorkspaceProps) {
+function ShuttlePlanningWorkspace({ topologyRecord, topologies, onTopologyChange, demoMode, onDemoModeChange }: ShuttleDemoWorkspaceProps) {
   const topologyId = topologyRecord.id
   const topologyVersion = topologyRecord.payload.meta.version
   const savedDraft = useShuttleWorkspaceStore.getState().drafts[topologyId]
@@ -241,7 +248,6 @@ function ShuttlePlanningWorkspace({ topologyRecord, topologies, onTopologyChange
       {sidebarCollapsed ? <button className="ghost-button shuttle-sidebar-rail" type="button" aria-label="展开配置侧栏" onClick={() => setSidebarCollapsed(false)}>☰</button> : <>
         <div className="shuttle-panel-heading"><strong>四向车路径规划</strong><button className="ghost-button" type="button" onClick={() => setSidebarCollapsed(true)}>收起侧栏</button></div>
         <label>拓扑<select value={topologyId} onChange={(event) => onTopologyChange(event.target.value)}>{topologies.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        <div className="path-demo-workspace-tabs" role="tablist" aria-label="工作台模式"><button type="button" role="tab" aria-selected className="active">路径规划</button><button type="button" role="tab" aria-selected={false} onClick={() => { invalidatePlan(); playback.reset(); onWorkspaceModeChange('inventory') }}>库存与取货</button></div>
         <PathDemoModeSelect value={demoMode} onChange={(nextMode) => { invalidatePlan(); playback.reset(); onDemoModeChange(nextMode) }} />
         <button className="ghost-button shuttle-config-toggle" type="button" aria-expanded={configurationExpanded} onClick={() => setConfigurationExpanded((current) => !current)}>{configurationExpanded ? '收起路径配置' : '展开路径配置'}</button>
         {configurationExpanded ? <section className="shuttle-config-section" aria-label="四向车规划配置">
