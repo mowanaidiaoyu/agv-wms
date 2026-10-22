@@ -574,4 +574,132 @@ export interface ShuttleVisualizationState {
   liftStates?: ShuttleLiftPlaybackState[]
   selectedShuttleId?: string | null
   selectedLiftId: string | null
+  transfer?: {
+    source: ShuttleDemoLocationInventory
+    destination: ShuttleDemoLocationInventory
+    skuId: string
+    quantity: number
+    status: ShuttleTransferStatus
+    vehicleLoadQuantity: number
+  } | null
+}
+
+export type ShuttleTransferStatus =
+  | 'created'
+  | 'reserved'
+  | 'planned'
+  | 'moving_to_pickup'
+  | 'picked'
+  | 'moving_to_dropoff'
+  | 'delivered'
+  | 'failed'
+  | 'cancelled'
+
+export interface ShuttleDemoInventoryInitializeResult {
+  topology_id: string
+  topology_revision: string
+  seed: 'shuttle-stock-demo-v1'
+  candidate_location_count: number
+  eligible_location_count: number
+  inserted_sku_count: number
+  inserted_balance_count: number
+  existing_balance_count: number
+  data_source: 'synthetic_demo'
+}
+
+export interface ShuttleDemoSkuSummary {
+  sku_id: string
+  sku_name: string
+  unit: string
+  quantity_on_hand: number
+  quantity_reserved: number
+  quantity_available: number
+  stocked_location_count: number
+}
+
+export interface ShuttleDemoInventoryBalance {
+  sku_id: string
+  sku_name: string
+  unit: string
+  quantity_on_hand: number
+  quantity_reserved: number
+  quantity_available: number
+}
+
+export interface ShuttleDemoLocationInventory {
+  topology_id: string
+  location_id: string
+  zone_id: string
+  level: ShuttleLevel
+  row: number
+  col: number
+  world_x: number
+  world_y: number
+  world_z: number
+  transfer_eligible: boolean
+  access_track_node_id: string | null
+  eligibility_reason_codes: string[]
+  mapping_source: 'synthetic_demo_adjacency_assumption'
+  physical_review_status: 'unverified'
+  balances: ShuttleDemoInventoryBalance[]
+  data_source: 'synthetic_demo'
+}
+
+export interface ShuttleDemoLocationPage {
+  topology_id: string
+  total: number
+  offset: number
+  limit: number
+  locations: ShuttleDemoLocationInventory[]
+}
+
+export interface ShuttleDemoInventoryLedgerEntry {
+  event_id: string
+  task_id: string
+  topology_id: string
+  location_id: string | null
+  sku_id: string
+  event_type: 'reserve' | 'release' | 'pick' | 'drop' | 'failure_in_transit'
+  quantity: number
+  on_hand_delta: number
+  reserved_delta: number
+  vehicle_load_delta: number
+  quantity_on_hand_after: number | null
+  quantity_reserved_after: number | null
+  vehicle_load_after: number
+  data_source: 'synthetic_demo'
+  created_at: string
+}
+
+export interface ShuttleTransferTask {
+  task_id: string
+  topology_id: string
+  topology_revision: string
+  shuttle_config_revision: string
+  coordinate_contract_revision: 'shuttle-internal-levels-v1'
+  vehicle_id: string
+  current_track_node_id: string
+  source_location_id: string
+  source_access_track_node_id: string
+  destination_location_id: string
+  destination_access_track_node_id: string
+  sku_id: string
+  quantity: number
+  vehicle_capacity_units: number
+  vehicle_load_quantity: number
+  algorithm: PathDemoAlgorithm
+  status: ShuttleTransferStatus
+  plan: ShuttlePlanResponse | null
+  pickup_at_seconds: number | null
+  dropoff_at_seconds: number | null
+  simulation_elapsed_seconds: number
+  pick_event_id: string
+  drop_event_id: string
+  failure_reason: string | null
+  data_source: 'synthetic_demo'
+  source_inventory: ShuttleDemoInventoryBalance
+  destination_inventory: ShuttleDemoInventoryBalance
+  ledger: ShuttleDemoInventoryLedgerEntry[]
+  created_at: string
+  updated_at: string
 }

@@ -14,6 +14,11 @@ from ..services.shuttle_storage_review import (
     ShuttleStorageNotFoundError,
     ShuttleStorageReviewService,
 )
+from ..services.shuttle_demo_transfer import (
+    ShuttleDemoTransferConflict,
+    ShuttleDemoTransferNotFound,
+    ShuttleDemoTransferService,
+)
 from ..services.shuttle_multi_planner import (
     ShuttleMultiPlanningError,
     build_shuttle_multi_scenarios,
@@ -52,6 +57,18 @@ from ..shuttle_storage_schemas import (
     ShuttleDemoDropoffRecord,
     ShuttleDemoDropoffReviewRequest,
 )
+from ..shuttle_transfer_schemas import (
+    ShuttleDemoInventoryInitializeRequest,
+    ShuttleDemoInventoryInitializeResponse,
+    ShuttleDemoInventoryLedgerEntry,
+    ShuttleDemoLocationInventory,
+    ShuttleDemoLocationPage,
+    ShuttleDemoSkuSummary,
+    ShuttleTransferAdvanceRequest,
+    ShuttleTransferCreateRequest,
+    ShuttleTransferFailRequest,
+    ShuttleTransferTask,
+)
 
 
 router = APIRouter(prefix="/shuttle", tags=["shuttle-offline-demo"])
@@ -61,10 +78,22 @@ def _review_service() -> ShuttleStorageReviewService:
     return ShuttleStorageReviewService(repo)
 
 
+def _transfer_service() -> ShuttleDemoTransferService:
+    return ShuttleDemoTransferService(repo)
+
+
 def _translate_review_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ShuttleStorageNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, ShuttleStorageConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+def _translate_transfer_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ShuttleDemoTransferNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ShuttleDemoTransferConflict):
         return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=400, detail=str(exc))
 
@@ -272,6 +301,137 @@ def review_shuttle_demo_dropoff(
         )
     except Exception as exc:
         raise _translate_review_error(exc) from exc
+
+
+@router.post(
+    "/demo-inventory/initialize",
+    response_model=ShuttleDemoInventoryInitializeResponse,
+)
+def initialize_shuttle_demo_inventory(request: ShuttleDemoInventoryInitializeRequest):
+    try:
+        return _transfer_service().initialize_inventory(request.topology_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/demo-inventory/skus",
+    response_model=list[ShuttleDemoSkuSummary],
+)
+def list_shuttle_demo_skus(
+    topology_id: str,
+    search: str | None = Query(default=None, min_length=1),
+):
+    try:
+        return _transfer_service().list_skus(topology_id, search)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/demo-inventory/locations",
+    response_model=ShuttleDemoLocationPage,
+)
+def list_shuttle_demo_inventory_locations(
+    topology_id: str,
+    level: int | None = Query(default=None, ge=1, le=4),
+    sku_id: str | None = Query(default=None, min_length=1),
+    search: str | None = Query(default=None, min_length=1),
+    transfer_eligible: bool | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=1000, ge=1, le=5000),
+):
+    try:
+        return _transfer_service().list_locations(
+            topology_id,
+            level=level,
+            sku_id=sku_id,
+            search=search,
+            transfer_eligible=transfer_eligible,
+            offset=offset,
+            limit=limit,
+        )
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get(
+    "/topologies/{topology_id}/demo-inventory/locations/{location_id}",
+    response_model=ShuttleDemoLocationInventory,
+)
+def get_shuttle_demo_inventory_location(topology_id: str, location_id: str):
+    try:
+        return _transfer_service().get_location(topology_id, location_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfers", response_model=ShuttleTransferTask)
+def create_shuttle_demo_transfer(request: ShuttleTransferCreateRequest):
+    try:
+        return _transfer_service().create_task(
+            request.topology_id,
+            request.source_location_id,
+            request.destination_location_id,
+            request.sku_id,
+            request.quantity,
+            request.algorithm,
+            request.vehicle_id,
+            request.current_track_node_id,
+        )
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get("/demo-transfers/{task_id}", response_model=ShuttleTransferTask)
+def get_shuttle_demo_transfer(task_id: str):
+    try:
+        return _transfer_service().get_task(task_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfers/{task_id}/plan-start", response_model=ShuttleTransferTask)
+def plan_start_shuttle_demo_transfer(task_id: str):
+    try:
+        return _transfer_service().plan_and_start(task_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfers/{task_id}/advance", response_model=ShuttleTransferTask)
+def advance_shuttle_demo_transfer(task_id: str, request: ShuttleTransferAdvanceRequest):
+    try:
+        return _transfer_service().advance(task_id, request.elapsed_seconds)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfers/{task_id}/cancel", response_model=ShuttleTransferTask)
+def cancel_shuttle_demo_transfer(task_id: str):
+    try:
+        return _transfer_service().cancel(task_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.post("/demo-transfers/{task_id}/fail", response_model=ShuttleTransferTask)
+def fail_shuttle_demo_transfer(task_id: str, request: ShuttleTransferFailRequest):
+    try:
+        return _transfer_service().fail(task_id, request.reason)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
+
+
+@router.get(
+    "/demo-transfers/{task_id}/ledger",
+    response_model=list[ShuttleDemoInventoryLedgerEntry],
+)
+def get_shuttle_demo_transfer_ledger(task_id: str):
+    try:
+        return _transfer_service().list_ledger(task_id)
+    except Exception as exc:
+        raise _translate_transfer_error(exc) from exc
 
 
 @router.post("/plan", response_model=ShuttlePlanResponse)

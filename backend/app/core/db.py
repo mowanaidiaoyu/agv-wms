@@ -244,6 +244,108 @@ def init_db(db_path: Path = DB_PATH) -> None:
               validation_payload TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_access_eligibility (
+              topology_id TEXT NOT NULL,
+              location_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              access_track_node_id TEXT,
+              eligibility_status TEXT NOT NULL CHECK (
+                eligibility_status IN ('eligible', 'inventory_only')
+              ),
+              mapping_source TEXT NOT NULL CHECK (
+                mapping_source = 'synthetic_demo_adjacency_assumption'
+              ),
+              physical_review_status TEXT NOT NULL CHECK (
+                physical_review_status = 'unverified'
+              ),
+              validation_payload TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (topology_id, location_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_demo_access_eligible
+              ON shuttle_demo_access_eligibility (
+                topology_id, eligibility_status, access_track_node_id
+              );
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_inventory (
+              topology_id TEXT NOT NULL,
+              location_id TEXT NOT NULL,
+              sku_id TEXT NOT NULL,
+              quantity_on_hand INTEGER NOT NULL CHECK (quantity_on_hand >= 0),
+              quantity_reserved INTEGER NOT NULL DEFAULT 0 CHECK (
+                quantity_reserved >= 0 AND quantity_reserved <= quantity_on_hand
+              ),
+              data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (topology_id, location_id, sku_id),
+              FOREIGN KEY (sku_id) REFERENCES sku_catalog (sku_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_demo_inventory_sku
+              ON shuttle_demo_inventory (topology_id, sku_id, location_id);
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_transfer_tasks (
+              task_id TEXT PRIMARY KEY,
+              topology_id TEXT NOT NULL,
+              topology_revision TEXT NOT NULL,
+              shuttle_config_revision TEXT NOT NULL,
+              coordinate_contract_revision TEXT NOT NULL,
+              vehicle_id TEXT NOT NULL,
+              current_track_node_id TEXT NOT NULL,
+              source_location_id TEXT NOT NULL,
+              source_access_track_node_id TEXT NOT NULL,
+              destination_location_id TEXT NOT NULL,
+              destination_access_track_node_id TEXT NOT NULL,
+              sku_id TEXT NOT NULL,
+              quantity INTEGER NOT NULL CHECK (quantity > 0),
+              vehicle_capacity_units INTEGER NOT NULL CHECK (vehicle_capacity_units > 0),
+              vehicle_load_quantity INTEGER NOT NULL DEFAULT 0 CHECK (vehicle_load_quantity >= 0),
+              algorithm TEXT NOT NULL CHECK (algorithm IN ('astar', 'dijkstra')),
+              status TEXT NOT NULL CHECK (status IN (
+                'created', 'reserved', 'planned', 'moving_to_pickup', 'picked',
+                'moving_to_dropoff', 'delivered', 'failed', 'cancelled'
+              )),
+              plan_payload TEXT,
+              pickup_at_seconds REAL,
+              dropoff_at_seconds REAL,
+              simulation_elapsed_seconds REAL NOT NULL DEFAULT 0,
+              pick_event_id TEXT NOT NULL UNIQUE,
+              drop_event_id TEXT NOT NULL UNIQUE,
+              failure_reason TEXT,
+              data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_demo_transfer_tasks_topology
+              ON shuttle_demo_transfer_tasks (topology_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS shuttle_demo_inventory_ledger (
+              event_id TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL,
+              topology_id TEXT NOT NULL,
+              location_id TEXT,
+              sku_id TEXT NOT NULL,
+              event_type TEXT NOT NULL CHECK (event_type IN (
+                'reserve', 'release', 'pick', 'drop', 'failure_in_transit'
+              )),
+              quantity INTEGER NOT NULL CHECK (quantity > 0),
+              on_hand_delta INTEGER NOT NULL,
+              reserved_delta INTEGER NOT NULL,
+              vehicle_load_delta INTEGER NOT NULL,
+              quantity_on_hand_after INTEGER,
+              quantity_reserved_after INTEGER,
+              vehicle_load_after INTEGER NOT NULL CHECK (vehicle_load_after >= 0),
+              data_source TEXT NOT NULL CHECK (data_source = 'synthetic_demo'),
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (task_id) REFERENCES shuttle_demo_transfer_tasks (task_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shuttle_demo_inventory_ledger_task
+              ON shuttle_demo_inventory_ledger (task_id, created_at, event_id);
             """
         )
         _ensure_column(
@@ -275,6 +377,9 @@ def get_conn(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

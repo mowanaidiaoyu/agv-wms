@@ -120,10 +120,12 @@ function ShuttleVehicle({
   sample,
   color = '#14b8a6',
   selected = false,
+  loadLabel,
 }: {
   sample: ShuttlePlaybackSample | ShuttleMultiPlaybackSample
   color?: string
   selected?: boolean
+  loadLabel?: string
 }) {
   return (
     <group position={sample.world} rotation={[0, sample.headingRadians, 0]}>
@@ -150,8 +152,40 @@ function ShuttleVehicle({
         <meshBasicMaterial color={selected ? '#f8fafc' : color} transparent opacity={selected ? 0.95 : 0.7} />
       </mesh>
       <Html position={[0, 0.72, 0]} center distanceFactor={14} style={{ pointerEvents: 'none' }}>
-        <span className={`shuttle-vehicle-label ${selected ? 'is-selected' : ''}`}>{sample.vehicleId} · L{sample.shuttleLevel}</span>
+        <span className={`shuttle-vehicle-label ${selected ? 'is-selected' : ''}`}>
+          {sample.vehicleId} · L{sample.shuttleLevel}{loadLabel ? <small>{loadLabel}</small> : null}
+        </span>
       </Html>
+    </group>
+  )
+}
+
+function ShuttleTransferMarkers({ state }: { state: ShuttleVisualizationState }) {
+  const transfer = state.transfer
+  if (!transfer) return null
+  const markers = [
+    { key: 'pickup', location: transfer.source, color: '#f59e0b', label: '取货位' },
+    { key: 'dropoff', location: transfer.destination, color: '#22c55e', label: '目标货位' },
+  ] as const
+  return (
+    <group>
+      {markers.map(({ key, location, color, label }) => (
+        <group key={key} position={[location.world_x, location.world_y + 0.22, location.world_z]}>
+          <mesh rotation={[-Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[0.58, 0.82, 32]} />
+            <meshBasicMaterial color={color} transparent opacity={0.95} />
+          </mesh>
+          <mesh position={[0, 0.3, 0]}>
+            <boxGeometry args={[1.72, 0.42, 1.72]} />
+            <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.75} wireframe transparent opacity={0.75} />
+          </mesh>
+          <Html position={[0, 1.05, 0]} center distanceFactor={16} style={{ pointerEvents: 'none' }}>
+            <span className="shuttle-transfer-marker-label">
+              {label} · {transfer.skuId} × {transfer.quantity}
+            </span>
+          </Html>
+        </group>
+      ))}
     </group>
   )
 }
@@ -241,6 +275,7 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
   return (
     <group>
       <ShuttleTrackInstances state={state} />
+      <ShuttleTransferMarkers state={state} />
       {state.multiPlan ? <ShuttleMultiPaths state={state} /> : <ShuttlePath state={state} />}
       {state.lifts.map((lift) => (
         <LiftModel
@@ -261,7 +296,15 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
             selected={state.selectedShuttleId === sample.vehicleId}
           />
         ))
-        : state.sample ? <ShuttleVehicle sample={state.sample} selected /> : null}
+        : state.sample ? (
+          <ShuttleVehicle
+            sample={state.sample}
+            selected
+            loadLabel={state.transfer?.vehicleLoadQuantity
+              ? `载货 ${state.transfer.skuId} × ${state.transfer.vehicleLoadQuantity}`
+              : state.transfer ? '空载' : undefined}
+          />
+        ) : null}
     </group>
   )
 }

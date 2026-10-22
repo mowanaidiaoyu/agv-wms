@@ -75,9 +75,15 @@ def _slot_mask(
     return 0b1111 if all_road else 0
 
 
-def shuttle_slot_mask(topology: dict[str, Any], zone: dict[str, Any], row: int, col: int) -> int:
+def shuttle_slot_mask(
+    topology: dict[str, Any],
+    zone: dict[str, Any],
+    row: int,
+    col: int,
+    cell_lookup: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+) -> int:
     """Expose the renderer-compatible slot mask for read-only contract audits."""
-    return _slot_mask(zone, row, col, _cell_lookup(topology))
+    return _slot_mask(zone, row, col, cell_lookup or _cell_lookup(topology))
 
 
 def shuttle_slot_world_position(

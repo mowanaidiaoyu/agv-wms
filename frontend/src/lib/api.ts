@@ -45,6 +45,11 @@ import type {
   ShuttlePickFace,
   ShuttleTopologyLevelsResponse,
   ShuttleTracksResponse,
+  ShuttleDemoInventoryInitializeResult,
+  ShuttleDemoLocationInventory,
+  ShuttleDemoLocationPage,
+  ShuttleDemoSkuSummary,
+  ShuttleTransferTask,
 } from '../features/shuttle-lift/types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -366,5 +371,65 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+  },
+  initializeShuttleDemoInventory(topologyId: string) {
+    return request<ShuttleDemoInventoryInitializeResult>('/shuttle/demo-inventory/initialize', {
+      method: 'POST',
+      body: JSON.stringify({ topology_id: topologyId }),
+    })
+  },
+  listShuttleDemoSkus(topologyId: string, search?: string) {
+    const query = new URLSearchParams()
+    if (search) query.set('search', search)
+    const suffix = query.size ? `?${query}` : ''
+    return request<ShuttleDemoSkuSummary[]>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-inventory/skus${suffix}`,
+    )
+  },
+  listShuttleDemoInventoryLocations(
+    topologyId: string,
+    options: { level?: number; skuId?: string; search?: string; transferEligible?: boolean; limit?: number } = {},
+  ) {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 5000) })
+    if (options.level) query.set('level', String(options.level))
+    if (options.skuId) query.set('sku_id', options.skuId)
+    if (options.search) query.set('search', options.search)
+    if (options.transferEligible !== undefined) query.set('transfer_eligible', String(options.transferEligible))
+    return request<ShuttleDemoLocationPage>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-inventory/locations?${query}`,
+    )
+  },
+  getShuttleDemoInventoryLocation(topologyId: string, locationId: string) {
+    return request<ShuttleDemoLocationInventory>(
+      `/shuttle/topologies/${encodeURIComponent(topologyId)}/demo-inventory/locations/${encodeURIComponent(locationId)}`,
+    )
+  },
+  createShuttleDemoTransfer(payload: {
+    topology_id: string
+    source_location_id: string
+    destination_location_id: string
+    sku_id: string
+    quantity: number
+    algorithm: 'astar' | 'dijkstra'
+    vehicle_id: string
+    current_track_node_id?: string
+  }) {
+    return request<ShuttleTransferTask>('/shuttle/demo-transfers', {
+      method: 'POST', body: JSON.stringify(payload),
+    })
+  },
+  planStartShuttleDemoTransfer(taskId: string) {
+    return request<ShuttleTransferTask>(`/shuttle/demo-transfers/${encodeURIComponent(taskId)}/plan-start`, { method: 'POST' })
+  },
+  getShuttleDemoTransfer(taskId: string) {
+    return request<ShuttleTransferTask>(`/shuttle/demo-transfers/${encodeURIComponent(taskId)}`)
+  },
+  advanceShuttleDemoTransfer(taskId: string, elapsedSeconds: number) {
+    return request<ShuttleTransferTask>(`/shuttle/demo-transfers/${encodeURIComponent(taskId)}/advance`, {
+      method: 'POST', body: JSON.stringify({ elapsed_seconds: elapsedSeconds }),
+    })
+  },
+  cancelShuttleDemoTransfer(taskId: string) {
+    return request<ShuttleTransferTask>(`/shuttle/demo-transfers/${encodeURIComponent(taskId)}/cancel`, { method: 'POST' })
   },
 }

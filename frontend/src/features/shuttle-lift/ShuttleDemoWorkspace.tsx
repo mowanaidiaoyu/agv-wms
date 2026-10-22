@@ -11,12 +11,21 @@ import type { PathDemoAlgorithm } from '../path-demo/types'
 import { sampleAllShuttleVehicles, sampleShuttleLiftStates, shuttleMultiCameraSample, shuttleMultiMotionLabel } from './shuttleMultiPlayback'
 import { sampleShuttlePlan, SHUTTLE_VEHICLE_CENTER_HEIGHT, shuttleCameraSample, shuttleMotionLabel } from './shuttlePlayback'
 import { useShuttleWorkspaceStore } from './shuttleWorkspaceStore'
+import { ShuttleStockTransferWorkspace } from './ShuttleStockTransferWorkspace'
 import type { ShuttleLevel, ShuttleMultiPlanResponse, ShuttleMultiVehicleRequest, ShuttlePlanResponse, ShuttleTrackNode } from './types'
 
 const PathDemo3DScene = lazy(() => import('../path-demo/PathDemo3DScene').then((module) => ({ default: module.PathDemo3DScene })))
 type WorkspaceMode = 'planning' | 'inventory'
 type ScenarioId = 'parallel' | 'track-conflict' | 'lift-conflict'
 type ShuttleDraft = ShuttleMultiVehicleRequest & { start_level: ShuttleLevel; target_level: ShuttleLevel }
+interface ShuttleDemoWorkspaceProps {
+  topologyRecord: StoredRecord<TopologyPayload>
+  topologies: Array<StoredRecord<TopologyPayload>>
+  onTopologyChange: (topologyId: string) => void
+  onWorkspaceModeChange: (mode: WorkspaceMode) => void
+  demoMode: PathDemoMode
+  onDemoModeChange: (mode: PathDemoMode) => void
+}
 const SHUTTLE_LEVELS: ShuttleLevel[] = [1, 2, 3, 4]
 const FOUR_LEVEL_CONFIG_REVISION = 'shuttle-4l-lift-v2'
 const INTERNAL_HEIGHT_CONTRACT_REVISION = 'shuttle-internal-levels-v1'
@@ -79,14 +88,19 @@ function multiFailureMessage(next: ShuttleMultiPlanResponse) {
   if (failure.failure_code === 'reservation_conflict_unresolved') return `${failure.vehicle_id ?? '车辆'}：时空预约冲突未能解决。${failure.failure_reason}`
   return failure.failure_reason
 }
-export function ShuttleDemoWorkspace({ topologyRecord, topologies, onTopologyChange, onWorkspaceModeChange, demoMode, onDemoModeChange }: {
-  topologyRecord: StoredRecord<TopologyPayload>
-  topologies: Array<StoredRecord<TopologyPayload>>
-  onTopologyChange: (topologyId: string) => void
-  onWorkspaceModeChange: (mode: WorkspaceMode) => void
-  demoMode: PathDemoMode
-  onDemoModeChange: (mode: PathDemoMode) => void
-}) {
+export function ShuttleDemoWorkspace(props: ShuttleDemoWorkspaceProps) {
+  if (props.demoMode === 'shuttle_stock_transfer') {
+    return <ShuttleStockTransferWorkspace
+      topologyRecord={props.topologyRecord}
+      topologies={props.topologies}
+      onTopologyChange={props.onTopologyChange}
+      onWorkspaceModeChange={props.onWorkspaceModeChange}
+    />
+  }
+  return <ShuttlePlanningWorkspace {...props} />
+}
+
+function ShuttlePlanningWorkspace({ topologyRecord, topologies, onTopologyChange, onWorkspaceModeChange, demoMode, onDemoModeChange }: ShuttleDemoWorkspaceProps) {
   const topologyId = topologyRecord.id
   const topologyVersion = topologyRecord.payload.meta.version
   const savedDraft = useShuttleWorkspaceStore.getState().drafts[topologyId]

@@ -550,6 +550,7 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
   const totalDistance = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.total_distance, 0)
   const totalWait = multiPlan?.vehicles.reduce((sum, vehicle) => sum + vehicle.wait_time_seconds, 0)
   const isShuttlePlanning = workspaceMode === 'planning' && vehicleType === 'shuttle'
+  const isShuttleTransfer = isShuttlePlanning && shuttleDemoMode === 'shuttle_stock_transfer'
   const selectedDemoMode: PathDemoMode = vehicleType === 'shuttle'
     ? shuttleDemoMode
     : demoMode === 'single'
@@ -575,10 +576,10 @@ export function PathDemoPage({ initialVehicleType = 'shuttle' }: { initialVehicl
       <header className="path-demo-header">
         <div>
           <p className="eyebrow">Gate C-3D-3 · deterministic space-time path playback</p>
-          <h2>{isShuttlePlanning ? '四向车单车 / 多车统一路径规划工作台' : demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
-          <p>{isShuttlePlanning ? '统一播放后端 ShuttleGraph 单车或时空预约结果；跨层仅使用程序验证的 Lift-A / Lift-B，本页面不控制真实设备。' : '路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。'}</p>
+          <h2>{isShuttleTransfer ? '四向车 SKU 货物搬运（单车演示）' : isShuttlePlanning ? '四向车单车 / 多车统一路径规划工作台' : demoMode === 'single' ? '真实拓扑单车 3D 轨迹演示' : '真实拓扑多车 3D 冲突避让演示'}</h2>
+          <p>{isShuttleTransfer ? '使用独立 synthetic_demo 库存和真实 ShuttleGraph 轨迹演示取货、跨层运输与放货；不控制真实设备。' : isShuttlePlanning ? '统一播放后端 ShuttleGraph 单车或时空预约结果；跨层仅使用程序验证的 Lift-A / Lift-B，本页面不控制真实设备。' : '路径来自后端 A* / Dijkstra；多车模式使用 0.25 秒时间片的优先级时空规划，不创建真实设备控制命令。'}</p>
         </div>
-        <span className="path-demo-mode">{isShuttlePlanning ? `SHUTTLE · ${shuttleDemoMode === 'shuttle_single' ? '单车' : '多车'}离线演示` : `CTU · ${demoMode === 'single' ? '单车演示模式' : '多车离线演示'}`}</span>
+        <span className="path-demo-mode">{isShuttleTransfer ? 'SHUTTLE · SKU 单车搬运演示' : isShuttlePlanning ? `SHUTTLE · ${shuttleDemoMode === 'shuttle_single' ? '单车' : '多车'}离线演示` : `CTU · ${demoMode === 'single' ? '单车演示模式' : '多车离线演示'}`}</span>
       </header>
 
       {isShuttlePlanning && topologyRecord ? (

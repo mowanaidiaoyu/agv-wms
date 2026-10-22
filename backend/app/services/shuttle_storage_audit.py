@@ -138,6 +138,10 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
     }
     lift_reachable_nodes = _reachable_from_lifts(graph, lift_nodes)
     topology_id = str(topology["id"])
+    cell_lookup = {
+        (str(cell.get("floor") or DEFAULT_FLOOR), int(cell["row"]), int(cell["col"])): cell
+        for cell in topology.get("cells", [])
+    }
     result: list[dict[str, Any]] = []
     for zone in sorted(
         (item for item in topology.get("zones", []) if item.get("type") == "shuttle"),
@@ -150,7 +154,7 @@ def build_shuttle_storage_candidates(topology: dict[str, Any]) -> list[dict[str,
             for col in range(int(zone["x"]), int(zone["x"]) + int(zone["width"]) - 1, 2):
                 if f"{row},{col}" in removed:
                     continue
-                mask = shuttle_slot_mask(topology, zone, row, col)
+                mask = shuttle_slot_mask(topology, zone, row, col, cell_lookup)
                 for level in SHUTTLE_LEVELS:
                     if mask & (1 << (level - 1)):
                         continue
