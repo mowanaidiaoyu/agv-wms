@@ -593,6 +593,16 @@ export interface ShuttleVisualizationState {
     status: ShuttleTransferStatus
     vehicleLoadQuantity: number
   } | null
+  multiTransfers?: Array<{
+    vehicleId: string
+    source: ShuttleDemoLocationInventory
+    destination: ShuttleDemoLocationInventory
+    skuId: string
+    quantity: number
+    status: ShuttleTransferStatus
+    runtimePhase?: ShuttleTransferTask['runtime_phase']
+    vehicleLoadQuantity: number
+  }>
 }
 
 export type ShuttleTransferStatus =

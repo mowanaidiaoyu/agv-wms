@@ -161,15 +161,17 @@ function ShuttleVehicle({
 }
 
 function ShuttleTransferMarkers({ state }: { state: ShuttleVisualizationState }) {
-  const transfer = state.transfer
-  if (!transfer) return null
-  const markers = [
-    { key: 'pickup', location: transfer.source, color: '#f59e0b', label: '取货位' },
-    { key: 'dropoff', location: transfer.destination, color: '#22c55e', label: '目标货位' },
-  ] as const
+  const transfers = state.multiTransfers?.length
+    ? state.multiTransfers
+    : state.transfer ? [{ ...state.transfer, vehicleId: 'SHUTTLE-01' }] : []
+  if (!transfers.length) return null
+  const markers = transfers.flatMap((transfer, index) => [
+    { key: `${transfer.vehicleId}:pickup`, location: transfer.source, color: '#f59e0b', label: `${transfer.vehicleId} 取货位`, transfer, index },
+    { key: `${transfer.vehicleId}:dropoff`, location: transfer.destination, color: '#22c55e', label: `${transfer.vehicleId} 目标货位`, transfer, index },
+  ])
   return (
     <group>
-      {markers.map(({ key, location, color, label }) => (
+      {markers.map(({ key, location, color, label, transfer }) => (
         <group key={key} position={[location.world_x, location.world_y + 0.22, location.world_z]}>
           <mesh rotation={[-Math.PI / 2, 0, 0]}>
             <ringGeometry args={[0.58, 0.82, 32]} />
@@ -294,6 +296,13 @@ export function ShuttleLift3D({ state }: { state: ShuttleVisualizationState }) {
             sample={sample}
             color={SHUTTLE_MULTI_COLORS[index % SHUTTLE_MULTI_COLORS.length]}
             selected={state.selectedShuttleId === sample.vehicleId}
+            loadLabel={(() => {
+              const transfer = state.multiTransfers?.find((item) => item.vehicleId === sample.vehicleId)
+              if (!transfer) return undefined
+              return transfer.vehicleLoadQuantity
+                ? `载货 ${transfer.skuId} × ${transfer.vehicleLoadQuantity}`
+                : `${transfer.skuId} × ${transfer.quantity} · ${transfer.runtimePhase ?? transfer.status}`
+            })()}
           />
         ))
         : state.sample ? (

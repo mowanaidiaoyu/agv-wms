@@ -124,6 +124,20 @@ export function ShuttleMultiStockTransferWorkspace({
   )
   const selectedSample = samples.find((item) => item.vehicleId === selectedVehicleId) ?? samples[0] ?? null
   const cameraSample = shuttleMultiCameraSample(selectedSample)
+  const multiTransfers = useMemo(() => (batch?.tasks ?? []).flatMap((task) => {
+    const source = locations.find((item) => item.location_id === task.source_location_id)
+    const destination = locations.find((item) => item.location_id === task.destination_location_id)
+    return source && destination ? [{
+      vehicleId: task.vehicle_id,
+      source,
+      destination,
+      skuId: task.sku_id,
+      quantity: task.quantity,
+      status: task.status,
+      runtimePhase: task.runtime_phase,
+      vehicleLoadQuantity: task.vehicle_load_quantity,
+    }] : []
+  }), [batch?.tasks, locations])
 
   useEffect(() => {
     const restored = restoredBatchQuery.data
@@ -291,11 +305,15 @@ export function ShuttleMultiStockTransferWorkspace({
         <PathPlaybackController state={playback.state} canPlay={duration > 0 && !recoveredReadOnly && batch?.status !== 'failed'} onStart={playback.start} onPause={playback.pause} onResume={playback.resume} onReset={playback.reset} onRateChange={playback.setRate} />
         {batch && ['reserved', 'planned', 'running'].includes(batch.status) ? <button className="ghost-button danger" type="button" onClick={() => void cancel()}>取消当前搬运批次</button> : null}
         {batch?.plan ? <dl className="path-demo-stats shuttle-transfer-stats"><div><dt>批次状态</dt><dd>{batch.status}</dd></div><div><dt>安全验证</dt><dd>{batch.plan.safety_validation.safe ? '通过' : '未通过'}</dd></div><div><dt>Makespan</dt><dd>{batch.plan.metrics.makespan_seconds.toFixed(2)} s</dd></div><div><dt>总等待</dt><dd>{batch.plan.metrics.total_wait_time_seconds.toFixed(2)} s</dd></div><div><dt>最终冲突</dt><dd>{batch.plan.metrics.unresolved_conflict_count}</dd></div><div><dt>服务时间</dt><dd>Pick {batch.pickup_service_seconds}s / Drop {batch.drop_service_seconds}s</dd></div></dl> : null}
-        {batch?.tasks.map((task) => <div className="shuttle-transfer-task-row" key={task.task_id}><strong>{task.vehicle_id}</strong><span>{task.runtime_phase ?? task.status}</span><span>{task.sku_id} × {task.quantity}</span><span>载货 {task.vehicle_load_quantity}</span></div>)}
+        {batch?.tasks.map((task) => {
+          const picked = task.ledger.some((item) => item.event_type === 'pick')
+          const dropped = task.ledger.some((item) => item.event_type === 'drop')
+          return <div className="shuttle-transfer-task-row" key={task.task_id}><strong>{task.vehicle_id}</strong><span>{task.runtime_phase ?? task.status}</span><span>{task.sku_id} × {task.quantity}</span><span>起点 {task.source_inventory.quantity_on_hand + (picked ? task.quantity : 0)} → {task.source_inventory.quantity_on_hand}</span><span>终点 {task.destination_inventory.quantity_on_hand - (dropped ? task.quantity : 0)} → {task.destination_inventory.quantity_on_hand}</span><span>载货 {task.vehicle_load_quantity}</span></div>
+        })}
         {batch?.plan ? <><label>跟随车辆<select aria-label="选择搬运跟随车辆" value={selectedVehicleId} onChange={(event) => setSelectedVehicleId(event.target.value)}>{batch.plan.vehicles.map((vehicle) => <option key={vehicle.vehicle_id} value={vehicle.vehicle_id}>{vehicle.vehicle_id}</option>)}</select></label><p className="path-demo-note">当前状态：{selectedSample ? shuttleMultiMotionLabel[selectedSample.phase] : '待运行'}</p></> : null}
         <section className="path-demo-camera-controls"><div className="path-demo-camera-buttons"><button className="ghost-button" type="button" disabled={!cameraSample} onClick={() => requestCamera('locate')}>定位车辆</button><button className={cameraViewMode === 'follow' ? 'accent-button' : 'ghost-button'} type="button" disabled={!cameraSample} onClick={() => setCameraViewMode((value) => value === 'follow' ? 'free' : 'follow')}>跟随车辆</button><button className="ghost-button" type="button" onClick={() => { setCameraViewMode('free'); requestCamera('overview') }}>仓库全景</button><button className={rackXray ? 'accent-button' : 'ghost-button'} type="button" onClick={() => setRackXray((value) => !value)}>透视货架：{rackXray ? '开' : '关'}</button></div></section>
       </>}
     </aside>
-    <div className="path-demo-viewport" aria-label="四向车多车 SKU 协同搬运 3D 演示"><Suspense fallback={<div className="path-demo-empty">正在加载四向车 3D 场景…</div>}><PathDemo3DScene topology={topologyRecord.payload} activeFloor="1F" trajectory={[]} sample={null} playbackStatus={playback.state.status} cameraViewMode={cameraViewMode} cameraActionRequest={cameraActionRequest} followedVehicleSample={cameraSample} shuttleVisualization={{ tracks, lifts, plan: null, sample: null, multiPlan: batch?.plan ?? null, multiSamples: samples, liftStates, selectedLiftId: null, selectedShuttleId: selectedVehicleId, transfer: null }} shuttleRackXray={rackXray} /></Suspense></div>
+    <div className="path-demo-viewport" aria-label="四向车多车 SKU 协同搬运 3D 演示"><Suspense fallback={<div className="path-demo-empty">正在加载四向车 3D 场景…</div>}><PathDemo3DScene topology={topologyRecord.payload} activeFloor="1F" trajectory={[]} sample={null} playbackStatus={playback.state.status} cameraViewMode={cameraViewMode} cameraActionRequest={cameraActionRequest} followedVehicleSample={cameraSample} shuttleVisualization={{ tracks, lifts, plan: null, sample: null, multiPlan: batch?.plan ?? null, multiSamples: samples, liftStates, selectedLiftId: null, selectedShuttleId: selectedVehicleId, transfer: null, multiTransfers }} shuttleRackXray={rackXray} /></Suspense></div>
   </div>
 }

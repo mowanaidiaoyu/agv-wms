@@ -621,7 +621,7 @@
 .shuttle-transfer-mode-switch { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .shuttle-transfer-vehicle-card { display: grid; gap: 8px; margin: 0; padding: 12px; border: 1px solid rgba(56, 189, 248, 0.22); border-radius: 11px; background: rgba(15, 23, 42, 0.55); }
 .shuttle-transfer-vehicle-card legend { padding: 0 6px; color: #67e8f9; font-weight: 700; }
-.shuttle-transfer-task-row { display: grid; grid-template-columns: 1fr 1.25fr 1.25fr 0.8fr; gap: 6px; align-items: center; padding: 7px 9px; border-radius: 8px; background: rgba(30, 41, 59, 0.65); font-size: 12px; }
+.shuttle-transfer-task-row { display: grid; grid-template-columns: 0.8fr 1fr 1fr 1.4fr 1.4fr 0.7fr; gap: 6px; align-items: center; padding: 7px 9px; border-radius: 8px; background: rgba(30, 41, 59, 0.65); font-size: 12px; }
 
 @media (max-width: 1050px) {
   .path-demo-layout { grid-template-columns: 1fr; }
