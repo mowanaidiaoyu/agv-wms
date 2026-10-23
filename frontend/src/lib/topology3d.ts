@@ -38,6 +38,13 @@ export const ZONE_LEVEL_HEIGHT: Record<ZoneType, number> = {
   drop_zone: 0.5,
 }
 
+/**
+ * Must stay aligned with backend `shuttle-internal-levels-v1`.
+ * ShuttleGraph nodes address the centre of a 2x2 slot and each vehicle runs
+ * one quarter of a shuttle bay above that bay's lower boundary.
+ */
+export const SHUTTLE_TRACK_SURFACE_OFFSET = ZONE_LEVEL_HEIGHT.shuttle / 4
+
 /** CTU 车载货层数：一次最多装 5 箱（与后端 ROBOT_CARRY_CAPACITY["ctu"] 一致）。 */
 export const CTU_ROBOT_LEVELS = 5
 
@@ -237,6 +244,21 @@ export function worldX(col: number, cols: number): number {
 
 export function worldZ(row: number, rows: number): number {
   return rows / 2 - (row + 0.5)
+}
+
+/** Convert a ShuttleGraph node (row/col/level) to its exact 3D track centre. */
+export function shuttleTrackWorldPosition(
+  row: number,
+  col: number,
+  level: number,
+  cols: number,
+  rows: number,
+): [number, number, number] {
+  return [
+    worldX(col, cols) + CELL / 2,
+    SHUTTLE_TRACK_SURFACE_OFFSET + (Math.max(1, level) - 1) * ZONE_LEVEL_HEIGHT.shuttle,
+    worldZ(row, rows) - CELL / 2,
+  ]
 }
 
 /** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */

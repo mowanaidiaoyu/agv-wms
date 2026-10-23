@@ -14,6 +14,7 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Square,
   X,
   Zap,
@@ -25,17 +26,21 @@ import {
   OrderRail,
   OrderTimeline,
 } from '../components/simulation/OrderWorkspace'
-import { useSimulationSocket } from '../hooks/useSimulationSocket'
+import { CrossLevelTransferPanel } from '../components/simulation/CrossLevelTransferPanel'
+import { SimulationSceneBoundary } from '../components/simulation/SimulationSceneBoundary'
+import { TransferInventoryPanel } from '../components/simulation/TransferInventoryPanel'
+import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
 import { createDemoOrders } from '../lib/orders'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationAlert, SimulationOrderInput } from '../types'
+import type { ShuttleTransferInput, SimulationAlert, SimulationOrderInput } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
 const taskModeLabels = {
   direct: 'CTU 多箱取货',
   cross_zone: '跨区协同',
+  shuttle_transfer: '跨层运输',
 }
 
 const robotTypeLabels = {
@@ -44,6 +49,7 @@ const robotTypeLabels = {
 }
 
 type DetailTab = 'metrics' | 'devices' | 'tasks' | 'alerts'
+type WorkspaceTab = 'orders' | 'transfer' | 'inventory'
 
 const runStatusLabels: Record<string, string> = {
   idle: '未启动',
@@ -59,9 +65,9 @@ function alertClassName(level: SimulationAlert['level']) {
   return 'alert-card alert-info'
 }
 
-function LiveEventCount() {
-  const count = usePlatformStore((state) => state.liveEvents.length)
-  return <strong>{count}</strong>
+function LiveEventCount({ persistedCount }: { persistedCount?: number }) {
+  const socketWindowCount = usePlatformStore((state) => state.liveEvents.length)
+  return <strong>{persistedCount ?? socketWindowCount}</strong>
 }
 
 export function SimulationPage() {
@@ -77,6 +83,7 @@ export function SimulationPage() {
   const resetRun = usePlatformStore((state) => state.resetRun)
   const liveState = usePlatformStore((state) => state.liveState)
   const liveMetrics = usePlatformStore((state) => state.liveMetrics)
+  const clearLiveEvents = usePlatformStore((state) => state.clearLiveEvents)
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
   const [starting, setStarting] = useState(false)
@@ -86,7 +93,12 @@ export function SimulationPage() {
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
   const [ordersCollapsed, setOrdersCollapsed] = useState(false)
   const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
+  const [localTransfers, setLocalTransfers] = useState<ShuttleTransferInput[]>([])
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('orders')
   const [selectedOrderId, setSelectedOrderId] = useState('')
+  const [selectedRobotId, setSelectedRobotId] = useState('')
+  const [followSelectedRobot, setFollowSelectedRobot] = useState(false)
+  const [showInventoryBoxes, setShowInventoryBoxes] = useState(false)
   const [focusRequest, setFocusRequest] = useState(0)
   const [pickupNotice, setPickupNotice] = useState<{
     id: string
@@ -132,15 +144,23 @@ export function SimulationPage() {
     (selectedTopologyId && availableTopologies.some((item) => item.id === selectedTopologyId) ? selectedTopologyId : '') ||
     (!topologiesQuery.isLoading && !requestedTopologyId ? availableTopologies[0]?.id : '') ||
     ''
+  const shuttleContractQuery = useQuery({
+    queryKey: ['shuttle-contract', resolvedTopologyId],
+    queryFn: () => api.getShuttleContract(resolvedTopologyId),
+    enabled: Boolean(resolvedTopologyId),
+    retry: false,
+  })
   useEffect(() => {
     if (resolvedTopologyId && resolvedTopologyId !== selectedTopologyId) {
       setSelectedTopologyId(resolvedTopologyId)
     }
   }, [resolvedTopologyId, selectedTopologyId, setSelectedTopologyId])
 
-  const candidateState = liveState ?? stateQuery.data
+  const candidateState = selectSimulationStateSource(liveState, stateQuery.data, socketConnected)
   const currentState = candidateState?.topologyId === resolvedTopologyId ? candidateState : undefined
-  const currentMetrics = currentState ? (liveMetrics ?? metricsQuery.data) : undefined
+  const currentMetrics = currentState
+    ? (socketConnected ? (liveMetrics ?? metricsQuery.data) : (metricsQuery.data ?? liveMetrics))
+    : undefined
   const topologyIdForBoard = currentState?.topologyId || resolvedTopologyId
   const currentTopology = availableTopologies.find((item) => item.id === resolvedTopologyId)
 
@@ -149,6 +169,10 @@ export function SimulationPage() {
       resetRun()
     }
   }, [candidateState?.topologyId, resetRun, resolvedTopologyId])
+
+  useEffect(() => {
+    if (!socketConnected && stateQuery.data) setLiveState(stateQuery.data)
+  }, [setLiveState, socketConnected, stateQuery.data])
 
   useEffect(() => {
     observedPickedRef.current.clear()
@@ -187,7 +211,20 @@ export function SimulationPage() {
     queryFn: () => api.getTopology(topologyIdForBoard),
     enabled: Boolean(topologyIdForBoard),
   })
-  const floors = topologyQuery.data?.payload.meta.floors?.length ? topologyQuery.data.payload.meta.floors : ['1F']
+  const floors = topologyQuery.data?.payload.meta?.floors?.length ? topologyQuery.data.payload.meta.floors : ['1F']
+  const topologyLoadError = topologiesQuery.isError
+    ? '拓扑列表加载失败，请检查后端连接后重试。'
+    : topologyQuery.isError
+      ? '拓扑场景加载失败，请检查拓扑数据或后端连接后重试。'
+      : ''
+
+  async function retryTopologyLoad() {
+    if (topologiesQuery.isError) {
+      await topologiesQuery.refetch()
+      return
+    }
+    await topologyQuery.refetch()
+  }
 
   useEffect(() => {
     if (seededOrdersRef.current || !catalogQuery.data?.skus.length) return
@@ -223,14 +260,19 @@ export function SimulationPage() {
 
     try {
       setStarting(true)
-      if (!localOrders.length) {
-        setStartError('请先新建至少一个订单，再启动订单驱动仿真。')
+      if (!localOrders.length && !localTransfers.length) {
+        setStartError('请先新建订单或加入跨层运输任务，再启动统一仿真。')
         return
       }
-      const result = await api.startSimulation(resolvedTopologyId, localOrders)
+      resetRun()
+      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers)
+      if (!result.runId || result.status !== 'running') {
+        throw new Error('后端未返回有效的运行实例。')
+      }
       setSelectedRunId(result.runId)
       const nextState = await api.getSimulationState(result.runId)
       setLiveState(nextState)
+      setLocalTransfers([])
       await queryClient.invalidateQueries({ queryKey: ['runs'] })
     } catch (error) {
       setStartError(error instanceof Error ? error.message : '启动仿真失败')
@@ -254,33 +296,73 @@ export function SimulationPage() {
 
   async function syncRun(action: 'pause' | 'resume' | 'stop') {
     if (!selectedRunId) return
+    setStartError('')
+    try {
+      if (action === 'pause') await api.pauseSimulation(selectedRunId)
+      if (action === 'resume') await api.resumeSimulation(selectedRunId)
+      if (action === 'stop') await api.stopSimulation(selectedRunId)
 
-    if (action === 'pause') await api.pauseSimulation(selectedRunId)
-    if (action === 'resume') await api.resumeSimulation(selectedRunId)
-    if (action === 'stop') await api.stopSimulation(selectedRunId)
-
-    const nextState = await api.getSimulationState(selectedRunId)
-    setLiveState(nextState)
-    await queryClient.invalidateQueries({ queryKey: ['runs'] })
+      const nextState = await api.getSimulationState(selectedRunId)
+      setLiveState(nextState)
+      await queryClient.invalidateQueries({ queryKey: ['runs'] })
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : '仿真控制失败')
+    }
   }
 
-  const sortedTasks = [...(currentState?.tasks ?? [])].sort((left, right) => {
+  async function changeSpeed(multiplier: 1 | 2 | 4) {
+    if (!selectedRunId) return
+    setStartError('')
+    try {
+      await api.setSimulationSpeed(selectedRunId, multiplier)
+      await refreshRunState()
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : '切换仿真倍速失败')
+    }
+  }
+
+  async function refreshRunState() {
+    if (!selectedRunId) return
+    const nextState = await api.getSimulationState(selectedRunId)
+    setLiveState(nextState)
+  }
+
+  async function resetRunState() {
+    if (!selectedRunId) return
+    await api.resetSimulation(selectedRunId)
+    clearLiveEvents()
+    await refreshRunState()
+  }
+
+  const sortedTasks = useMemo(() => [...(currentState?.tasks ?? [])].sort((left, right) => {
     const leftWeight = left.status === 'completed' ? 1 : 0
     const rightWeight = right.status === 'completed' ? 1 : 0
     return leftWeight - rightWeight || left.priority - right.priority
-  })
+  }), [currentState?.tasks])
 
   const alerts = currentState?.alerts ?? []
   const robots = currentState?.robots ?? []
   const isRunning = currentState?.status === 'running'
-  const sceneTasks = selectedOrder
-    ? sortedTasks.filter((task) => task.orderId === selectedOrder.id)
-    : sortedTasks
-  const focusTask = sceneTasks.find((task) => task.status === 'assigned')
-    ?? sceneTasks.find((task) => task.status !== 'completed')
-  const focusRobot = focusTask?.assignedRobotId
-    ? robots.find((robot) => robot.id === focusTask.assignedRobotId)
-    : undefined
+  const sceneTasks = useMemo(() => workspaceTab === 'orders'
+    ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
+    : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
+  [selectedOrder, sortedTasks, workspaceTab])
+  const sceneGoods = useMemo(() => {
+    const inventory = currentState?.inventory ?? []
+    if (showInventoryBoxes) return inventory
+    const taskLocations = new Set(
+      sceneTasks.flatMap((task) => (task.lines ?? []).map((line) => `${line.nodeId}:${line.layer}`)),
+    )
+    return inventory.filter((slot) => taskLocations.has(`${slot.nodeId}:${slot.layer}`))
+  }, [currentState?.inventory, sceneTasks, showInventoryBoxes])
+  const selectedRobot = robots.find((robot) => robot.id === selectedRobotId)
+  const focusTask = (selectedRobot?.currentTaskId
+    ? sortedTasks.find((task) => task.id === selectedRobot.currentTaskId)
+    : undefined)
+    ?? sceneTasks.find((task) => task.status === 'assigned')
+    ?? sceneTasks.find((task) => !['completed', 'cancelled', 'failed'].includes(task.status))
+  const focusRobot = selectedRobot
+    ?? (focusTask?.assignedRobotId ? robots.find((robot) => robot.id === focusTask.assignedRobotId) : undefined)
   const isPicking = focusTask?.phase === 'pickup_from_ctu' || focusTask?.phase === 'pickup_from_shuttle'
   const handlingLine = focusRobot?.handlingAction
     ? focusTask?.lines.find((line) => (
@@ -291,14 +373,30 @@ export function SimulationPage() {
   const focusLine = isPicking
     ? handlingLine ?? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
     : undefined
+  const focusDestinationLabel = focusLine
+    ? `${focusLine.nodeId} · 第 ${focusLine.layer} 层`
+    : focusTask?.mode === 'shuttle_transfer'
+      ? `${focusTask.destinationLocationId ?? focusTask.deliveryCellId} · L${focusTask.targetLayer}`
+      : focusTask
+        ? `出库交付点 · ${focusTask.deliveryCellId}`
+        : ''
   const runStatusLabel = starting
     ? '启动中…'
-    : currentState?.status === 'stopped' && currentState.stopReason === 'safety_limit'
-      ? '异常停止'
-      : runStatusLabels[currentState?.status ?? 'idle'] ?? currentState?.status ?? '未启动'
+    : currentState?.stopReason === 'runtime_error'
+      ? '运行异常'
+      : currentState?.status === 'stopped' && currentState.stopReason === 'safety_limit'
+        ? '异常停止'
+        : runStatusLabels[currentState?.status ?? 'idle'] ?? currentState?.status ?? '未启动'
   const safetyStopMessage = currentState?.status === 'stopped' && currentState.stopReason === 'safety_limit'
     ? '仿真达到安全运行上限，仍有任务未完成。请在运行详情中检查不可达任务、设备故障或持续交通阻塞。'
     : ''
+  const runtimeErrorMessage = currentState?.stopReason === 'runtime_error'
+    ? `仿真后台任务在 Tick ${currentState.runtimeError?.tick ?? currentState.tick} 异常停止：${currentState.runtimeError?.message ?? '未知错误'}`
+    : ''
+  const taskFailureMessage = currentState?.stopReason === 'task_failed' || currentState?.stopReason === 'transfer_failed'
+    ? '仿真因任务失败停止。请在运行详情中检查任务失败原因与告警。'
+    : ''
+  const speedMultiplier = currentState?.speedMultiplier ?? 2
 
   return (
     <div className="simulation-workbench">
@@ -318,7 +416,7 @@ export function SimulationPage() {
             <small>状态</small><strong>{runStatusLabel}</strong>
           </span>
           <span><small>Tick</small><strong>{currentState?.tick ?? 0}</strong></span>
-          <span><small>事件</small><LiveEventCount /></span>
+          <span><small>事件</small><LiveEventCount persistedCount={currentState?.eventCount} /></span>
         </div>
 
         <div className="simulation-actions">
@@ -336,21 +434,39 @@ export function SimulationPage() {
               完成拣货
             </button>
           ) : null}
+          <div className="simulation-speed-control" role="group" aria-label="仿真运行倍速">
+            {([1, 2, 4] as const).map((multiplier) => (
+              <button
+                key={multiplier}
+                className={speedMultiplier === multiplier ? 'active' : ''}
+                type="button"
+                aria-pressed={speedMultiplier === multiplier}
+                disabled={!selectedRunId || ['stopped', 'completed'].includes(currentState?.status ?? '')}
+                onClick={() => void changeSpeed(multiplier)}
+              >
+                {multiplier}×
+              </button>
+            ))}
+          </div>
           <button className="accent-button" onClick={startRun} disabled={!resolvedTopologyId || starting || isRunning} type="button">
             {starting ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             {starting ? '启动中…' : isRunning ? '运行中' : '启动'}
           </button>
-          <button className="ghost-button" onClick={() => void syncRun('pause')} disabled={!selectedRunId} type="button">
+          <button className="ghost-button" onClick={() => void syncRun('pause')} disabled={!selectedRunId || currentState?.status !== 'running'} type="button">
             <Pause size={16} />
             暂停
           </button>
-          <button className="ghost-button" onClick={() => void syncRun('resume')} disabled={!selectedRunId} type="button">
+          <button className="ghost-button" onClick={() => void syncRun('resume')} disabled={!selectedRunId || currentState?.status !== 'paused'} type="button">
             <Play size={16} />
             继续
           </button>
-          <button className="danger-button" onClick={() => void syncRun('stop')} disabled={!selectedRunId} type="button">
+          <button className="danger-button" onClick={() => void syncRun('stop')} disabled={!selectedRunId || ['stopped', 'completed'].includes(currentState?.status ?? '')} type="button">
             <Square size={16} />
             停止
+          </button>
+          <button className="ghost-button" onClick={() => void resetRunState()} disabled={!selectedRunId} type="button">
+            <RotateCcw size={16} />
+            重置
           </button>
           <button
             className={`ghost-button simulation-details-button ${detailsOpen ? 'simulation-details-button-active' : ''}`}
@@ -365,19 +481,46 @@ export function SimulationPage() {
         </div>
       </header>
 
-      <main className={`simulation-scene-stage ${ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
-        <OrderRail
-          orders={displayedOrders}
-          selectedOrderId={selectedOrder?.id ?? ''}
-          collapsed={ordersCollapsed}
-          onSelect={setSelectedOrderId}
-          onToggle={() => setOrdersCollapsed((collapsed) => !collapsed)}
-          onCreate={() => setOrderComposerOpen(true)}
-        />
-        {startError || safetyStopMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
+      <main className={`simulation-scene-stage ${workspaceTab === 'orders' && ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
+        <div className="simulation-workspace-tabs" role="tablist" aria-label="工作台功能">
+          <button className={workspaceTab === 'orders' ? 'active' : ''} onClick={() => setWorkspaceTab('orders')} type="button">订单任务</button>
+          <button className={workspaceTab === 'transfer' ? 'active' : ''} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
+          <button className={workspaceTab === 'inventory' ? 'active' : ''} onClick={() => setWorkspaceTab('inventory')} type="button">库存详情</button>
+        </div>
+        {workspaceTab === 'orders' ? (
+          <OrderRail
+            orders={displayedOrders}
+            selectedOrderId={selectedOrder?.id ?? ''}
+            collapsed={ordersCollapsed}
+            onSelect={setSelectedOrderId}
+            onToggle={() => setOrdersCollapsed((collapsed) => !collapsed)}
+            onCreate={() => setOrderComposerOpen(true)}
+          />
+        ) : workspaceTab === 'transfer' ? (
+          <CrossLevelTransferPanel
+            topologyId={resolvedTopologyId}
+            contract={shuttleContractQuery.data}
+            pendingTransfers={localTransfers}
+            simulation={currentState}
+            selectedRunId={selectedRunId}
+            onAdd={(transfer) => setLocalTransfers((items) => [...items, transfer])}
+            onRemove={(id) => setLocalTransfers((items) => items.filter((item) => item.id !== id))}
+            onFocusVehicle={(id) => {
+              setSelectedRobotId(id)
+              setFollowSelectedRobot(true)
+              setFocusRequest((request) => request + 1)
+            }}
+            onRuntimeChanged={refreshRunState}
+          />
+        ) : (
+          <TransferInventoryPanel simulation={currentState} />
+        )}
+        {startError || safetyStopMessage || runtimeErrorMessage || taskFailureMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
           <div className="simulation-message-stack">
             {startError ? <p className="form-error">{startError}</p> : null}
             {safetyStopMessage ? <p className="form-error">{safetyStopMessage}</p> : null}
+            {runtimeErrorMessage ? <p className="form-error" role="alert">{runtimeErrorMessage}</p> : null}
+            {taskFailureMessage ? <p className="form-error" role="alert">{taskFailureMessage}</p> : null}
             {!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists ? (
               <p className="form-error">指定的拓扑不存在或尚未保存，请返回拓扑编辑器重新保存。</p>
             ) : null}
@@ -397,6 +540,14 @@ export function SimulationPage() {
                   {floor}
                 </button>
               ))}
+              <button
+                className={`ghost-button topology-floor-chip ${showInventoryBoxes ? 'topology-floor-chip-active' : ''}`}
+                type="button"
+                aria-pressed={showInventoryBoxes}
+                onClick={() => setShowInventoryBoxes((visible) => !visible)}
+              >
+                彩色库存
+              </button>
             </div>
 
             {focusTask ? (
@@ -408,12 +559,20 @@ export function SimulationPage() {
                     <button type="button" onClick={() => setFocusRequest((request) => request + 1)}>
                       <LocateFixed size={12} />定位目标
                     </button>
+                    {focusRobot ? (
+                      <button type="button" onClick={() => {
+                        setSelectedRobotId(focusRobot.id)
+                        setFollowSelectedRobot((value) => !value)
+                      }}>
+                        {followSelectedRobot ? '停止跟随' : '相机跟随'}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
                 <div className="simulation-task-focus-main">
                   <strong>{focusRobot?.id || '等待分配机器人'}</strong>
                   <i>→</i>
-                  <strong>{focusLine ? `${focusLine.nodeId} · 第 ${focusLine.layer} 层` : `出库交付点 · ${focusTask.deliveryCellId}`}</strong>
+                  <strong>{focusDestinationLabel}</strong>
                 </div>
                 <div className="simulation-task-focus-goods">
                   <span>{focusLine?.skuName || focusLine?.skuId || '前往出库交付点'}</span>
@@ -434,26 +593,49 @@ export function SimulationPage() {
             ) : null}
 
             <div className="simulation-3d-viewport simulation-main-viewport">
-              <Suspense
-                fallback={
-                  <div className="simulation-3d-loading">
-                    <Loader2 className="spin" size={26} />
-                    <p className="muted-copy">正在装配 3D 场景…</p>
-                  </div>
-                }
-              >
-                <Simulation3DScene
-                  topology={topologyQuery.data.payload}
-                  goods={currentState?.inventory ?? []}
-                  robots={robots}
-                  tasks={sceneTasks}
-                  activeFloor={activeFloor}
-                  focusRequest={focusRequest}
-                />
-              </Suspense>
+              <SimulationSceneBoundary key={topologyQuery.data.payload.id}>
+                <Suspense
+                  fallback={
+                    <div className="simulation-3d-loading">
+                      <Loader2 className="spin" size={26} />
+                      <p className="muted-copy">正在装配 3D 场景…</p>
+                    </div>
+                  }
+                >
+                  <Simulation3DScene
+                    topology={topologyQuery.data.payload}
+                    goods={sceneGoods}
+                    robots={robots}
+                    tasks={sceneTasks}
+                    activeFloor={activeFloor}
+                    focusRequest={focusRequest}
+                    transferInventory={currentState?.transferInventory ?? []}
+                    shuttleLifts={shuttleContractQuery.data?.lifts ?? []}
+                    selectedRobotId={selectedRobotId}
+                    followSelectedRobot={followSelectedRobot}
+                    onSelectRobot={(id) => setSelectedRobotId(id)}
+                    paused={currentState?.status === 'paused'}
+                    transitionDuration={currentState?.tickIntervalSeconds ?? 0.3}
+                  />
+                </Suspense>
+              </SimulationSceneBoundary>
             </div>
-            <OrderTimeline order={selectedOrder} />
+            {workspaceTab === 'orders' ? <OrderTimeline order={selectedOrder} /> : null}
           </>
+        ) : topologyLoadError ? (
+          <div className="simulation-empty-state" role="alert">
+            <p className="form-error">{topologyLoadError}</p>
+            <button className="ghost-button" type="button" onClick={() => void retryTopologyLoad()}>
+              重试加载拓扑
+            </button>
+          </div>
+        ) : !topologiesQuery.isLoading && !resolvedTopologyId ? (
+          <div className="simulation-empty-state" role="alert">
+            <p className="form-error">没有可用的拓扑场景，请返回拓扑编辑器保存后再试。</p>
+            <button className="ghost-button" type="button" onClick={() => navigate('/topology')}>
+              返回拓扑编辑器
+            </button>
+          </div>
         ) : (
           <div className="simulation-empty-state">
             <Loader2 className="spin" size={24} />
@@ -571,6 +753,10 @@ export function SimulationPage() {
         <OrderComposer
           open={orderComposerOpen}
           catalog={catalogQuery.data?.skus ?? []}
+          catalogError={catalogQuery.isError
+            ? (catalogQuery.error instanceof Error ? catalogQuery.error.message : '未知错误')
+            : ''}
+          onRetryCatalog={() => { void catalogQuery.refetch() }}
           onClose={() => setOrderComposerOpen(false)}
           onSubmit={(order) => {
             setLocalOrders((orders) => [order, ...orders])

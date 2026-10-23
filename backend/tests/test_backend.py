@@ -580,7 +580,7 @@ def test_completed_robot_returns_to_standby_while_other_tasks_are_unfinished(mon
     assert len(robot["path"]) > 1
 
 
-def test_tick_payload_only_includes_inventory_when_inventory_changes():
+def test_tick_payload_sends_inventory_delta_only_when_inventory_changes():
     service = _service()
     runtime = RunRuntime(
         run_id="payload-test",
@@ -590,18 +590,23 @@ def test_tick_payload_only_includes_inventory_when_inventory_changes():
         metrics={},
     )
 
+    # 常规 tick 不携带全量库存（库存可能有数万条，避免重复编码），也没有增量。
     first = service._tick_payload(runtime)
-    assert first["inventory"] == runtime.state["inventory"]
+    assert "inventory" not in first
+    assert "inventoryDelta" not in first
 
     runtime.state["tick"] = 2
+    runtime.inventory_delta.append({"op": "remove", "nodeId": "slot-a", "layer": 1})
     second = service._tick_payload(runtime)
     assert second["tick"] == 2
     assert "inventory" not in second
+    assert second["inventoryDelta"] == [{"op": "remove", "nodeId": "slot-a", "layer": 1}]
 
-    runtime.state["inventory"].pop()
+    # 增量被消费（广播后清空）后，下一个 tick 不再携带。
+    runtime.inventory_delta.clear()
     runtime.state["tick"] = 3
     third = service._tick_payload(runtime)
-    assert third["inventory"] == runtime.state["inventory"]
+    assert "inventoryDelta" not in third
 
 
 def test_runtime_continues_past_nominal_duration_until_tasks_finish(monkeypatch):
@@ -619,7 +624,7 @@ def test_runtime_continues_past_nominal_duration_until_tasks_finish(monkeypatch)
         metrics={},
     )
 
-    def step(current, *, persist, broadcast):
+    def step(current, *, persist):
         current.state["tick"] += 1
         if current.state["tick"] == 3:
             current.state["tasks"][0]["status"] = "completed"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
@@ -80,6 +80,14 @@ class SimulationControlResponse(BaseModel):
     status: SimulationStatus
 
 
+class SimulationSpeedRequest(BaseModel):
+    multiplier: Literal[1, 2, 4]
+
+
+class SimulationSpeedResponse(SimulationControlResponse):
+    speedMultiplier: Literal[1, 2, 4]
+
+
 class SimulationOrderLineInput(BaseModel):
     id: str
     skuId: str
@@ -96,6 +104,47 @@ class SimulationOrderInput(BaseModel):
     lines: list[SimulationOrderLineInput] = Field(min_length=1)
 
 
+class ShuttleTransferInput(BaseModel):
+    id: str = Field(min_length=1)
+    vehicleId: str = Field(default="SHUTTLE-UNIFIED-01", min_length=1)
+    skuId: str = Field(min_length=1)
+    skuName: str = Field(default="", min_length=0)
+    sourceLocationId: str = Field(min_length=1)
+    destinationLocationId: str = Field(min_length=1)
+    sourceTrackNode: str = Field(min_length=1)
+    destinationTrackNode: str = Field(min_length=1)
+    sourceLevel: Literal[1, 2, 3, 4]
+    destinationLevel: Literal[1, 2, 3, 4]
+    quantity: int = Field(gt=0, le=100)
+    algorithm: Literal["astar", "dijkstra"] = "astar"
+    initialSourceQuantity: int = Field(default=10, ge=0)
+    initialDestinationQuantity: int = Field(default=5, ge=0)
+
+    @model_validator(mode="after")
+    def validate_transfer(self) -> "ShuttleTransferInput":
+        if self.sourceLocationId == self.destinationLocationId:
+            raise ValueError("sourceLocationId and destinationLocationId must differ")
+        if self.initialSourceQuantity < self.quantity:
+            raise ValueError("initialSourceQuantity is smaller than quantity")
+        if not self.sourceTrackNode.startswith(f"L{self.sourceLevel}-"):
+            raise ValueError("sourceTrackNode does not match sourceLevel")
+        if not self.destinationTrackNode.startswith(f"L{self.destinationLevel}-"):
+            raise ValueError("destinationTrackNode does not match destinationLevel")
+        return self
+
+
 class SimulationStartRequest(BaseModel):
     topologyId: str
     orders: list[SimulationOrderInput] = Field(default_factory=list)
+    transfers: list[ShuttleTransferInput] = Field(default_factory=list)
+
+
+class ShuttlePlanRequest(BaseModel):
+    topologyId: str = Field(min_length=1)
+    startTrackNode: str = Field(min_length=1)
+    endTrackNode: str = Field(min_length=1)
+    algorithm: Literal["astar", "dijkstra"] = "astar"
+
+
+class ShuttleTransferFailRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)

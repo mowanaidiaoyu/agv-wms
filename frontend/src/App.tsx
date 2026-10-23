@@ -10,6 +10,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/topology" replace />} />
         <Route path="/topology" element={<TopologyPage />} />
         <Route path="/simulation" element={<SimulationPage />} />
+        <Route path="/simulation/orders" element={<SimulationPage />} />
         <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </NavShell>

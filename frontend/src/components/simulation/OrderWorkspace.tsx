@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   ChevronLeft,
   ChevronRight,
@@ -128,17 +128,21 @@ export function OrderRail({
 function nextOrderId() {
   const date = new Date()
   const stamp = `${date.getHours().toString().padStart(2, '0')}${date.getMinutes().toString().padStart(2, '0')}${date.getSeconds().toString().padStart(2, '0')}`
-  return `ORD-${stamp}`
+  return `ORD-${stamp}-${String(Date.now()).slice(-4)}`
 }
 
 export function OrderComposer({
   open,
   catalog,
+  catalogError = '',
+  onRetryCatalog,
   onClose,
   onSubmit,
 }: {
   open: boolean
   catalog: GoodsCatalogSku[]
+  catalogError?: string
+  onRetryCatalog?: () => void
   onClose: () => void
   onSubmit: (order: SimulationOrderInput) => void
 }) {
@@ -147,12 +151,39 @@ export function OrderComposer({
   const [selectedSkuId, setSelectedSkuId] = useState('')
   const [quantity, setQuantity] = useState(1)
   const [lines, setLines] = useState<SimulationOrderLineInput[]>([])
-  const selectedSku = catalog.find((sku) => sku.skuId === selectedSkuId) ?? catalog[0]
+  const [formError, setFormError] = useState('')
+  const selectedSku = catalog.find((sku) => sku.skuId === selectedSkuId)
+
+  useEffect(() => {
+    if (!catalog.length) {
+      setSelectedSkuId('')
+      return
+    }
+    if (!catalog.some((sku) => sku.skuId === selectedSkuId)) {
+      setSelectedSkuId(catalog[0].skuId)
+    }
+  }, [catalog, selectedSkuId])
 
   function addLine() {
-    if (!selectedSku) return
+    setFormError('')
+    if (!catalog.length) {
+      setFormError('商品目录尚未加载，请稍后重试。')
+      return
+    }
+    if (!selectedSku) {
+      setFormError('所选商品已不在当前目录中，请重新选择。')
+      return
+    }
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
+      setFormError('商品数量必须是 1～20 箱的整数。')
+      return
+    }
+    const existing = lines.find((line) => line.skuId === selectedSku.skuId)
+    if (existing && existing.quantity + quantity > 20) {
+      setFormError(`同一 SKU 单个订单最多 20 箱；当前已有 ${existing.quantity} 箱。`)
+      return
+    }
     setLines((current) => {
-      const existing = current.find((line) => line.skuId === selectedSku.skuId)
       if (existing) {
         return current.map((line) => line.skuId === selectedSku.skuId ? { ...line, quantity: line.quantity + quantity } : line)
       }
@@ -164,10 +195,15 @@ export function OrderComposer({
         quantity,
       }]
     })
+    setQuantity(1)
   }
 
   function submit() {
-    if (!lines.length) return
+    setFormError('')
+    if (!lines.length) {
+      setFormError('请至少添加一种商品后再提交订单。')
+      return
+    }
     onSubmit({
       id: nextOrderId(),
       priority,
@@ -177,10 +213,16 @@ export function OrderComposer({
     })
     setLines([])
     setPriority('normal')
+    setQuantity(1)
   }
 
   function applyTemplate(templatePriority: SimulationOrderPriority, startIndex: number, count: number) {
     const selected = catalog.slice(startIndex, startIndex + count)
+    if (!selected.length) {
+      setFormError('商品目录不足，无法应用该订单模板。')
+      return
+    }
+    setFormError('')
     setPriority(templatePriority)
     setLines(selected.map((sku, index) => ({
       id: `line-template-${index + 1}-${Date.now()}`,
@@ -229,13 +271,21 @@ export function OrderComposer({
 
         <section>
           <h3>添加商品</h3>
+          {catalogError ? (
+            <div className="simulation-order-catalog-error" role="alert">
+              <p className="form-error">商品目录加载失败：{catalogError}</p>
+              {onRetryCatalog ? <button type="button" className="ghost-button" onClick={onRetryCatalog}>重试商品目录</button> : null}
+            </div>
+          ) : null}
           <div className="simulation-order-add-line">
-            <select value={selectedSku?.skuId ?? ''} onChange={(event) => setSelectedSkuId(event.target.value)}>
+            <select aria-label="商品" value={selectedSkuId} onChange={(event) => { setSelectedSkuId(event.target.value); setFormError('') }} disabled={!catalog.length}>
+              {!catalog.length ? <option value="">{catalogError ? '商品目录不可用' : '商品目录加载中…'}</option> : null}
               {catalog.map((sku) => <option key={sku.skuId} value={sku.skuId}>{sku.name}</option>)}
             </select>
-            <input type="number" min={1} max={5} value={quantity} onChange={(event) => setQuantity(Math.max(1, Math.min(5, Number(event.target.value) || 1)))} />
-            <button type="button" onClick={addLine}><Plus size={15} />添加</button>
+            <input aria-label="数量" type="number" min={1} max={20} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+            <button type="button" onClick={addLine} disabled={!catalog.length}><Plus size={15} />添加</button>
           </div>
+          {formError ? <p className="form-error" role="alert">{formError}</p> : null}
           <div className="simulation-order-lines">
             {lines.map((line) => (
               <div key={line.id}>
