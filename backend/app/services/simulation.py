@@ -18,9 +18,11 @@ from .pathfinding import (
     build_node_lookup,
     build_walkable_lookup,
     cell_id,
+    drop_zone_entry_cell,
     node_position,
     node_to_cell_id,
     parse_cell_id,
+    pick_station_entry_cell,
     port_entry_cell,
     serviceable_storage_cells,
     shortest_path,
@@ -461,6 +463,7 @@ class SimulationService:
             "phaseLabel": "待分配",
             "sourceCellId": source_cell,
             "sourceLayer": source_layer,
+            "sourceNodeId": line_payload[0].get("nodeId"),
             "deliveryCellId": delivery_cell_id,
             "targetCellId": source_cell,
             "targetLayer": source_layer,
@@ -472,6 +475,17 @@ class SimulationService:
             "urgent": urgent,
             "assignedRobotId": None,
             "remainingTicks": 0,
+            # 人工拣货闭环字段（仅在拓扑存在 pick_station 时启用）
+            "pickStationZoneId": None,
+            "pickStationCellId": None,
+            "dropZoneZoneId": None,
+            "dropZoneCellId": None,
+            "placedGoods": [],
+            # 统一阶段计时：conveyor_to_lift / lift_to_upper / conveyor_to_pick /
+            # picking / place_goods / conveyor_return 共用。
+            "remainingStageTicks": 0,
+            "returnLineIndex": 0,
+            "transitGoods": [],
             "history": [],
             "createdTick": created_tick,
             "startedTick": None,
@@ -1142,6 +1156,388 @@ class SimulationService:
                 event["skuName"] = action.get("skuName")
             self._record_event(runtime, tick, "task_state_changed", event)
 
+    def _advance_ctu_delivery_action(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        occupied_cells: set[str] | None = None,
+    ) -> None:
+        """交付到出入口：用与取货对称的升降/伸叉/放箱动作把货箱送上输送线。"""
+        tick = runtime.state["tick"]
+        action = robot.get("handlingAction")
+
+        if action is None:
+            # 记录实际交付到输送线上的货箱，供前端按实载箱数渲染。
+            task["deliveredGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
+            robot["handlingAction"] = {
+                "type": "deliver",
+                "stage": "lifting",
+                "targetLayer": 1,
+                "slotIndex": 0,
+                "cellId": robot["currentCellId"],
+            }
+            robot["status"] = "handling"
+            robot["phaseLabel"] = "交付升降对位"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(runtime, tick, "ctu_handling", {"robotId": robot["id"], **robot["handlingAction"]})
+            return
+
+        if action.get("stage") == "lifting":
+            action["stage"] = "extending"
+            robot["status"] = "handling"
+            robot["phaseLabel"] = "伸叉送箱"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(runtime, tick, "ctu_handling", {"robotId": robot["id"], **action})
+            return
+
+        if action.get("stage") == "extending":
+            action["stage"] = "stowing"
+            robot["status"] = "handling"
+            robot["phaseLabel"] = "箱入输送线"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(runtime, tick, "ctu_handling", {"robotId": robot["id"], **action})
+            return
+
+        # stowing：货箱已落到输送线，交给转运阶段；拓扑没有拣货位则任务直接完成。
+        robot["handlingAction"] = None
+        zone = self._pick_station_for(runtime, task)
+        if zone is not None:
+            self._start_conveyor_to_lift(runtime, robot, task, zone, occupied_cells)
+        else:
+            self._complete_task(runtime, robot, task, occupied_cells)
+
+    def _pick_station_for(self, runtime: RunRuntime, task: dict[str, Any]) -> dict[str, Any] | None:
+        """为任务选择人工拣货位（取离交付出入口最近的一个）；仅 CTU 任务启用。"""
+        if task.get("robotType") != "ctu":
+            return None
+        zones = [
+            zone
+            for zone in runtime.topology.get("zones", [])
+            if zone.get("type") == "pick_station"
+        ]
+        if not zones:
+            return None
+        try:
+            _, row, col = parse_cell_id(task.get("deliveryCellId") or "")
+        except (TypeError, ValueError):
+            return zones[0]
+
+        def distance(zone: dict[str, Any]) -> int:
+            entry_row = int(zone["y"]) + int(zone["height"]) - 1
+            entry_col = int(zone["x"]) + int(zone["width"]) // 2
+            return abs(entry_row - row) + abs(entry_col - col)
+
+        return min(zones, key=distance)
+
+    def _drop_zone_for(self, runtime: RunRuntime, task: dict[str, Any]) -> dict[str, Any] | None:
+        """为任务选择放置区（取离拣货位入口格最近的一个）；没有 drop_zone 区域时返回 None。"""
+        zones = [
+            zone
+            for zone in runtime.topology.get("zones", [])
+            if zone.get("type") == "drop_zone"
+        ]
+        if not zones:
+            return None
+        try:
+            _, row, col = parse_cell_id(task.get("pickStationCellId") or task.get("deliveryCellId") or "")
+        except (TypeError, ValueError):
+            return zones[0]
+
+        def distance(zone: dict[str, Any]) -> int:
+            entry_row = int(zone["y"]) + int(zone["height"]) - 1
+            entry_col = int(zone["x"]) + int(zone["width"]) // 2
+            return abs(entry_row - row) + abs(entry_col - col)
+
+        return min(zones, key=distance)
+
+    def _enter_timed_stage(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        phase: str,
+        ticks: int,
+        event_extra: dict[str, Any] | None = None,
+    ) -> None:
+        """进入一个按 remainingStageTicks 计时的阶段（输送/升降/拣货/放置等通用）。"""
+        tick = runtime.state["tick"]
+        task["phase"] = phase
+        task["phaseLabel"] = self._phase_label(phase)
+        task["status"] = "assigned"
+        task["remainingStageTicks"] = max(1, int(ticks))
+        if robot is not None:
+            robot["status"] = "waiting"
+            robot["handlingAction"] = None
+            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
+            robot["phaseLabel"] = f"{task['phaseLabel']} · 剩余 {task['remainingStageTicks']} tick"
+        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        event: dict[str, Any] = {
+            "taskId": task["id"],
+            "phase": task["phase"],
+            "status": task["status"],
+            "stageTicks": task["remainingStageTicks"],
+        }
+        if event_extra:
+            event.update(event_extra)
+        self._record_event(runtime, tick, "task_state_changed", event)
+
+    def _start_conveyor_to_lift(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        zone: dict[str, Any],
+        occupied_cells: set[str] | None = None,
+    ) -> None:
+        """货物已在出入口交付到下层输送线：机器人卸货，等待下层输送线把货箱运往升降移栽机。"""
+        task["transitGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
+        task["deliveredGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
+        robot["carrying"] = []
+        robot["load"] = 0
+        task["pickStationZoneId"] = zone.get("id")
+        task["pickStationCellId"] = pick_station_entry_cell(runtime.topology, zone)
+        transfer_ticks = max(1, int(runtime.config.get("conveyorTransferTicks", 6) or 6))
+        self._enter_timed_stage(
+            runtime,
+            robot,
+            task,
+            "conveyor_to_lift",
+            transfer_ticks,
+            event_extra={
+                "pickStationZoneId": task["pickStationZoneId"],
+                "pickStationCellId": task["pickStationCellId"],
+            },
+        )
+        # 不要把车停在出入口堵住后面的车；转运期间原地等待。
+        self._step_off_port(runtime, robot, occupied_cells)
+
+    def _start_picking(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """货物已升到上层并沿上层输送线到达人工拣货位，开始自动计时拣货。"""
+        pick_ticks = max(1, int(runtime.config.get("pickTicks", 6) or 6))
+        self._enter_timed_stage(runtime, robot, task, "picking", pick_ticks)
+
+    def _finish_picking(self, runtime: RunRuntime, task: dict[str, Any], robot: dict[str, Any] | None) -> None:
+        """拣货计时结束（或人工跳过）：拣出的货物放到放置区；拓扑没有放置区时直接进入回程。"""
+        task["remainingStageTicks"] = 0
+        task["status"] = "assigned"
+        drop_zone = self._drop_zone_for(runtime, task)
+        if drop_zone is not None:
+            task["dropZoneZoneId"] = drop_zone.get("id")
+            task["dropZoneCellId"] = drop_zone_entry_cell(runtime.topology, drop_zone)
+            place_ticks = max(1, int(runtime.config.get("placeTicks", 3) or 3))
+            self._enter_timed_stage(
+                runtime,
+                robot,
+                task,
+                "place_goods",
+                place_ticks,
+                event_extra={
+                    "dropZoneZoneId": task["dropZoneZoneId"],
+                    "dropZoneCellId": task["dropZoneCellId"],
+                },
+            )
+        else:
+            self._start_conveyor_return(runtime, robot, task)
+
+    def _start_conveyor_return(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """空货箱放回上层输送线，沿原路运回上层的输送线出入口。"""
+        task["returnLineIndex"] = 0
+        return_ticks = max(1, int(runtime.config.get("conveyorTransferTicks", 6) or 6))
+        self._enter_timed_stage(runtime, robot, task, "conveyor_return", return_ticks)
+
+    def _advance_pickup_from_port(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """CTU 在出入口取回经上层输送线返回的货箱，开始按原库位回库。"""
+        tick = runtime.state["tick"]
+        goods = task.get("transitGoods") or []
+        capacity = int(robot.get("capacity", ROBOT_CARRY_CAPACITY.get("ctu", 5)))
+        robot["carrying"] = [dict(slot) for slot in goods]
+        robot["load"] = min(capacity, len(goods))
+        task["returnLineIndex"] = 0
+        task["history"].append({"tick": tick, "phase": "pickup_from_port", "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": "pickup_from_port", "status": task["status"], "picked": task.get("picked", 0)},
+        )
+        self._start_return_leg(runtime, robot, task)
+
+    def _start_return_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """按订单行顺序把货箱送回各自的原库位、原层。"""
+        lines = task.get("lines") or []
+        index = int(task.get("returnLineIndex") or 0)
+        if index >= len(lines):
+            self._complete_task(runtime, robot, task)
+            return
+        line = lines[index]
+        target_cell = line.get("cellId")
+        if not target_cell and line.get("nodeId"):
+            try:
+                target_cell = node_to_cell_id(runtime.topology, line["nodeId"])
+            except KeyError:
+                target_cell = None
+        if not target_cell:
+            task["returnLineIndex"] = index + 1
+            self._start_return_leg(runtime, robot, task)
+            return
+        task["status"] = "assigned"
+        self._set_robot_leg(
+            runtime,
+            robot,
+            task,
+            "return_to_storage",
+            target_cell,
+            int(line.get("layer", 1)),
+        )
+        task["phaseLabel"] = f"回库 {index + 1}/{len(lines)}"
+        robot["phaseLabel"] = task["phaseLabel"]
+        tick = runtime.state["tick"]
+        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {
+                "taskId": task["id"],
+                "phase": task["phase"],
+                "status": task["status"],
+                "nodeId": line.get("nodeId"),
+                "layer": line.get("layer"),
+                "returnLineIndex": index,
+            },
+        )
+
+    def _advance_pickup_from_station(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """CTU 到达上层拣货台并取回货箱，开始按原库位回库。"""
+        tick = runtime.state["tick"]
+        goods = task.get("transitGoods") or []
+        capacity = int(robot.get("capacity", ROBOT_CARRY_CAPACITY.get("ctu", 5)))
+        robot["carrying"] = [dict(slot) for slot in goods]
+        robot["load"] = min(capacity, len(goods))
+        task["returnLineIndex"] = 0
+        task["history"].append({"tick": tick, "phase": "pickup_from_station", "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": "pickup_from_station", "status": task["status"], "picked": task.get("picked", 0)},
+        )
+        self._start_return_leg(runtime, robot, task)
+
+    def _restore_transit_goods(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        """把当前行的货箱放回原库位；箱内数量保持不变。"""
+        lines = task.get("lines") or []
+        goods = task.get("transitGoods") or []
+        index = int(task.get("returnLineIndex") or 0)
+        if index >= len(lines):
+            self._complete_task(runtime, robot, task)
+            return
+        line = lines[index]
+        slot = dict(goods[index]) if index < len(goods) else {
+            key: line[key]
+            for key in ("nodeId", "layer", *SKU_FIELDS, "qty")
+            if line.get(key) not in (None, "")
+        }
+        inventory = runtime.state.setdefault("inventory", [])
+        already_there = any(
+            item.get("nodeId") == slot.get("nodeId")
+            and int(item.get("layer", 1)) == int(slot.get("layer", 1))
+            for item in inventory
+        )
+        if not already_there:
+            inventory.append(slot)
+        task["returnLineIndex"] = index + 1
+        robot["carrying"] = [dict(item) for item in goods[index + 1 :]]
+        robot["load"] = min(int(robot.get("capacity", 1)), len(robot["carrying"]))
+        tick = runtime.state["tick"]
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {
+                "taskId": task["id"],
+                "phase": task["phase"],
+                "status": task["status"],
+                "nodeId": slot.get("nodeId"),
+                "layer": slot.get("layer"),
+                "returnLineIndex": task["returnLineIndex"],
+            },
+        )
+        if task["returnLineIndex"] < len(lines):
+            self._start_return_leg(runtime, robot, task)
+        else:
+            robot["carrying"] = []
+            robot["load"] = 0
+            self._complete_task(runtime, robot, task)
+
+    def _complete_task(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        occupied_cells: set[str] | None = None,
+    ) -> None:
+        """任务收尾：清空机器人、回到待命位并累加指标（原交付完成逻辑复用）。"""
+        tick = runtime.state["tick"]
+        task["status"] = "completed"
+        task["phase"] = "completed"
+        task["phaseLabel"] = self._phase_label(task["phase"])
+        task["completedTick"] = tick
+        task["remainingStageTicks"] = 0
+        robot["currentTaskId"] = None
+        robot["handlingAction"] = None
+        robot["path"] = [robot["currentCellId"]]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        robot["load"] = 0
+        robot["carrying"] = []
+        # 交付/回库完成后退回一格，别把车停在出入口或库位旁堵住后面的车。
+        self._step_off_port(runtime, robot, occupied_cells)
+        home_cell = robot.get("homeCellId")
+        has_unfinished_tasks = any(
+            other["id"] != task["id"] and other.get("status") != "completed"
+            for other in runtime.state.get("tasks", [])
+        )
+        if has_unfinished_tasks and home_cell and home_cell != robot["currentCellId"] and self._robot_path_to(runtime, robot, home_cell, 1):
+            robot["returningToStandby"] = True
+            robot["status"] = "returning"
+            robot["phaseLabel"] = "返回待命位"
+        else:
+            robot["returningToStandby"] = False
+            robot["status"] = "idle"
+            robot["phaseLabel"] = "待命"
+        runtime.metrics["completedTasks"] += 1
+        runtime.metrics["throughput"] += 1
+        if task.get("urgent"):
+            runtime.metrics["urgentOrdersHandled"] += 1
+        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+
+    async def complete_picking(self, run_id: str, task_id: str) -> dict[str, Any]:
+        """人工拣货手动跳过：立即结束拣货（有放置区时进入放置阶段），并广播当前 tick。"""
+        runtime = self._require_runtime(run_id)
+        task = find_task(runtime.state.get("tasks", []), task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if task.get("phase") != "picking":
+            raise ValueError("任务当前不在人工拣货阶段")
+        robot = next(
+            (item for item in runtime.state.get("robots", []) if item["id"] == task.get("assignedRobotId")),
+            None,
+        )
+        self._finish_picking(runtime, task, robot)
+        self._refresh_orders(runtime)
+        self._refresh_metrics(runtime)
+        self._persist(runtime)
+        await self._broadcast_tick(runtime)
+        return task
+
     def _advance_robot_phase(
         self,
         runtime: RunRuntime,
@@ -1164,37 +1560,82 @@ class SimulationService:
             return
 
         if task["phase"] == "delivery_to_port":
-            task["status"] = "completed"
-            task["phase"] = "completed"
+            self._advance_ctu_delivery_action(runtime, robot, task, occupied_cells)
+            return
+
+        if task["phase"] in {
+            "conveyor_to_lift",
+            "lift_to_upper",
+            "conveyor_to_pick",
+            "picking",
+            "place_goods",
+            "conveyor_return",
+        }:
+            remaining = int(task.get("remainingStageTicks", 0)) - 1
+            task["remainingStageTicks"] = max(0, remaining)
+            if remaining > 0:
+                robot["status"] = "waiting"
+                robot["phaseLabel"] = f"{task['phaseLabel']} · 剩余 {remaining} tick"
+                return
+            self._advance_timed_stage(runtime, robot, task)
+            return
+
+        if task["phase"] == "pickup_from_port":
+            self._advance_pickup_from_port(runtime, robot, task)
+            return
+
+        if task["phase"] == "return_to_storage":
+            self._restore_transit_goods(runtime, robot, task)
+            return
+
+    def _advance_timed_stage(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
+        """计时阶段（remainingStageTicks 归零）结束后的推进：按人工拣货闭环的阶段链接续。"""
+        phase = task["phase"]
+        if phase == "conveyor_to_lift":
+            # 下层输送线把货箱送到升降移栽机后，升降移栽机把货箱抬到上层。
+            lift_ticks = max(1, int(runtime.config.get("liftTicks", 3) or 3))
+            self._enter_timed_stage(runtime, robot, task, "lift_to_upper", lift_ticks)
+            return
+        if phase == "lift_to_upper":
+            transfer_ticks = max(1, int(runtime.config.get("conveyorTransferTicks", 6) or 6))
+            self._enter_timed_stage(runtime, robot, task, "conveyor_to_pick", transfer_ticks)
+            return
+        if phase == "conveyor_to_pick":
+            self._start_picking(runtime, robot, task)
+            return
+        if phase == "picking":
+            self._finish_picking(runtime, task, robot)
+            return
+        if phase == "place_goods":
+            # 拣出的货物落到放置区：记录快照供前端渲染放置区货物，空货箱开始回程。
+            task["placedGoods"] = [dict(line) for line in (task.get("lines") or [])]
+            self._start_conveyor_return(runtime, robot, task)
+            return
+        if phase == "conveyor_return":
+            # 货箱经上层输送线回到出入口，CTU 再到出入口取回。
+            tick = runtime.state["tick"]
+            task["phase"] = "pickup_from_port"
             task["phaseLabel"] = self._phase_label(task["phase"])
-            task["completedTick"] = tick
-            robot["currentTaskId"] = None
+            task["status"] = "assigned"
+            robot["status"] = "moving"
             robot["handlingAction"] = None
-            robot["path"] = [robot["currentCellId"]]
-            robot["pathLayers"] = [robot.get("currentLayer", 1)]
-            robot["load"] = 0
-            robot["carrying"] = []
-            # 交付完成后退回一格，别把空车停在输送线出入口堵住后面的车。
-            self._step_off_port(runtime, robot, occupied_cells)
-            home_cell = robot.get("homeCellId")
-            has_unfinished_tasks = any(
-                other["id"] != task["id"] and other.get("status") != "completed"
-                for other in runtime.state.get("tasks", [])
-            )
-            if has_unfinished_tasks and home_cell and home_cell != robot["currentCellId"] and self._robot_path_to(runtime, robot, home_cell, 1):
-                robot["returningToStandby"] = True
-                robot["status"] = "returning"
-                robot["phaseLabel"] = "返回待命位"
-            else:
-                robot["returningToStandby"] = False
-                robot["status"] = "idle"
-                robot["phaseLabel"] = "待命"
-            runtime.metrics["completedTasks"] += 1
-            runtime.metrics["throughput"] += 1
-            if task.get("urgent"):
-                runtime.metrics["urgentOrdersHandled"] += 1
+            if task.get("deliveryCellId"):
+                self._set_robot_leg(
+                    runtime,
+                    robot,
+                    task,
+                    "pickup_from_port",
+                    task["deliveryCellId"],
+                    target_layer=2,
+                )
+            robot["phaseLabel"] = task["phaseLabel"]
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
-            self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+            )
             return
 
     def _step_off_port(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str] | None) -> None:
@@ -1289,7 +1730,7 @@ class SimulationService:
             robot,
             target_cell_id,
             target_layer,
-            stop_adjacent=phase == "pickup_from_ctu",
+            stop_adjacent=phase in {"pickup_from_ctu", "return_to_storage"},
         )
         robot["handlingAction"] = None
         robot["status"] = "moving"
@@ -1428,6 +1869,16 @@ class SimulationService:
             "pickup_from_ctu": "CTU 取货",
             "pickup_from_shuttle": "四向车取货",
             "delivery_to_port": "输送线交付",
+            "conveyor_transfer": "输送线转运",
+            "conveyor_to_lift": "下层输送转运",
+            "lift_to_upper": "升降移栽",
+            "conveyor_to_pick": "上层输送至拣货位",
+            "picking": "人工拣货",
+            "place_goods": "拣货放置",
+            "conveyor_return": "输送线回程",
+            "pickup_from_port": "出入口取回",
+            "pickup_from_station": "拣货台取回",
+            "return_to_storage": "回库",
             "completed": "已完成",
         }
         return mapping.get(phase, phase)

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-ZoneType = Literal["ctu", "shuttle", "port"]
+ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
 CellType = Literal["road", "blocked", "conveyor"]
 ConveyorDirection = Literal["right", "left", "up", "down"]
 NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer"]

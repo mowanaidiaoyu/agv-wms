@@ -80,6 +80,7 @@ export function SimulationPage() {
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [completingPicking, setCompletingPicking] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
@@ -238,6 +239,19 @@ export function SimulationPage() {
     }
   }
 
+  const pickingTask = currentState?.tasks.find((task) => task.phase === 'picking')
+
+  async function completePicking() {
+    if (!selectedRunId || !pickingTask || completingPicking) return
+    try {
+      setCompletingPicking(true)
+      const nextState = await api.completeTaskPicking(selectedRunId, pickingTask.id)
+      setLiveState(nextState)
+    } finally {
+      setCompletingPicking(false)
+    }
+  }
+
   async function syncRun(action: 'pause' | 'resume' | 'stop') {
     if (!selectedRunId) return
 
@@ -316,6 +330,12 @@ export function SimulationPage() {
             <Plus size={16} />
             新建订单
           </button>
+          {pickingTask ? (
+            <button className="ghost-button" onClick={() => void completePicking()} disabled={completingPicking} type="button">
+              <CheckCircle2 size={16} />
+              完成拣货
+            </button>
+          ) : null}
           <button className="accent-button" onClick={startRun} disabled={!resolvedTopologyId || starting || isRunning} type="button">
             {starting ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             {starting ? '启动中…' : isRunning ? '运行中' : '启动'}

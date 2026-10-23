@@ -1213,6 +1213,60 @@ select {
   transform: translate(-50%, -50%) rotate(90deg);
 }
 
+.topology-glyph-pick-station-bench {
+  width: 66%;
+  height: 18%;
+  left: 17%;
+  top: 30%;
+  border-radius: 4px;
+  background: rgba(249, 115, 22, 0.9);
+  box-shadow: 0 0 0 2px rgba(154, 52, 18, 0.35);
+}
+
+.topology-glyph-pick-station-post {
+  width: 4px;
+  height: 26%;
+  left: 48%;
+  top: 48%;
+  background: currentColor;
+}
+
+.topology-glyph-pick-station-box {
+  width: 22%;
+  height: 22%;
+  left: 39%;
+  top: 12%;
+  border-radius: 2px;
+  background: rgba(251, 146, 60, 0.95);
+  box-shadow: 0 0 0 1px rgba(154, 52, 18, 0.45);
+}
+
+.topology-glyph-drop-zone-pad {
+  width: 72%;
+  height: 56%;
+  left: 14%;
+  top: 32%;
+  border-radius: 4px;
+  border: 2px dashed rgba(139, 92, 246, 0.9);
+  background: rgba(139, 92, 246, 0.18);
+}
+
+.topology-glyph-drop-zone-box {
+  width: 24%;
+  height: 24%;
+  left: 26%;
+  top: 40%;
+  border-radius: 2px;
+  background: rgba(167, 139, 250, 0.95);
+  box-shadow: 0 0 0 1px rgba(109, 40, 217, 0.5);
+}
+
+.topology-glyph-drop-zone-box-stacked {
+  left: 50%;
+  top: 34%;
+  background: rgba(196, 181, 253, 0.95);
+}
+
 .topology-glyph-road,
 .topology-glyph-select,
 .topology-glyph-erase,
@@ -1235,6 +1289,8 @@ select {
 .topology-glyph-lift { color: #7c3aed; }
 .topology-glyph-lift_transfer { color: #c2410c; }
 .topology-glyph-turn_transfer { color: #0f766e; }
+.topology-glyph-pick_station { color: #c2410c; }
+.topology-glyph-drop_zone { color: #7c3aed; }
 
 .topology-glyph-emphasis {
   filter: drop-shadow(0 0 8px rgba(250, 204, 21, 0.5));
@@ -2144,6 +2200,8 @@ select {
 .topo-zone-swatch-ctu { background: #0e7490; }
 .topo-zone-swatch-shuttle { background: #b45309; }
 .topo-zone-swatch-port { background: #0d9488; }
+.topo-zone-swatch-pick_station { background: #f97316; }
+.topo-zone-swatch-drop_zone { background: #8b5cf6; }
 
 .topo-palette-hint {
   margin: 2px 0 0;

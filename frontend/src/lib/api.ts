@@ -77,6 +77,9 @@ export const api = {
   stopSimulation(runId: string) {
     return request<{ runId: string; status: string }>(`/simulations/${runId}/stop`, { method: 'POST' })
   },
+  completeTaskPicking(runId: string, taskId: string) {
+    return request<SimulationState>(`/simulations/${runId}/tasks/${taskId}/complete-picking`, { method: 'POST' })
+  },
   getSimulationState(runId: string) {
     return request<SimulationState>(`/simulations/${runId}/state`)
   },

@@ -1,4 +1,4 @@
-export type ZoneType = 'ctu' | 'shuttle' | 'port'
+export type ZoneType = 'ctu' | 'shuttle' | 'port' | 'pick_station' | 'drop_zone'
 export type CellType = 'road' | 'blocked' | 'conveyor'
 export type ConveyorDirection = 'right' | 'left' | 'up' | 'down'
 export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer'
@@ -131,9 +131,9 @@ export interface SimulationRobot {
   capacity: number
   /** CTU 当前装载的货物箱（取货后从库位移到车上，交付后清空） */
   carrying?: GoodsSlot[]
-  /** CTU 到达库位后的升降、伸叉和装箱动作；仅动作期间存在。 */
+  /** CTU 到达库位/出入口后的升降、伸叉和装箱动作；仅动作期间存在。 */
   handlingAction?: {
-    type: 'pickup'
+    type: 'pickup' | 'deliver'
     stage: 'lifting' | 'extending' | 'stowing'
     targetLayer: number
     slotIndex: number
@@ -176,11 +176,17 @@ export interface SimulationTask {
   phaseLabel: string
   sourceCellId: string
   sourceLayer: number
+  /** 原始库位节点（货物拣出前的 nodeId，回库时放回同一库位） */
+  sourceNodeId?: string | null
   targetCellId: string
   targetLayer: number
   /** 交付点（输送线出入口入口格），等于任务最终 targetCellId */
   deliveryCellId: string
   lines: SimulationTaskLine[]
+  /** 实际交付到输送线上的货箱（用于按实载箱数渲染） */
+  deliveredGoods?: SimulationTaskLine[]
+  /** 转运中的货箱（人工拣货流程） */
+  transitGoods?: SimulationTaskLine[]
   currentLineIndex: number
   picked: number
   priority: number
@@ -188,6 +194,18 @@ export interface SimulationTask {
   urgent: boolean
   assignedRobotId: string | null
   remainingTicks: number
+  /** 人工拣货位入口格（拓扑有 pick_station 时才有） */
+  pickStationCellId?: string | null
+  pickStationZoneId?: string | null
+  /** 放置区入口格（拣货结束后把拣出货物放到 drop_zone 时才有） */
+  dropZoneCellId?: string | null
+  dropZoneZoneId?: string | null
+  /** 拣出并放到放置区的货物快照（place_goods 结束后生成，供前端渲染放置区货物） */
+  placedGoods?: SimulationTaskLine[]
+  /** 人工拣货闭环各计时阶段的统一剩余 tick（下层输送/升降/上层输送/拣货/放置/回程共用） */
+  remainingStageTicks?: number
+  /** 回库时正在放置的订单行序号 */
+  returnLineIndex?: number
   history: SimulationTaskHistory[]
   createdTick: number
   startedTick: number | null

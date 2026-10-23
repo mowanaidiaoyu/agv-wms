@@ -1,7 +1,7 @@
-import type { ConveyorDirection, EditorObjectType, NodeType } from '../types'
+import type { ConveyorDirection, EditorObjectType, NodeType, ZoneType } from '../types'
 
 type TopologyGlyphProps = {
-  kind: EditorObjectType | NodeType
+  kind: EditorObjectType | NodeType | ZoneType
   size?: 'card' | 'panel' | 'board'
   direction?: ConveyorDirection
   className?: string
@@ -105,6 +105,22 @@ export function TopologyGlyph({
           <span className="topology-glyph-turn-transfer-ring" />
           <span className="topology-glyph-turn-transfer-arm topology-glyph-turn-transfer-arm-a" />
           <span className="topology-glyph-turn-transfer-arm topology-glyph-turn-transfer-arm-b" />
+        </>
+      ) : null}
+
+      {kind === 'pick_station' ? (
+        <>
+          <span className="topology-glyph-pick-station-bench" />
+          <span className="topology-glyph-pick-station-post" />
+          <span className="topology-glyph-pick-station-box" />
+        </>
+      ) : null}
+
+      {kind === 'drop_zone' ? (
+        <>
+          <span className="topology-glyph-drop-zone-pad" />
+          <span className="topology-glyph-drop-zone-box" />
+          <span className="topology-glyph-drop-zone-box topology-glyph-drop-zone-box-stacked" />
         </>
       ) : null}
     </span>

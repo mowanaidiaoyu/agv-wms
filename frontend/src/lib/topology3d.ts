@@ -25,6 +25,8 @@ export const ZONE_LEVELS: Record<ZoneType, number> = {
   ctu: 17,
   shuttle: 4,
   port: 1,
+  pick_station: 1,
+  drop_zone: 1,
 }
 
 /** 货架每层高度（按区域类型）：CTU 料箱 0.5，四向车托盘 1.4（平库货位更高）。 */
@@ -32,6 +34,8 @@ export const ZONE_LEVEL_HEIGHT: Record<ZoneType, number> = {
   ctu: 0.5,
   shuttle: 1.4,
   port: 0.5,
+  pick_station: 0.5,
+  drop_zone: 0.5,
 }
 
 /** CTU 车载货层数：一次最多装 5 箱（与后端 ROBOT_CARRY_CAPACITY["ctu"] 一致）。 */
@@ -299,6 +303,8 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
     ctu: '#0e7490',
     shuttle: '#b45309',
     port: '#0d9488',
+    pick_station: '#f97316',
+    drop_zone: '#8b5cf6',
   }
   const items: SceneItem[] = []
   const floorIndexOf = (floor?: string) => Math.max(0, floors.indexOf(floor ?? GROUND_FLOOR))
@@ -648,69 +654,106 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
           entity,
         })
       } else {
-        // 水平区域（输送线出入口 port）：抬升底盘 + 四角立柱 + 顶部线框围栏，看清并便于选中/删除
-        const halfW = (zone.width * CELL) / 2
-        const halfD = (zone.height * CELL) / 2
-        const inset = 0.2
+        // 输送线出入口只是交付标记（告诉 CTU 货送哪里），用贴地色块 + 细边框 + 入口点表示，
+        // 不再画底盘/立柱/围栏之类的设备结构。
+        const zoneW = zone.width * CELL
+        const zoneD = zone.height * CELL
+        const markerY = y + 0.205
         items.push({
           kind: 'box',
           key: `zone-${zone.id}-${floor}`,
-          position: [cx, y + 0.12, cz],
-          size: [zone.width * CELL, 0.24, zone.height * CELL],
+          position: [cx, markerY, cz],
+          size: [zoneW * 0.94, 0.02, zoneD * 0.94],
           color: baseColor,
           emissive: baseColor,
-          opacity: 0.55,
+          opacity: 0.28,
           floor,
           entity,
         })
-        const corners: [number, number][] = [
-          [cx - halfW + inset, cz - halfD + inset],
-          [cx + halfW - inset, cz - halfD + inset],
-          [cx - halfW + inset, cz + halfD - inset],
-          [cx + halfW - inset, cz + halfD - inset],
-        ]
-        corners.forEach(([px, pz], i) => {
+        // 四边细边框，标出区域范围（仍带 entity，可直接点选）
+        const edgeT = 0.045
+        for (const side of [1, -1]) {
           items.push({
             kind: 'box',
-            key: `zone-${zone.id}-${floor}-post-${i}`,
-            position: [px, y + 0.7, pz],
-            size: [0.24, 1.4, 0.24],
+            key: `zone-${zone.id}-${floor}-edge-x-${side}`,
+            position: [cx, markerY + 0.01, cz + side * (zoneD / 2 - edgeT / 2)],
+            size: [zoneW, 0.02, edgeT],
             color: baseColor,
             emissive: baseColor,
             floor,
             entity,
           })
-        })
-        items.push({
-          kind: 'box',
-          key: `zone-${zone.id}-${floor}-outline`,
-          position: [cx, y + 0.26, cz],
-          size: [zone.width * CELL + 0.06, 0.28, zone.height * CELL + 0.06],
-          color: baseColor,
-          wire: true,
-          floor,
-          entity,
-        })
-        if (zone.type === 'port') {
-          // 「下方入、上方出」：底边中点绿色入口块 + 顶边中点黄色出口块（行号大 = 下方 = 世界 -z）
-          const padW = Math.min(zone.width * CELL * 0.8, 1.6)
           items.push({
             kind: 'box',
-            key: `zone-${zone.id}-${floor}-port-in`,
-            position: [cx, y + 0.52, cz - halfD + 0.35],
-            size: [padW, 0.5, 0.5],
+            key: `zone-${zone.id}-${floor}-edge-z-${side}`,
+            position: [cx + side * (zoneW / 2 - edgeT / 2), markerY + 0.01, cz],
+            size: [edgeT, 0.02, zoneD],
+            color: baseColor,
+            emissive: baseColor,
+            floor,
+            entity,
+          })
+        }
+        if (zone.type === 'port') {
+          // 入口格（CTU 实际停靠的位置）用绿色小标记点出来。
+          const entryOffsetX = Math.floor(zone.width / 2) + 0.5 - zone.width / 2
+          const entryOffsetZ = 0.5 - zone.height / 2
+          items.push({
+            kind: 'box',
+            key: `zone-${zone.id}-${floor}-entry`,
+            position: [cx + entryOffsetX, markerY + 0.02, cz + entryOffsetZ],
+            size: [CELL * 0.42, 0.02, CELL * 0.42],
             color: '#34d399',
             emissive: '#059669',
             floor,
             entity,
           })
+        } else if (zone.type === 'pick_station') {
+          // 人工拣货位只是上层工位标记：底边中点是一层输送线进入口，
+          // 上方带面高度处画一个橙色拣货工位台（可点选），不生成库位。
+          const entryOffsetX = Math.floor(zone.width / 2) + 0.5 - zone.width / 2
+          const entryOffsetZ = 0.5 - zone.height / 2
+          const upperY = y + CONVEYOR_DECK_BASE + CONVEYOR_DECK_STEP
           items.push({
             kind: 'box',
-            key: `zone-${zone.id}-${floor}-port-out`,
-            position: [cx, y + 0.52, cz + halfD - 0.35],
-            size: [padW, 0.5, 0.5],
-            color: '#fbbf24',
-            emissive: '#d97706',
+            key: `zone-${zone.id}-${floor}-entry`,
+            position: [cx + entryOffsetX, markerY + 0.02, cz + entryOffsetZ],
+            size: [CELL * 0.42, 0.02, CELL * 0.42],
+            color: '#fb923c',
+            emissive: '#ea580c',
+            floor,
+            entity,
+          })
+          items.push({
+            kind: 'box',
+            key: `zone-${zone.id}-${floor}-bench`,
+            position: [cx, upperY + 0.06, cz],
+            size: [zoneW * 0.58, 0.12, zoneD * 0.58],
+            color: '#fb923c',
+            emissive: '#9a3412',
+            floor,
+            entity,
+          })
+          items.push({
+            kind: 'box',
+            key: `zone-${zone.id}-${floor}-bench-post`,
+            position: [cx, y + (upperY - y) / 2, cz],
+            size: [0.08, Math.max(0.1, upperY - y), 0.08],
+            color: '#c2410c',
+            floor,
+            entity,
+          })
+        } else if (zone.type === 'drop_zone') {
+          // 放置区：人工拣出的货物放到这里。贴地紫色标记 + 底边中点入口小方块（与 port 同口径）。
+          const entryOffsetX = Math.floor(zone.width / 2) + 0.5 - zone.width / 2
+          const entryOffsetZ = 0.5 - zone.height / 2
+          items.push({
+            kind: 'box',
+            key: `zone-${zone.id}-${floor}-entry`,
+            position: [cx + entryOffsetX, markerY + 0.02, cz + entryOffsetZ],
+            size: [CELL * 0.42, 0.02, CELL * 0.42],
+            color: '#a78bfa',
+            emissive: '#7c3aed',
             floor,
             entity,
           })
@@ -876,100 +919,113 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       continue
     }
     if (node.type === 'lift_transfer' || node.type === 'turn_transfer') {
-      // 输送线配套设备（与实拍滚筒线同款钢架）：
-      // - 移栽机：方形钢架 + 与主线走向垂直的滚筒台面；
-      // - 升降移栽机：在台面基础上增加四角导向立柱与顶部横梁。
+      // 输送线配套设备：
+      // - 转向移栽机：方形钢架 + 与主线走向垂直的滚筒台面（每层一套）；
+      // - 升降移栽机：导轨门架 + 单个可上下移动的升降平台 + 液压杆。
       const under = cellAt.get(`${floor}:${node.row}:${node.col}`)
       const onConveyor = under?.type === 'conveyor'
-      const levels = onConveyor ? Math.max(1, under.levels ?? 1) : 1
+      // 独立安装在路格上的设备：对齐相邻输送带的高度与层数，保证与主线衔接。
+      const adjacentConveyor = [
+        cellAt.get(`${floor}:${node.row}:${node.col - 1}`),
+        cellAt.get(`${floor}:${node.row}:${node.col + 1}`),
+        cellAt.get(`${floor}:${node.row - 1}:${node.col}`),
+        cellAt.get(`${floor}:${node.row + 1}:${node.col}`),
+      ].find((cell) => cell?.type === 'conveyor')
+      const mount = onConveyor ? under : adjacentConveyor
+      const levels = Math.max(1, mount?.levels ?? 1)
       const isLift = node.type === 'lift_transfer'
       const w = CELL * 2 * 0.96
       const cx = x + CELL / 2
       const cz = z - CELL / 2
-      const deckTop = y + (onConveyor ? CONVEYOR_DECK_BASE + (levels - 1) * CONVEYOR_DECK_STEP : 0.5)
       const frameH = 0.18
       const rollerR = 0.05
       const railW = 0.07
-      const frameBottom = deckTop - rollerR - frameH
-      const underDir = onConveyor ? DIRECTION_VEC3[under?.conveyorDirection ?? 'right'] : DIRECTION_VEC3.right
+      const frameBottom = y + CONVEYOR_DECK_BASE - rollerR - frameH
+      const underDir = DIRECTION_VEC3[mount?.conveyorDirection ?? 'right']
       // 移栽滚筒与主线走向垂直，便于区分主线与移栽段
       const rollerAxis: 'x' | 'z' = underDir.dx !== 0 ? 'x' : 'z'
 
-      // 机架底座
-      items.push({
-        kind: 'box',
-        key: `${node.id}-frame`,
-        position: [cx, deckTop - rollerR - frameH / 2, cz],
-        size: [w, frameH, w],
-        color: '#2563eb',
-        floor,
-        entity,
-      })
-      // 台面滚筒
-      const rollerCount = 10
-      const rollerSpan = w - 0.24
-      const pitch = rollerSpan / rollerCount
-      for (let i = 0; i < rollerCount; i += 1) {
-        const t = -rollerSpan / 2 + pitch * (i + 0.5)
-        items.push({
-          kind: 'cyl',
-          key: `${node.id}-roller-${i}`,
-          position: rollerAxis === 'x' ? [cx, deckTop - rollerR, cz + t] : [cx + t, deckTop - rollerR, cz],
-          radius: rollerR,
-          length: w - 0.3,
-          axis: rollerAxis,
-          color: '#c7d2dd',
-          floor,
-          entity,
-        })
-      }
-      // 四周护边
-      for (const side of [1, -1]) {
-        items.push({
-          kind: 'box',
-          key: `${node.id}-edge-x-${side}`,
-          position: [cx, deckTop - rollerR - 0.02, cz + side * (w / 2 - railW / 2)],
-          size: [w, 0.08, railW],
-          color: '#1d4ed8',
-          floor,
-          entity,
-        })
-        items.push({
-          kind: 'box',
-          key: `${node.id}-edge-z-${side}`,
-          position: [cx + side * (w / 2 - railW / 2), deckTop - rollerR - 0.02, cz],
-          size: [railW, 0.08, w],
-          color: '#1d4ed8',
-          floor,
-          entity,
-        })
-      }
       if (isLift) {
-        // 四角导向立柱 + 顶部横梁
-        const postTop = deckTop + 0.55
-        const inset = w / 2 - 0.06
-        const corners: [number, number][] = [
-          [inset, inset],
-          [inset, -inset],
-          [-inset, inset],
-          [-inset, -inset],
-        ]
-        for (const [ox, oz] of corners) {
+        // 升降移栽机：底座 + 两根导轨立柱 + 顶部横梁 + 液压杆 + 单个升降平台。
+        // 平台停在最低层带面高度，立柱延伸到最高层上方，直观表达「平台可上下移动」。
+        const lowerDeck = y + CONVEYOR_DECK_BASE
+        const upperDeck = y + CONVEYOR_DECK_BASE + (levels - 1) * CONVEYOR_DECK_STEP
+        const travelTop = upperDeck + 0.22
+
+        // 底座
+        items.push({
+          kind: 'box',
+          key: `${node.id}-base`,
+          position: [cx, y + 0.05, cz],
+          size: [w, 0.1, w],
+          color: '#1e3a8a',
+          floor,
+          entity,
+        })
+
+        // 两根导轨立柱（沿输送走向分列两侧）+ 顶部横梁
+        const postOffset = w / 2 - 0.08
+        const postH = travelTop - y - 0.1
+        const postCenterY = y + 0.1 + postH / 2
+        for (const side of [1, -1]) {
           items.push({
             kind: 'box',
-            key: `${node.id}-post-${ox}-${oz}`,
-            position: [cx + ox, y + postTop / 2, cz + oz],
-            size: [0.08, postTop, 0.08],
+            key: `${node.id}-guide-${side}`,
+            position: [cx + underDir.dx * postOffset * side, postCenterY, cz + underDir.dz * postOffset * side],
+            size: [0.1, postH, 0.1],
             color: '#1e40af',
             floor,
             entity,
           })
+        }
+        const beamSize: [number, number, number] = underDir.dx !== 0 ? [w, 0.08, 0.1] : [0.1, 0.08, w]
+        items.push({
+          kind: 'box',
+          key: `${node.id}-top-beam`,
+          position: [cx, travelTop - 0.04, cz],
+          size: beamSize,
+          color: '#1e40af',
+          floor,
+          entity,
+        })
+
+        // 液压缸：底座顶 → 平台底
+        const platformBottom = lowerDeck - rollerR - 0.1
+        const cylBottom = y + 0.1
+        const cylH = Math.max(0.05, platformBottom - cylBottom)
+        items.push({
+          kind: 'box',
+          key: `${node.id}-hydraulic`,
+          position: [cx, cylBottom + cylH / 2, cz],
+          size: [0.16, cylH, 0.16],
+          color: '#64748b',
+          floor,
+          entity,
+        })
+
+        // 升降平台：台面框架 + 滚筒 + 两侧挡边（停在最低层）
+        items.push({
+          kind: 'box',
+          key: `${node.id}-platform`,
+          position: [cx, platformBottom + 0.05, cz],
+          size: [w * 0.92, 0.1, w * 0.92],
+          color: '#2563eb',
+          floor,
+          entity,
+        })
+        const rollerCount = 10
+        const rollerSpan = w * 0.92 - 0.2
+        const pitch = rollerSpan / rollerCount
+        for (let i = 0; i < rollerCount; i += 1) {
+          const t = -rollerSpan / 2 + pitch * (i + 0.5)
           items.push({
-            kind: 'box',
-            key: `${node.id}-base-${ox}-${oz}`,
-            position: [cx + ox, y + 0.02, cz + oz],
-            size: [0.2, 0.04, 0.2],
-            color: '#1e3a8a',
+            kind: 'cyl',
+            key: `${node.id}-roller-${i}`,
+            position: rollerAxis === 'x' ? [cx, lowerDeck - rollerR, cz + t] : [cx + t, lowerDeck - rollerR, cz],
+            radius: rollerR,
+            length: w * 0.92 - 0.28,
+            axis: rollerAxis,
+            color: '#c7d2dd',
             floor,
             entity,
           })
@@ -977,61 +1033,97 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         for (const side of [1, -1]) {
           items.push({
             kind: 'box',
-            key: `${node.id}-top-x-${side}`,
-            position: [cx, y + postTop - 0.03, cz + side * inset],
-            size: [w, 0.06, 0.06],
-            color: '#1e40af',
-            floor,
-            entity,
-          })
-          items.push({
-            kind: 'box',
-            key: `${node.id}-top-z-${side}`,
-            position: [cx + side * inset, y + postTop - 0.03, cz],
-            size: [0.06, 0.06, w],
-            color: '#1e40af',
+            key: `${node.id}-platform-edge-${side}`,
+            position: rollerAxis === 'x'
+              ? [cx, lowerDeck - rollerR - 0.02, cz + side * (w * 0.46 - railW / 2)]
+              : [cx + side * (w * 0.46 - railW / 2), lowerDeck - rollerR - 0.02, cz],
+            size: rollerAxis === 'x' ? [w * 0.92, 0.08, railW] : [railW, 0.08, w * 0.92],
+            color: '#1d4ed8',
             floor,
             entity,
           })
         }
-        items.push({
-          kind: 'box',
-          key: `${node.id}-brace`,
-          position: [cx, y + 0.35, cz],
-          size: [0.05, 0.05, w - 0.16],
-          color: '#1e40af',
-          floor,
-          entity,
-        })
-      } else if (!onConveyor) {
-        // 独立安装的移栽机：四腿 + 脚板
-        const legH = Math.max(0.05, frameBottom - y - 0.02)
-        const inset = w / 2 - 0.06
-        const corners: [number, number][] = [
-          [inset, inset],
-          [inset, -inset],
-          [-inset, inset],
-          [-inset, -inset],
-        ]
-        for (const [ox, oz] of corners) {
+      } else {
+        // 转向移栽机：每层一套机架 + 滚筒台面 + 护边（双层线下层也有）。
+        for (let level = 0; level < levels; level += 1) {
+          const deckTop = y + CONVEYOR_DECK_BASE + level * CONVEYOR_DECK_STEP
           items.push({
             kind: 'box',
-            key: `${node.id}-leg-${ox}-${oz}`,
-            position: [cx + ox, y + 0.02 + legH / 2, cz + oz],
-            size: [0.07, legH, 0.07],
-            color: '#1e40af',
+            key: `${node.id}-frame-${level}`,
+            position: [cx, deckTop - rollerR - frameH / 2, cz],
+            size: [w, frameH, w],
+            color: '#2563eb',
             floor,
             entity,
           })
-          items.push({
-            kind: 'box',
-            key: `${node.id}-foot-${ox}-${oz}`,
-            position: [cx + ox, y + 0.015, cz + oz],
-            size: [0.16, 0.03, 0.16],
-            color: '#1e3a8a',
-            floor,
-            entity,
-          })
+          const rollerCount = 10
+          const rollerSpan = w - 0.24
+          const pitch = rollerSpan / rollerCount
+          for (let i = 0; i < rollerCount; i += 1) {
+            const t = -rollerSpan / 2 + pitch * (i + 0.5)
+            items.push({
+              kind: 'cyl',
+              key: `${node.id}-roller-${level}-${i}`,
+              position: rollerAxis === 'x' ? [cx, deckTop - rollerR, cz + t] : [cx + t, deckTop - rollerR, cz],
+              radius: rollerR,
+              length: w - 0.3,
+              axis: rollerAxis,
+              color: '#c7d2dd',
+              floor,
+              entity,
+            })
+          }
+          for (const side of [1, -1]) {
+            items.push({
+              kind: 'box',
+              key: `${node.id}-edge-x-${level}-${side}`,
+              position: [cx, deckTop - rollerR - 0.02, cz + side * (w / 2 - railW / 2)],
+              size: [w, 0.08, railW],
+              color: '#1d4ed8',
+              floor,
+              entity,
+            })
+            items.push({
+              kind: 'box',
+              key: `${node.id}-edge-z-${level}-${side}`,
+              position: [cx + side * (w / 2 - railW / 2), deckTop - rollerR - 0.02, cz],
+              size: [railW, 0.08, w],
+              color: '#1d4ed8',
+              floor,
+              entity,
+            })
+          }
+        }
+        if (!onConveyor) {
+          // 独立安装的转向移栽机：四腿 + 脚板
+          const legH = Math.max(0.05, frameBottom - y - 0.02)
+          const inset = w / 2 - 0.06
+          const corners: [number, number][] = [
+            [inset, inset],
+            [inset, -inset],
+            [-inset, inset],
+            [-inset, -inset],
+          ]
+          for (const [ox, oz] of corners) {
+            items.push({
+              kind: 'box',
+              key: `${node.id}-leg-${ox}-${oz}`,
+              position: [cx + ox, y + 0.02 + legH / 2, cz + oz],
+              size: [0.07, legH, 0.07],
+              color: '#1e40af',
+              floor,
+              entity,
+            })
+            items.push({
+              kind: 'box',
+              key: `${node.id}-foot-${ox}-${oz}`,
+              position: [cx + ox, y + 0.015, cz + oz],
+              size: [0.16, 0.03, 0.16],
+              color: '#1e3a8a',
+              floor,
+              entity,
+            })
+          }
         }
       }
       continue

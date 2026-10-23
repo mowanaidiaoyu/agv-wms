@@ -44,6 +44,8 @@ export const ZONE_LABELS: Record<ZoneType, string> = {
   ctu: 'CTU 高架库',
   shuttle: '四向车平库',
   port: '输送线出入口',
+  pick_station: '人工拣货位',
+  drop_zone: '放置区',
 }
 
 export const DIRECTION_LABELS: Record<ConveyorDirection, string> = {
@@ -80,7 +82,7 @@ export function isNodeTool(tool: EditorObjectType): boolean {
   return (NODE_TOOL as Record<string, EditorObjectType>)[tool] === tool && (NODE_PREFIX as Record<string, NodeType>)[tool] !== undefined
 }
 
-export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port']
+export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
 
 export const CELL_BRUSH_TOOLS: ReadonlySet<CellType> = new Set(['road', 'blocked', 'conveyor'])
 

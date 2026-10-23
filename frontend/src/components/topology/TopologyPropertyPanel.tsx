@@ -22,7 +22,7 @@ import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
 import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyPayload, ZoneType } from '../../types'
 
 const CELL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
-const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'port']
+const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
 const DIRECTIONS: ConveyorDirection[] = ['right', 'down', 'left', 'up']
 
 function NumericField({

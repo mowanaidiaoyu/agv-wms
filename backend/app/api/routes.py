@@ -94,6 +94,17 @@ def stop_simulation(run_id: str):
         raise HTTPException(status_code=404, detail="Run not found")
 
 
+@router.post("/simulations/{run_id}/tasks/{task_id}/complete-picking")
+async def complete_picking_task(run_id: str, task_id: str):
+    try:
+        await simulation_service.complete_picking(run_id, task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Run or task not found")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return simulation_service.get_state(run_id)
+
+
 @router.get("/simulations/{run_id}/state")
 def get_simulation_state(run_id: str):
     try:

@@ -22,6 +22,8 @@ const ZONE_HINTS: Record<ZoneType, string> = {
   ctu: '拖拽拉出 CTU 高架库矩形（自动生成 17 层库位）',
   shuttle: '拖拽拉出四向车平库矩形',
   port: '拖拽拉出输送线出入口矩形（下方入、上方出）',
+  pick_station: '拖拽拉出人工拣货位矩形（货物上层输送到此人工拣货）',
+  drop_zone: '拖拽拉出放置区矩形（拣出的货物放置到这里）',
 }
 
 const CELL_TOOL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
@@ -44,6 +46,8 @@ const COMPACT_ZONE_LABELS: Record<ZoneType, string> = {
   ctu: 'CTU库',
   shuttle: '四向库',
   port: '出入口',
+  pick_station: '拣货位',
+  drop_zone: '放置区',
 }
 
 function ToolButton({

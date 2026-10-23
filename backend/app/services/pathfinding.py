@@ -269,6 +269,28 @@ def port_entry_cell(topology: dict[str, Any], zone: dict[str, Any]) -> str:
     return same_position_cell_id(topology, DEFAULT_FLOOR, row, col)
 
 
+def pick_station_zones(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    return [zone for zone in topology.get("zones", []) if zone.get("type") == "pick_station"]
+
+
+def pick_station_entry_cell(topology: dict[str, Any], zone: dict[str, Any]) -> str:
+    """拣货位入口格：与 port 同口径，取区域底边中点（CTU 在此停靠取回货箱）。"""
+    row = int(zone["y"]) + int(zone["height"]) - 1
+    col = int(zone["x"]) + int(zone["width"]) // 2
+    return same_position_cell_id(topology, DEFAULT_FLOOR, row, col)
+
+
+def drop_zone_zones(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    return [zone for zone in topology.get("zones", []) if zone.get("type") == "drop_zone"]
+
+
+def drop_zone_entry_cell(topology: dict[str, Any], zone: dict[str, Any]) -> str:
+    """放置区入口格：与 port 同口径，取区域底边中点（拣出的货物放到这里）。"""
+    row = int(zone["y"]) + int(zone["height"]) - 1
+    col = int(zone["x"]) + int(zone["width"]) // 2
+    return same_position_cell_id(topology, DEFAULT_FLOOR, row, col)
+
+
 def shuttle_slot_key(zone: dict[str, Any], row: int, col: int) -> str:
     """2×2 货位锚点（区域左上角起每 2 格一个槽），与前端 shuttleSlotsInBox 口径一致。"""
     y = int(zone["y"])

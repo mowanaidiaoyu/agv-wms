@@ -569,7 +569,9 @@ def test_completed_robot_returns_to_standby_while_other_tasks_are_unfinished(mon
     )
     monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
 
-    service._advance_robot_phase(runtime, robot, task)
+    # 交付动作链：升降对位 → 伸叉送箱 → 箱入输送线 → 完成
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
 
     assert task["status"] == "completed"
     assert robot["returningToStandby"] is True
@@ -740,3 +742,252 @@ def test_ctu_order_over_five_boxes_is_split_by_vehicle_capacity():
     assert [len(task["lines"]) for task in tasks] == [5, 1]
     assert all(len(task["lines"]) <= ROBOT_CARRY_CAPACITY["ctu"] for task in tasks)
     assert order_states[0]["totalTasks"] == 2
+
+
+PICK_STATION_TOPOLOGY = {
+    **TOPOLOGY,
+    "id": "pick-station-topology",
+    "name": "Pick Station Topology",
+    "zones": [
+        *TOPOLOGY["zones"],
+        {"id": "zone-pick", "label": "人工拣货位", "type": "pick_station", "x": 5, "y": 1, "width": 3, "height": 2},
+        {"id": "zone-drop", "label": "放置区", "type": "drop_zone", "x": 0, "y": 3, "width": 2, "height": 2},
+    ],
+}
+
+PICK_STATION_CONFIG = deepcopy(CONFIG)
+PICK_STATION_CONFIG.update(
+    {
+        "topologyId": PICK_STATION_TOPOLOGY["id"],
+        "pickTicks": 2,
+        "conveyorTransferTicks": 2,
+        "liftTicks": 2,
+        "placeTicks": 2,
+    }
+)
+PICK_STATION_CONFIG["orderGenerator"]["maxOrders"] = 0
+
+
+# 只有拣货位、没有放置区的拓扑：picking 结束后应直接进入 conveyor_return。
+PICK_STATION_NO_DROP_TOPOLOGY = {
+    **PICK_STATION_TOPOLOGY,
+    "id": "pick-station-no-drop-topology",
+    "name": "Pick Station No Drop Topology",
+    "zones": [
+        *TOPOLOGY["zones"],
+        {"id": "zone-pick", "label": "人工拣货位", "type": "pick_station", "x": 5, "y": 1, "width": 3, "height": 2},
+    ],
+}
+
+
+def _picking_task(service: SimulationService, runtime: RunRuntime, *, phase: str = "delivery_to_port") -> tuple[dict, dict, dict]:
+    """构造一个已完成 CTU 取货、正准备交付的单箱任务，并放在人工拣货位拓扑里。"""
+    slot = {
+        "nodeId": "node-storage",
+        "cellId": "cell-r1-c1",
+        "layer": 3,
+        "skuId": "sku-pick-cycle",
+        "skuName": "人工拣货测试料箱",
+        "qty": 4,
+    }
+    task = service._build_task(
+        PICK_STATION_TOPOLOGY,
+        "task-pick-cycle",
+        "ctu",
+        "direct",
+        [dict(slot)],
+        "cell-r5-c6",
+        False,
+        2,
+    )
+    task.update(
+        {
+            "status": "assigned",
+            "phase": phase,
+            "assignedRobotId": "r1",
+            "picked": 1,
+            "currentLineIndex": 1,
+        }
+    )
+    robot = runtime.state["robots"][0]
+    robot.update(
+        {
+            "currentTaskId": task["id"],
+            "currentCellId": "cell-r5-c6",
+            "currentNode": "cell-r5-c6",
+            "currentRow": 5,
+            "currentCol": 6,
+            "lastCellId": "cell-r4-c6",
+            "path": ["cell-r5-c6"],
+            "pathLayers": [1],
+            "load": 1,
+            "carrying": [dict(slot)],
+            "status": "moving",
+        }
+    )
+    runtime.state["tasks"] = [task]
+    runtime.state["inventory"] = []
+    return task, robot, slot
+
+
+def test_delivery_without_pick_station_still_completes_immediately():
+    # 回归：拓扑没有 pick_station 时，交付动作结束后任务直接完成（保持原行为）。
+    service = _service()
+    runtime = service._create_runtime("test-no-pick-station", TOPOLOGY, deepcopy(CONFIG))
+    task, robot, _ = _picking_task(service, runtime)
+    task["deliveryCellId"] = "cell-r5-c6"
+
+    # 交付动作链：升降对位 → 伸叉送箱 → 箱入输送线 → 完成
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
+
+    assert task["status"] == "completed"
+    assert task["phase"] == "completed"
+    assert robot["currentTaskId"] is None
+    assert robot["load"] == 0
+    assert robot["carrying"] == []
+
+
+def test_pick_station_cycle_returns_goods_to_original_slot_and_layer():
+    service = _service()
+    runtime = service._create_runtime("test-pick-cycle", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
+    task, robot, slot = _picking_task(service, runtime)
+
+    # 1) CTU 到达出入口：播放与取货对称的交付动作（升降对位 → 伸叉送箱 → 箱入输送线）
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "delivery_to_port"
+    assert robot["handlingAction"]["stage"] == "lifting"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "extending"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "stowing"
+
+    # 2) 交付动作完成：进入下层输送转运（尚未完成）
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_to_lift"
+    assert task["status"] != "completed"
+    assert task["pickStationCellId"] == "cell-r2-c6"
+    assert task["pickStationZoneId"] == "zone-pick"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+    assert robot["load"] == 0
+    assert robot["carrying"] == []
+    assert len(task["transitGoods"]) == 1
+
+    # 3) 下层输送计时结束进入升降移栽，升降结束进入上层输送
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "lift_to_upper"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["liftTicks"]
+    for _ in range(PICK_STATION_CONFIG["liftTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_to_pick"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+
+    # 4) 上层输送计时结束进入人工拣货
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "picking"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["pickTicks"]
+
+    # 5) 拣货计时结束：拣出的货物进入放置阶段
+    for _ in range(PICK_STATION_CONFIG["pickTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "place_goods"
+    assert task["dropZoneZoneId"] == "zone-drop"
+    assert task["dropZoneCellId"] == "cell-r4-c1"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["placeTicks"]
+    assert robot["status"] == "waiting"
+
+    # 6) 放置计时结束：记录放置货物快照，空货箱进入上层输送回程
+    for _ in range(PICK_STATION_CONFIG["placeTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_return"
+    assert task["placedGoods"] == task["lines"]
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+
+    # 7) 回程计时结束：CTU 到出入口取回货箱
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "pickup_from_port"
+    assert robot["targetCellId"] == task["deliveryCellId"]
+
+    # 8) CTU 到达出入口取回货箱，前往原库位回库
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "return_to_storage"
+    assert robot["targetCellId"] == slot["cellId"]
+    assert robot["targetLayer"] == slot["layer"]
+    assert len(robot["carrying"]) == 1
+
+    # 9) 回到原库位原层后完成，货箱放回原 nodeId + layer
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "completed"
+    assert task["status"] == "completed"
+    assert task["completedTick"] is not None
+    assert robot["carrying"] == []
+    assert robot["load"] == 0
+    restored = runtime.state["inventory"]
+    assert len(restored) == 1
+    assert restored[0]["nodeId"] == slot["nodeId"]
+    assert restored[0]["layer"] == slot["layer"]
+    assert restored[0]["qty"] == slot["qty"]
+    assert runtime.metrics["completedTasks"] == 1
+
+    phases = [entry["phase"] for entry in task["history"]]
+    for phase in (
+        "conveyor_to_lift",
+        "lift_to_upper",
+        "conveyor_to_pick",
+        "picking",
+        "place_goods",
+        "conveyor_return",
+        "pickup_from_port",
+        "return_to_storage",
+        "completed",
+    ):
+        assert phase in phases
+
+
+def test_pick_station_without_drop_zone_skips_place_goods():
+    # 有拣货位、无放置区：picking 结束后直接进入 conveyor_return，不产生放置数据。
+    service = _service()
+    runtime = service._create_runtime(
+        "test-pick-no-drop", PICK_STATION_NO_DROP_TOPOLOGY, deepcopy(PICK_STATION_CONFIG)
+    )
+    task, robot, _ = _picking_task(service, runtime)
+    # 交付动作 3 tick + 进入下层输送
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
+    # 下层输送 → 升降 → 上层输送 → 拣货
+    for _ in range(
+        PICK_STATION_CONFIG["conveyorTransferTicks"]
+        + PICK_STATION_CONFIG["liftTicks"]
+        + PICK_STATION_CONFIG["conveyorTransferTicks"]
+    ):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "picking"
+    # 拣货计时结束：没有放置区，直接回程
+    for _ in range(PICK_STATION_CONFIG["pickTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_return"
+    assert task["dropZoneZoneId"] is None
+    assert task["dropZoneCellId"] is None
+    assert task["placedGoods"] == []
+
+
+def test_complete_picking_finishes_picking_immediately():
+    service = _service()
+    runtime = service._create_runtime("test-complete-picking", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
+    task, robot, _ = _picking_task(service, runtime, phase="picking")
+    task["pickStationZoneId"] = "zone-pick"
+    task["pickStationCellId"] = "cell-r2-c6"
+    task["remainingStageTicks"] = 6
+    service.runtimes[runtime.run_id] = runtime
+
+    asyncio.run(service.complete_picking(runtime.run_id, task["id"]))
+
+    # 拓扑有放置区：跳过拣货后进入拣货放置阶段
+    assert task["phase"] == "place_goods"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["placeTicks"]
+    assert task["dropZoneZoneId"] == "zone-drop"
+    assert task["dropZoneCellId"] == "cell-r4-c1"
+    assert robot["status"] == "waiting"
