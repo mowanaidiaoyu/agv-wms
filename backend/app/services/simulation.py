@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import uuid
 from copy import deepcopy
@@ -26,6 +27,17 @@ from .pathfinding import (
     shuttle_rack_slots,
 )
 from .simulation_config import build_simulation_config
+from .unified_transfer import (
+    apply_drop,
+    apply_pick,
+    build_playback_route,
+    build_transfer_runtime,
+    cancel_transfer as cancel_transfer_inventory,
+    plan_transfer,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 def now_dt() -> datetime:
@@ -43,10 +55,15 @@ CTU_RACK_LAYERS = 17
 # 每 tick 的推进间隔（秒）。调大=仿真更慢、机器人每步更易看清。
 # 每个 tick 仍只移动一个格子，缩短调度间隔即可在不改变路径、避障和取货逻辑的前提下提速 2.5 倍。
 TICK_INTERVAL_SECONDS = 0.6
+DEFAULT_SPEED_MULTIPLIER = 2
+SUPPORTED_SPEED_MULTIPLIERS = {1, 2, 4}
+TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed", "exception"}
+TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position"}
 # 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
 REROUTE_AFTER_BLOCK_TICKS = 2
 YIELD_AFTER_BLOCK_TICKS = 4
 MIN_SAFETY_TICKS = 2000
+WEBSOCKET_SEND_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass
@@ -62,6 +79,10 @@ class RunRuntime:
     task_handle: asyncio.Task | None = None
     alert_memory: dict[str, int] = field(default_factory=dict)
     last_broadcast_inventory_size: int = -1
+    inventory_delta: list[dict[str, Any]] = field(default_factory=list)
+    speed_multiplier: int = DEFAULT_SPEED_MULTIPLIER
+    initial_state: dict[str, Any] = field(default_factory=dict)
+    initial_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 class WebSocketHub:
@@ -79,9 +100,26 @@ class WebSocketHub:
     async def broadcast(self, run_id: str, message: dict[str, Any]) -> None:
         for websocket in list(self.connections.get(run_id, [])):
             try:
-                await websocket.send_json(message)
+                # A disconnected or back-pressured browser must not stop the
+                # single authoritative simulation clock.
+                await asyncio.wait_for(
+                    websocket.send_json(message),
+                    timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                )
             except Exception:
+                logger.exception(
+                    "Simulation WebSocket send failed: run_id=%s type=%s tick=%s",
+                    run_id,
+                    message.get("type"),
+                    message.get("tick"),
+                )
                 self.disconnect(run_id, websocket)
+                # Removing a socket from the hub is not enough: the browser
+                # otherwise remains OPEN and disables its HTTP polling fallback.
+                try:
+                    await websocket.close(code=1011, reason="simulation stream failed")
+                except Exception:
+                    logger.debug("Simulation WebSocket was already closed: run_id=%s", run_id)
 
 
 class SimulationService:
@@ -90,12 +128,17 @@ class SimulationService:
         self.hub = WebSocketHub()
         self.runtimes: dict[str, RunRuntime] = {}
 
-    async def start(self, topology: dict[str, Any], orders: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    async def start(
+        self,
+        topology: dict[str, Any],
+        orders: list[dict[str, Any]] | None = None,
+        transfers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         config = build_simulation_config(topology)
         if not config["robots"]:
             raise ValueError("当前拓扑没有 CTU 或四向车设备，无法启动仿真")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
-        runtime = self._create_runtime(run_id, topology, config, orders)
+        runtime = self._create_runtime(run_id, topology, config, orders, transfers)
         self.runtimes[run_id] = runtime
         self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
@@ -103,6 +146,8 @@ class SimulationService:
 
     def pause(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
+        if runtime.stopped or runtime.state.get("status") in {"stopped", "completed"}:
+            raise ValueError("Stopped or completed Run cannot be paused; reset it first")
         runtime.paused = True
         runtime.state["status"] = "paused"
         self._persist(runtime)
@@ -110,6 +155,8 @@ class SimulationService:
 
     def resume(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
+        if runtime.stopped or runtime.state.get("status") in {"stopped", "completed"}:
+            raise ValueError("Stopped or completed Run cannot be resumed; reset it first")
         runtime.paused = False
         runtime.state["status"] = "running"
         self._persist(runtime)
@@ -122,6 +169,129 @@ class SimulationService:
         runtime.state["stopReason"] = "user"
         self._persist(runtime)
         return {"runId": run_id, "status": "stopped"}
+
+    def set_speed(self, run_id: str, multiplier: int) -> dict[str, Any]:
+        runtime = self._require_runtime(run_id)
+        if multiplier not in SUPPORTED_SPEED_MULTIPLIERS:
+            raise ValueError("Simulation speed must be one of 1, 2, or 4")
+        if runtime.stopped or runtime.state.get("status") in {"stopped", "completed"}:
+            raise ValueError("Stopped or completed Run speed cannot be changed; reset it first")
+        runtime.speed_multiplier = multiplier
+        runtime.state["speedMultiplier"] = multiplier
+        runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["updatedAt"] = now_dt().isoformat()
+        self._record_event(runtime, runtime.state["tick"], "simulation_speed_changed", {"multiplier": multiplier})
+        self._persist(runtime)
+        return {"runId": run_id, "status": runtime.state["status"], "speedMultiplier": multiplier}
+
+    async def reset(self, run_id: str) -> dict[str, Any]:
+        runtime = self._require_runtime(run_id)
+        runtime.stopped = True
+        if runtime.task_handle and not runtime.task_handle.done():
+            runtime.task_handle.cancel()
+            try:
+                await runtime.task_handle
+            except asyncio.CancelledError:
+                pass
+        runtime.state = deepcopy(runtime.initial_state)
+        runtime.metrics = deepcopy(runtime.initial_metrics)
+        runtime.state["status"] = "paused"
+        runtime.state["stopReason"] = None
+        runtime.state["updatedAt"] = now_dt().isoformat()
+        runtime.paused = True
+        runtime.stopped = False
+        runtime.alerts = []
+        runtime.alert_memory.clear()
+        runtime.last_broadcast_inventory_size = -1
+        runtime.inventory_delta = []
+        runtime.speed_multiplier = DEFAULT_SPEED_MULTIPLIER
+        runtime.state["speedMultiplier"] = DEFAULT_SPEED_MULTIPLIER
+        runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.task_handle = asyncio.create_task(self._loop(runtime))
+        self._record_event(runtime, 0, "simulation_reset", {"runId": run_id})
+        self._persist(runtime)
+        return {"runId": run_id, "status": "paused"}
+
+    def cancel_transfer(self, run_id: str, task_id: str) -> dict[str, Any]:
+        runtime = self._require_runtime(run_id)
+        task = find_task(runtime.state.get("tasks", []), task_id)
+        if not task or task.get("mode") != "shuttle_transfer":
+            raise KeyError(task_id)
+        changed = cancel_transfer_inventory(runtime.state, task, runtime.state["tick"])
+        robot = next((item for item in runtime.state["robots"] if item.get("currentTaskId") == task_id), None)
+        if robot:
+            robot["currentTaskId"] = None
+            robot["status"] = "idle"
+            robot["phaseLabel"] = "待命"
+            robot["load"] = 0
+            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
+            robot["pathStages"] = ["cancelled"]
+        if changed:
+            self._record_event(runtime, runtime.state["tick"], "transfer_cancelled", {"taskId": task_id})
+        self._refresh_metrics(runtime)
+        self._persist(runtime)
+        return task
+
+    def fail_transfer(self, run_id: str, task_id: str, reason: str) -> dict[str, Any]:
+        runtime = self._require_runtime(run_id)
+        task = find_task(runtime.state.get("tasks", []), task_id)
+        if not task or task.get("mode") != "shuttle_transfer":
+            raise KeyError(task_id)
+        if task.get("status") in {"completed", "cancelled"}:
+            raise ValueError("Terminal transfer cannot be failed")
+        task["status"] = "failed"
+        task["phase"] = "failed"
+        task["phaseLabel"] = "运输失败（库存状态已冻结）"
+        task["failureReason"] = reason
+        robot = next((item for item in runtime.state["robots"] if item.get("currentTaskId") == task_id), None)
+        if robot:
+            robot["currentTaskId"] = None
+            robot["status"] = "exception"
+            robot["phaseLabel"] = task["phaseLabel"]
+        self._record_event(runtime, runtime.state["tick"], "transfer_failed", {"taskId": task_id, "reason": reason})
+        self._persist(runtime)
+        return task
+
+    async def retry_transfer(self, run_id: str, task_id: str) -> dict[str, Any]:
+        runtime = self._require_runtime(run_id)
+        task = find_task(runtime.state.get("tasks", []), task_id)
+        if not task or task.get("mode") != "shuttle_transfer":
+            raise KeyError(task_id)
+        if task.get("status") != "failed":
+            raise ValueError("Only failed transfers can be retried")
+        task["failureReason"] = None
+        if int(task.get("inTransitQuantity", 0)) > 0:
+            robot = next(item for item in runtime.state["robots"] if item["id"] == task["requestedVehicleId"])
+            current_node = f"L{round(float(robot.get('currentLayer', 1)))}-r{robot['currentRow']}-c{robot['currentCol']}"
+            task["plan"] = plan_transfer(
+                runtime.topology,
+                current_node,
+                task["destinationTrackNode"],
+                task["plan"]["algorithm"],
+            )
+            self._start_transfer_route(runtime, robot, task)
+            task["status"] = "assigned"
+        else:
+            task["status"] = "pending"
+            task["phase"] = "reserved"
+            task["phaseLabel"] = "等待重试调度"
+            robot = next(
+                item for item in runtime.state["robots"]
+                if item["id"] == task["requestedVehicleId"]
+            )
+            robot["currentTaskId"] = None
+            robot["status"] = "idle"
+            robot["phaseLabel"] = "待命"
+        runtime.stopped = False
+        runtime.paused = False
+        runtime.state["status"] = "running"
+        runtime.state["stopReason"] = None
+        if runtime.task_handle is None or runtime.task_handle.done():
+            runtime.task_handle = asyncio.create_task(self._loop(runtime))
+        self._record_event(runtime, runtime.state["tick"], "transfer_retried", {"taskId": task_id})
+        self._persist(runtime)
+        return task
 
     def get_state(self, run_id: str) -> dict[str, Any]:
         runtime = self.runtimes.get(run_id)
@@ -153,6 +323,7 @@ class SimulationService:
         topology: dict[str, Any],
         config: dict[str, Any],
         orders: list[dict[str, Any]] | None = None,
+        transfers: list[dict[str, Any]] | None = None,
     ) -> RunRuntime:
         node_lookup = build_node_lookup(topology)
         robots: list[dict[str, Any]] = []
@@ -195,23 +366,37 @@ class SimulationService:
                 }
             )
 
+        transfer_tasks, transfer_robots, transfer_inventory, transfer_events = build_transfer_runtime(
+            topology, transfers or []
+        )
+        existing_robot_ids = {robot["id"] for robot in robots}
+        robots.extend(robot for robot in transfer_robots if robot["id"] not in existing_robot_ids)
+
         inventory = build_inventory(topology)
         if orders:
             tasks, order_states = self._seed_order_tasks(topology, orders, inventory)
+        elif transfers:
+            tasks, order_states = [], []
         else:
             tasks = self._seed_tasks(topology, config, inventory)
             order_states = []
+        tasks.extend(transfer_tasks)
         state = {
             "id": run_id,
             "status": "running",
             "stopReason": None,
             "tick": 0,
+            "speedMultiplier": DEFAULT_SPEED_MULTIPLIER,
+            "tickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
+            "eventCount": len(transfer_events),
             "topologyId": topology["id"],
-            "orderDriven": bool(orders),
+            "orderDriven": bool(orders or transfers),
             "robots": robots,
             "tasks": tasks,
             "orders": order_states,
             "inventory": inventory,
+            "transferInventory": transfer_inventory,
+            "transferEvents": transfer_events,
             "alerts": [],
             "queues": {"conveyor": [], "station": [], "buffer": []},
             "createdAt": now_dt().isoformat(),
@@ -233,13 +418,20 @@ class SimulationService:
             "conveyorQueueDepth": 0,
             "bufferOccupancy": 0,
         }
-        return RunRuntime(
+        runtime = RunRuntime(
             run_id=run_id,
             topology=deepcopy(topology),
             config=deepcopy(config),
             state=state,
             metrics=metrics,
+            speed_multiplier=DEFAULT_SPEED_MULTIPLIER,
         )
+        # Every WebSocket connection receives one complete snapshot. Normal
+        # tick frames can therefore omit the potentially very large inventory.
+        runtime.last_broadcast_inventory_size = len(inventory)
+        runtime.initial_state = deepcopy(state)
+        runtime.initial_metrics = deepcopy(metrics)
+        return runtime
 
     def _seed_order_tasks(
         self,
@@ -449,23 +641,54 @@ class SimulationService:
             nominal_duration * 20,
             int(runtime.config.get("maxDurationTicks") or 0),
         )
-        while runtime.state["tick"] < safety_limit:
-            if runtime.stopped:
-                break
-            if runtime.paused:
-                await asyncio.sleep(0.25)
-                continue
-            self._step_runtime(runtime, persist=True, broadcast=True)
-            if self._all_tasks_completed(runtime):
-                break
-            await asyncio.sleep(TICK_INTERVAL_SECONDS)
+        try:
+            while runtime.state["tick"] < safety_limit:
+                if runtime.stopped:
+                    break
+                if runtime.paused:
+                    await asyncio.sleep(0.25)
+                    continue
+                # Empty queues and already-terminal restored snapshots complete
+                # without manufacturing one extra tick.
+                if self._all_tasks_completed(runtime):
+                    break
+                # State mutation/persistence and transport are deliberately
+                # serialized. The previous fire-and-forget broadcast allowed
+                # large first-tick inventory frames to overlap later sends.
+                self._step_runtime(runtime, persist=True)
+                await self._broadcast_tick(runtime)
+                if self._all_tasks_completed(runtime):
+                    break
+                await asyncio.sleep(self._tick_delay(runtime))
+        except asyncio.CancelledError:
+            # reset() intentionally cancels the old loop before restoring the
+            # initial snapshot; it must not be reported as a runtime failure.
+            raise
+        except Exception as error:
+            await self._handle_loop_failure(runtime, error)
+            return
 
         if runtime.stopped:
             runtime.state["status"] = "stopped"
             runtime.state["stopReason"] = runtime.state.get("stopReason") or "user"
         elif self._all_tasks_completed(runtime):
-            runtime.state["status"] = "completed"
-            runtime.state["stopReason"] = None
+            failed = [
+                task for task in runtime.state.get("tasks", [])
+                if task.get("status") in {"failed", "exception"}
+            ]
+            failed_orders = [
+                order for order in runtime.state.get("orders", [])
+                if order.get("status") == "exception"
+            ]
+            runtime.state["status"] = "stopped" if failed or failed_orders else "completed"
+            if failed or failed_orders:
+                runtime.state["stopReason"] = (
+                    "transfer_failed"
+                    if failed and all(task.get("mode") == "shuttle_transfer" for task in failed) and not failed_orders
+                    else "task_failed"
+                )
+            else:
+                runtime.state["stopReason"] = None
         else:
             runtime.state["status"] = "stopped"
             runtime.state["stopReason"] = "safety_limit"
@@ -486,11 +709,65 @@ class SimulationService:
         self._persist(runtime)
         await self.hub.broadcast(runtime.run_id, {"type": "simulation_completed", "tick": runtime.state["tick"], "payload": runtime.metrics})
 
+    async def _handle_loop_failure(self, runtime: RunRuntime, error: Exception) -> None:
+        tick = int(runtime.state.get("tick", 0))
+        error_type = type(error).__name__
+        error_message = str(error) or error_type
+        logger.exception(
+            "Simulation loop failed: run_id=%s tick=%s error=%s",
+            runtime.run_id,
+            tick,
+            error_message,
+        )
+        runtime.stopped = True
+        runtime.paused = False
+        runtime.state["status"] = "stopped"
+        runtime.state["stopReason"] = "runtime_error"
+        runtime.state["runtimeError"] = {
+            "type": error_type,
+            "message": error_message,
+            "tick": tick,
+        }
+        runtime.state["updatedAt"] = now_dt().isoformat()
+        alert = {
+            "category": "simulation_runtime_error",
+            "level": "error",
+            "message": f"仿真后台任务在 Tick {tick} 异常停止：{error_message}",
+            "tick": tick,
+            "details": {"runId": runtime.run_id, "errorType": error_type},
+            "suggestion": "查看后端异常堆栈并修复对应任务阶段后重置 Run。",
+        }
+        runtime.alerts.append(alert)
+        runtime.state["alerts"] = runtime.alerts[-10:]
+        try:
+            self._record_event(runtime, tick, "simulation_runtime_error", runtime.state["runtimeError"])
+        except Exception:
+            logger.exception("Failed to record simulation runtime error: run_id=%s", runtime.run_id)
+        try:
+            self._persist(runtime)
+        except Exception:
+            logger.exception("Failed to persist simulation runtime error: run_id=%s", runtime.run_id)
+        await self.hub.broadcast(
+            runtime.run_id,
+            {
+                "type": "simulation_error",
+                "tick": tick,
+                "payload": self._tick_payload(runtime),
+            },
+        )
+
     def _all_tasks_completed(self, runtime: RunRuntime) -> bool:
         tasks = runtime.state.get("tasks", [])
-        return not tasks or all(task.get("status") == "completed" for task in tasks)
+        orders = runtime.state.get("orders", [])
+        tasks_terminal = all(task.get("status") in TERMINAL_TASK_STATUSES for task in tasks)
+        orders_terminal = all(order.get("status") in {"completed", "exception", "cancelled"} for order in orders)
+        return tasks_terminal and orders_terminal
 
-    def _step_runtime(self, runtime: RunRuntime, *, persist: bool, broadcast: bool) -> None:
+    def _tick_delay(self, runtime: RunRuntime) -> float:
+        multiplier = runtime.speed_multiplier if runtime.speed_multiplier in SUPPORTED_SPEED_MULTIPLIERS else DEFAULT_SPEED_MULTIPLIER
+        return TICK_INTERVAL_SECONDS / multiplier
+
+    def _step_runtime(self, runtime: RunRuntime, *, persist: bool) -> None:
         runtime.state["tick"] += 1
         runtime.state["updatedAt"] = now_dt().isoformat()
         tick = runtime.state["tick"]
@@ -501,8 +778,6 @@ class SimulationService:
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
-        if broadcast:
-            asyncio.create_task(self._broadcast_tick(runtime))
         if persist:
             self._persist(runtime)
 
@@ -577,7 +852,54 @@ class SimulationService:
         if not pending:
             return
         pending.sort(key=lambda task: (task["priority"], task["id"]))
-        matches = assign_tasks(runtime.state["robots"], pending, runtime.topology)
+        transfer_task_ids: set[str] = set()
+        for task in pending:
+            if task.get("mode") != "shuttle_transfer":
+                continue
+            robot = next(
+                (
+                    item for item in runtime.state["robots"]
+                    if item["id"] == task.get("requestedVehicleId") and item["status"] == "idle"
+                ),
+                None,
+            )
+            if robot is None:
+                requested = next(
+                    (item for item in runtime.state["robots"] if item["id"] == task.get("requestedVehicleId")),
+                    None,
+                )
+                if requested is None:
+                    self._fail_pending_task(runtime, task, "requested_vehicle_missing")
+                elif requested.get("failed") or requested.get("status") in {"failed", "exception"}:
+                    self._fail_pending_task(runtime, task, "requested_vehicle_unavailable")
+                continue
+            transfer_task_ids.add(task["id"])
+            robot["currentTaskId"] = task["id"]
+            robot["status"] = "handling"
+            robot["phaseLabel"] = "到达源库位，准备取货"
+            robot["load"] = 0
+            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
+            robot["pathStages"] = ["pickup_wait"]
+            task["assignedRobotId"] = robot["id"]
+            task["status"] = "assigned"
+            task["phase"] = "pickup_wait"
+            task["phaseLabel"] = "到达源库位，准备取货"
+            task["pickupReadyTick"] = runtime.state["tick"] + 1
+            task["startedTick"] = runtime.state["tick"]
+            task["history"].append({"tick": runtime.state["tick"], "phase": task["phase"], "status": task["status"]})
+            self._record_event(
+                runtime,
+                runtime.state["tick"],
+                "transfer_stage",
+                {"taskId": task["id"], "stage": "pickup_wait", "robotId": robot["id"]},
+            )
+
+        matches = assign_tasks(
+            runtime.state["robots"],
+            [task for task in pending if task["id"] not in transfer_task_ids],
+            runtime.topology,
+        )
         for robot_id, task_id in matches:
             robot = next(item for item in runtime.state["robots"] if item["id"] == robot_id)
             task = find_task(runtime.state["tasks"], task_id)
@@ -591,6 +913,7 @@ class SimulationService:
                 task["sourceLayer"],
                 stop_adjacent=True,
             ):
+                self._fail_pending_task(runtime, task, "source_unreachable")
                 continue
             robot["currentTaskId"] = task_id
             robot["status"] = "moving"
@@ -606,6 +929,66 @@ class SimulationService:
             task["etaTicks"] = max(len(robot["path"]) - 1, 1)
             task["history"].append({"tick": runtime.state["tick"], "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, runtime.state["tick"], "task_state_changed", {"taskId": task_id, "status": "assigned", "robotId": robot_id, "phase": task["phase"]})
+
+        matched_task_ids = transfer_task_ids | {task_id for _, task_id in matches}
+        for task in pending:
+            if task["id"] in matched_task_ids or task.get("status") != "pending":
+                continue
+            compatible = [
+                robot for robot in runtime.state["robots"]
+                if robot.get("type") == task.get("robotType")
+                and not robot.get("failed")
+                and robot.get("status") not in {"failed", "exception"}
+            ]
+            if not compatible:
+                self._fail_pending_task(runtime, task, "no_compatible_robot")
+                continue
+            # Busy compatible robots may become available later. Only declare
+            # the task unreachable when every compatible robot is idle and the
+            # static topology offers no path from any of them to the source.
+            if all(robot.get("status") == "idle" for robot in compatible) and not any(
+                self._can_reach_task(runtime, robot, task) for robot in compatible
+            ):
+                self._fail_pending_task(runtime, task, "source_unreachable")
+
+    def _can_reach_task(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> bool:
+        if robot.get("type") == "shuttle":
+            return bool(shortest_path_shuttle(
+                runtime.topology,
+                robot["currentCellId"],
+                robot.get("currentLayer", 1),
+                task["sourceCellId"],
+                task.get("sourceLayer", 1),
+                runtime.config["pathPolicy"],
+            ))
+        return bool(shortest_path(
+            runtime.topology,
+            robot["currentCellId"],
+            task["sourceCellId"],
+            runtime.config["pathPolicy"],
+            avoid_storage=True,
+        ))
+
+    def _fail_pending_task(self, runtime: RunRuntime, task: dict[str, Any], reason: str) -> None:
+        if task.get("status") != "pending":
+            return
+        tick = runtime.state["tick"]
+        task["status"] = "failed"
+        task["phase"] = "failed"
+        task["phaseLabel"] = f"Task cannot be scheduled: {reason}"
+        task["failureReason"] = reason
+        task["completedTick"] = tick
+        task.setdefault("history", []).append({"tick": tick, "phase": "failed", "status": "failed"})
+        self._record_event(runtime, tick, "task_failed", {"taskId": task["id"], "reason": reason})
+        self._emit_alert(
+            runtime,
+            tick,
+            category=f"task_unassignable:{task['id']}",
+            level="error",
+            message=f"Task {task['id']} cannot be scheduled ({reason}).",
+            details={"taskId": task["id"], "reason": reason},
+            suggestion="Check the requested vehicle, device availability, and topology reachability.",
+        )
 
     def _move_robots(self, runtime: RunRuntime) -> None:
         movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle", "exception"}]
@@ -637,9 +1020,11 @@ class SimulationService:
                 continue
 
             path_layers = robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(path)
+            path_stages = robot.get("pathStages") or [task.get("phase", "moving")] * len(path)
             current_cell_id = robot["currentCellId"]
             next_cell_id = path[1]
             next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
+            next_stage = path_stages[1] if len(path_stages) > 1 else task.get("phase", "moving")
             occupied_cells.discard(current_cell_id)
 
             if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
@@ -667,9 +1052,29 @@ class SimulationService:
             robot["currentLayer"] = next_layer
             robot["path"] = path[1:]
             robot["pathLayers"] = path_layers[1:]
+            robot["pathStages"] = path_stages[1:]
             robot["battery"] = max(10.0, robot["battery"] - 0.35)
             robot["waitTicks"] = 0
-            robot["phaseLabel"] = task["phaseLabel"]
+            if task.get("mode") == "shuttle_transfer":
+                stage_labels = {
+                    "track": "四向车沿规划轨道行驶",
+                    "enter_lift": f"进入 {task['plan'].get('chosen_lift') or '升降机'} / 等待",
+                    "lift_moving": f"{task['plan'].get('chosen_lift') or '升降机'} 升降中",
+                    "exit_lift": f"离开 {task['plan'].get('chosen_lift') or '升降机'}",
+                }
+                previous_stage = task.get("phase")
+                task["phase"] = next_stage
+                task["phaseLabel"] = stage_labels.get(next_stage, "四向车运输中")
+                robot["phaseLabel"] = task["phaseLabel"]
+                if previous_stage != next_stage:
+                    self._record_event(
+                        runtime,
+                        runtime.state["tick"],
+                        "transfer_stage",
+                        {"taskId": task["id"], "stage": next_stage, "layer": next_layer},
+                    )
+            else:
+                robot["phaseLabel"] = task["phaseLabel"]
             occupied_cells.add(next_cell_id)
             reserved_targets.add(next_cell_id)
             self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]})
@@ -847,6 +1252,7 @@ class SimulationService:
             if slot.get("nodeId") == node_id and int(slot.get("layer", 1)) == layer:
                 robot.setdefault("carrying", []).append(slot)
                 del inventory[index]
+                runtime.inventory_delta.append({"op": "remove", "nodeId": node_id, "layer": layer})
                 return slot
         return None
 
@@ -865,8 +1271,8 @@ class SimulationService:
 
         if action is None:
             if robot.get("load", 0) >= capacity or line_index >= len(lines):
-                self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"])
-                task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
+                if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"]):
+                    task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
                 return
             line = lines[line_index]
             target_layer = max(1, min(CTU_RACK_LAYERS, int(line.get("layer", 1))))
@@ -912,8 +1318,19 @@ class SimulationService:
                 robot["handlingAction"] = None
                 robot["status"] = "exception"
                 robot["phaseLabel"] = "取货异常：目标库位无货"
-                task["status"] = "exception"
+                task["status"] = "failed"
+                task["phase"] = "failed"
                 task["phaseLabel"] = robot["phaseLabel"]
+                task["failureReason"] = "pickup_inventory_missing"
+                task["completedTick"] = tick
+                task.setdefault("history", []).append({"tick": tick, "phase": "failed", "status": "failed"})
+                robot["currentTaskId"] = None
+                self._record_event(
+                    runtime,
+                    tick,
+                    "task_failed",
+                    {"taskId": task["id"], "reason": task["failureReason"], "robotId": robot["id"]},
+                )
                 self._emit_alert(
                     runtime,
                     tick,
@@ -944,12 +1361,12 @@ class SimulationService:
             robot["handlingAction"] = None
             if task["currentLineIndex"] < len(lines) and robot["load"] < capacity:
                 next_line = lines[task["currentLineIndex"]]
-                self._set_robot_leg(runtime, robot, task, "pickup_from_ctu", next_line["cellId"], next_line.get("layer", 1))
-                task["phaseLabel"] = f"CTU 取货 {task['picked']}/{len(lines)}"
-                robot["phaseLabel"] = f"CTU 取货 {robot['load']}/{capacity}"
+                if self._set_robot_leg(runtime, robot, task, "pickup_from_ctu", next_line["cellId"], next_line.get("layer", 1)):
+                    task["phaseLabel"] = f"CTU 取货 {task['picked']}/{len(lines)}"
+                    robot["phaseLabel"] = f"CTU 取货 {robot['load']}/{capacity}"
             else:
-                self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"])
-                task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
+                if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"]):
+                    task["phaseLabel"] = f"输送线交付（{task['picked']} 箱）"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             event: dict[str, Any] = {
                 "taskId": task["id"],
@@ -966,6 +1383,70 @@ class SimulationService:
 
     def _advance_robot_phase(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
         tick = runtime.state["tick"]
+        if task.get("mode") == "shuttle_transfer":
+            if task["phase"] == "pickup_wait":
+                if tick < int(task.get("pickupReadyTick") or tick):
+                    return
+                try:
+                    changed = apply_pick(runtime.state, task, tick)
+                    robot["load"] = int(task["quantity"])
+                    robot["carrying"] = [{
+                        "nodeId": task["sourceLocationId"],
+                        "cellId": task["sourceCellId"],
+                        "layer": task["sourceLayer"],
+                        "skuId": task["skuId"],
+                        "skuName": task["skuName"],
+                        "qty": task["quantity"],
+                    }]
+                    self._start_transfer_route(runtime, robot, task)
+                except ValueError as error:
+                    task["status"] = "failed"
+                    task["phase"] = "failed"
+                    task["phaseLabel"] = str(error)
+                    task["failureReason"] = str(error)
+                    robot["status"] = "exception"
+                    robot["phaseLabel"] = task["phaseLabel"]
+                    self._record_event(runtime, tick, "transfer_failed", {"taskId": task["id"], "reason": str(error)})
+                    return
+                if changed:
+                    self._record_event(runtime, tick, "inventory_pick", {"taskId": task["id"], "quantity": task["quantity"]})
+                return
+            if task["phase"] in {"track", "enter_lift", "lift_moving", "exit_lift", "moving_to_dropoff"}:
+                task["phase"] = "drop_wait"
+                task["phaseLabel"] = "到达目标库位，准备放货"
+                task["dropReadyTick"] = tick + 1
+                robot["status"] = "handling"
+                robot["phaseLabel"] = task["phaseLabel"]
+                return
+            if task["phase"] == "drop_wait":
+                if tick < int(task.get("dropReadyTick") or tick):
+                    return
+                try:
+                    changed = apply_drop(runtime.state, task, tick)
+                except ValueError as error:
+                    task["status"] = "failed"
+                    task["phase"] = "failed"
+                    task["phaseLabel"] = str(error)
+                    robot["status"] = "exception"
+                    robot["phaseLabel"] = task["phaseLabel"]
+                    self._record_event(runtime, tick, "transfer_failed", {"taskId": task["id"], "reason": str(error)})
+                    return
+                task["status"] = "completed"
+                task["phase"] = "completed"
+                task["phaseLabel"] = "放货完成"
+                task["completedTick"] = tick
+                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+                robot["currentTaskId"] = None
+                robot["status"] = "idle"
+                robot["phaseLabel"] = "待命"
+                robot["load"] = 0
+                robot["carrying"] = []
+                runtime.metrics["completedTasks"] += 1
+                runtime.metrics["throughput"] += int(task["quantity"])
+                if changed:
+                    self._record_event(runtime, tick, "inventory_drop", {"taskId": task["id"], "quantity": task["quantity"]})
+                return
+
         if task["phase"] == "pickup_from_ctu":
             self._advance_ctu_pickup_action(runtime, robot, task)
             return
@@ -973,8 +1454,8 @@ class SimulationService:
         if task["phase"] == "pickup_from_shuttle":
             robot["load"] = min(robot.get("capacity", 1), robot.get("load", 0) + 1)
             task["picked"] = task.get("picked", 0) + 1
-            self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=1)
-            task["phaseLabel"] = "输送线交付"
+            if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=1):
+                task["phaseLabel"] = "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
@@ -1010,6 +1491,27 @@ class SimulationService:
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return
+
+    def _start_transfer_route(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        paths, layers, stages = build_playback_route(task["plan"], TICK_INTERVAL_SECONDS)
+        if not paths:
+            raise ValueError("Transfer plan contains no playback route")
+        robot["path"] = paths
+        robot["pathLayers"] = layers
+        robot["pathStages"] = stages
+        robot["targetCellId"] = task["deliveryCellId"]
+        robot["targetLayer"] = task["targetLayer"]
+        robot["status"] = "moving"
+        robot["phaseLabel"] = "四向车沿规划轨道行驶"
+        robot["currentTaskId"] = task["id"]
+        task["phase"] = "moving_to_dropoff"
+        task["phaseLabel"] = robot["phaseLabel"]
+        task["etaTicks"] = max(1, len(paths) - 1)
 
     def _robot_path_to(
         self,
@@ -1054,22 +1556,47 @@ class SimulationService:
         robot["targetCellId"] = target_cell_id
         return True
 
-    def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> None:
+    def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> bool:
         if not target_cell_id:
-            return
-        self._robot_path_to(
+            self._fail_active_task(runtime, robot, task, "target_missing")
+            return False
+        if not self._robot_path_to(
             runtime,
             robot,
             target_cell_id,
             target_layer,
             stop_adjacent=phase == "pickup_from_ctu",
-        )
+        ):
+            self._fail_active_task(runtime, robot, task, f"{phase}_unreachable")
+            return False
         robot["handlingAction"] = None
         robot["status"] = "moving"
         robot["phaseLabel"] = self._phase_label(phase)
         task["phase"] = phase
         task["phaseLabel"] = self._phase_label(phase)
         task["etaTicks"] = max(len(robot["path"]) - 1, 1)
+        return True
+
+    def _fail_active_task(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        reason: str,
+    ) -> None:
+        tick = runtime.state["tick"]
+        task["status"] = "failed"
+        task["phase"] = "failed"
+        task["phaseLabel"] = f"Task failed: {reason}"
+        task["failureReason"] = reason
+        task["completedTick"] = tick
+        task.setdefault("history", []).append({"tick": tick, "phase": "failed", "status": "failed"})
+        robot["status"] = "exception"
+        robot["phaseLabel"] = task["phaseLabel"]
+        robot["currentTaskId"] = None
+        robot["path"] = [robot["currentCellId"]]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        self._record_event(runtime, tick, "task_failed", {"taskId": task["id"], "reason": reason, "robotId": robot["id"]})
 
     def _detect_contention(self, runtime: RunRuntime) -> None:
         tick = runtime.state["tick"]
@@ -1101,7 +1628,10 @@ class SimulationService:
                 self._record_event(runtime, tick, "deadlock_detected", {"waitingChain": waiting_chain, "message": "检测到潜在死锁"})
 
     def _refresh_metrics(self, runtime: RunRuntime) -> None:
-        pending = [task for task in runtime.state["tasks"] if task["status"] != "completed"]
+        pending = [
+            task for task in runtime.state["tasks"]
+            if task["status"] not in TERMINAL_TASK_STATUSES
+        ]
         active = [robot for robot in runtime.state["robots"] if robot["status"] in {"moving", "handling", "returning"}]
         blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
         completed = [task for task in runtime.state["tasks"] if task["completedTick"] is not None and task["startedTick"] is not None]
@@ -1129,7 +1659,7 @@ class SimulationService:
                 continue
             completed = [task for task in related if task.get("status") == "completed"]
             active = [task for task in related if task.get("status") in {"assigned", "running"}]
-            exceptions = [task for task in related if task.get("status") == "exception"]
+            exceptions = [task for task in related if task.get("status") in {"exception", "failed"}]
             picked_by_sku: dict[str, int] = {}
             for task in related:
                 picked_count = max(0, int(task.get("picked", 0)))
@@ -1154,14 +1684,16 @@ class SimulationService:
             pickup_progress = picked_quantity / total_quantity if total_quantity else 0
             delivery_progress = len(completed) / len(related)
             order["progress"] = round(pickup_progress * 80 + delivery_progress * 20)
-            if len(completed) == len(related):
+            if len(completed) == len(related) and not order.get("missingQuantity"):
                 order["status"] = "completed"
                 order["statusLabel"] = "已完成"
                 order["progress"] = 100
                 order["completedTick"] = max(task.get("completedTick") or 0 for task in completed)
-            elif exceptions:
+            elif exceptions or order.get("missingQuantity"):
                 order["status"] = "exception"
-                order["statusLabel"] = exceptions[0].get("phaseLabel") or "取货异常"
+                order["statusLabel"] = (
+                    exceptions[0].get("phaseLabel") if exceptions else "库存不足"
+                ) or "取货异常"
             elif active:
                 order["status"] = "executing"
                 order["statusLabel"] = active[0].get("phaseLabel") or "执行中"
@@ -1173,6 +1705,8 @@ class SimulationService:
 
     def _record_event(self, runtime: RunRuntime, tick: int, event_type: str, payload: dict[str, Any]) -> None:
         self.repo.add_event(runtime.run_id, tick, event_type, payload)
+        if event_type not in TELEMETRY_EVENT_TYPES:
+            runtime.state["eventCount"] = int(runtime.state.get("eventCount", 0)) + 1
 
     def _emit_alert(
         self,
@@ -1209,11 +1743,9 @@ class SimulationService:
         return next((node["id"] for node in topology["nodes"] if node["type"] in node_types), fallback)
 
     def _tick_payload(self, runtime: RunRuntime) -> dict[str, Any]:
-        inventory = runtime.state.get("inventory") or []
         payload = {key: value for key, value in runtime.state.items() if key != "inventory"}
-        if len(inventory) != runtime.last_broadcast_inventory_size:
-            payload["inventory"] = inventory
-            runtime.last_broadcast_inventory_size = len(inventory)
+        if runtime.inventory_delta:
+            payload["inventoryDelta"] = deepcopy(runtime.inventory_delta)
         return payload
 
     async def _broadcast_tick(self, runtime: RunRuntime) -> None:
@@ -1234,25 +1766,8 @@ class SimulationService:
         # 常规 tick 只发送动态状态；库存仅在数量发生变化时附带，前端与上一帧合并。
         tick_payload = self._tick_payload(runtime)
         await self.hub.broadcast(runtime.run_id, {"type": "tick", "tick": tick, "payload": tick_payload})
+        runtime.inventory_delta.clear()
         await self.hub.broadcast(runtime.run_id, {"type": "metrics_snapshot", "tick": tick, "payload": runtime.metrics})
-        for robot in runtime.state["robots"]:
-            await self.hub.broadcast(
-                runtime.run_id,
-                {
-                    "type": "robot_position",
-                    "tick": tick,
-                    "payload": {
-                        "robotId": robot["id"],
-                        "cellId": robot["currentCellId"],
-                        "floor": robot.get("currentFloor", "1F"),
-                        "row": robot["currentRow"],
-                        "col": robot["currentCol"],
-                        "layer": robot.get("currentLayer", 1),
-                        "status": robot["status"],
-                        "phaseLabel": robot["phaseLabel"],
-                    },
-                },
-            )
 
     def _persist(self, runtime: RunRuntime) -> None:
         self.repo.update_run(runtime.run_id, runtime.state["status"], runtime.state, runtime.metrics)

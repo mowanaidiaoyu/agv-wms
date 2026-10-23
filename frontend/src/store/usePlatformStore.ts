@@ -12,6 +12,7 @@ interface PlatformStore {
   setLiveState: (state: SimulationState | null) => void
   setLiveMetrics: (metrics: SimulationMetrics | null) => void
   appendLiveEvent: (event: SimulationEvent) => void
+  clearLiveEvents: () => void
   resetRun: () => void
 }
 
@@ -26,6 +27,7 @@ export const usePlatformStore = create<PlatformStore>((set) => ({
   setLiveState: (state) => set({ liveState: state }),
   setLiveMetrics: (metrics) => set({ liveMetrics: metrics }),
   appendLiveEvent: (event) => set((prev) => ({ liveEvents: [...prev.liveEvents.slice(-49), event] })),
+  clearLiveEvents: () => set({ liveEvents: [] }),
   resetRun: () =>
     set({
       selectedRunId: '',

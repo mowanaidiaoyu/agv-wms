@@ -121,6 +121,7 @@ export interface SimulationRobot {
   path: string[]
   /** 与 path 等长的每格所在货架层 */
   pathLayers?: number[]
+  pathStages?: string[]
   targetCellId: string
   targetLayer?: number
   currentTaskId: string | null
@@ -164,13 +165,134 @@ export interface SimulationTaskLine {
   grade?: string
   material?: string
   surfaceTreatment?: string
+  quantity?: number
+}
+
+export interface ShuttleTrackNode {
+  topology_id: string
+  zone_id: string
+  track_node_id: string
+  shuttle_level: 1 | 2 | 3 | 4
+  row: number
+  col: number
+  world_x: number
+  world_y: number
+  world_z: number
+  track_type: 'straight' | 'intersection' | 'turn' | 'lift_entry' | 'lift_exit'
+  traversable: boolean
+  neighbors: string[]
+}
+
+export interface ShuttleLiftTransition {
+  lift_id: string
+  from_level: number
+  to_level: number
+  entrance_track_node: string
+  exit_track_node: string
+  enter_at_seconds: number
+  lift_start_seconds: number
+  arrive_level_seconds: number
+  exit_at_seconds: number
+  events: string[]
+}
+
+export interface ShuttlePlan {
+  topologyId: string
+  topologyRevision: string
+  configRevision: string
+  coordinateContractRevision: string
+  algorithm: 'astar' | 'dijkstra'
+  chosen_lift: string | null
+  path_nodes: Array<ShuttleTrackNode & { arrival_seconds: number; phase: string }>
+  path_edges: Array<{
+    from_track_node: string
+    to_track_node: string
+    edge_type: 'track' | 'lift'
+    lift_id?: string | null
+    duration_seconds: number
+  }>
+  lift_transitions: ShuttleLiftTransition[]
+  estimated_duration_seconds: number
+  result_status: 'success' | 'failed'
+  failure_reason?: string | null
+  timing_source: 'synthetic_demo'
+}
+
+export interface ShuttleContract {
+  topologyId: string
+  topologyRevision: string
+  configRevision: string
+  coordinateContractRevision: string
+  verificationStatus: string
+  planningEnabled: boolean
+  tracks: ShuttleTrackNode[]
+  lifts: Array<{
+    lift_id: string
+    label: string
+    row: number
+    col: number
+    supported_levels?: number[]
+    verification_status: string
+    timing_source: 'synthetic_demo'
+  }>
+  warnings: string[]
+}
+
+export interface ShuttleTransferInput {
+  id: string
+  vehicleId: string
+  skuId: string
+  skuName: string
+  sourceLocationId: string
+  destinationLocationId: string
+  sourceTrackNode: string
+  destinationTrackNode: string
+  sourceLevel: 1 | 2 | 3 | 4
+  destinationLevel: 1 | 2 | 3 | 4
+  quantity: number
+  algorithm: 'astar' | 'dijkstra'
+  initialSourceQuantity: number
+  initialDestinationQuantity: number
+}
+
+export interface TransferInventoryBalance {
+  locationId: string
+  trackNodeId: string
+  level: number
+  row: number
+  col: number
+  worldX: number
+  worldY: number
+  worldZ: number
+  skuId: string
+  skuName: string
+  quantityOnHand: number
+  quantityReserved: number
+  quantityAvailable: number
+  dataSource: 'run_isolated_simulation_snapshot'
+}
+
+export interface TransferInventoryEvent {
+  eventId: string
+  taskId: string
+  tick: number
+  eventType: 'reserve' | 'pick' | 'drop' | 'cancel_release' | 'cancel_return'
+  locationId: string | null
+  skuId: string
+  quantity: number
+  onHandDelta: number
+  reservedDelta: number
+  inTransitDelta: number
+  quantityOnHandAfter?: number | null
+  quantityReservedAfter?: number | null
+  inTransitAfter?: number
 }
 
 export interface SimulationTask {
   id: string
   orderId?: string | null
   robotType: RobotType
-  mode: 'direct' | 'cross_zone'
+  mode: 'direct' | 'cross_zone' | 'shuttle_transfer'
   status: string
   phase: string
   phaseLabel: string
@@ -192,6 +314,17 @@ export interface SimulationTask {
   createdTick: number
   startedTick: number | null
   completedTick: number | null
+  requestedVehicleId?: string
+  skuId?: string
+  skuName?: string
+  quantity?: number
+  sourceLocationId?: string
+  destinationLocationId?: string
+  sourceTrackNode?: string
+  destinationTrackNode?: string
+  inTransitQuantity?: number
+  plan?: ShuttlePlan
+  failureReason?: string | null
 }
 
 export type SimulationOrderPriority = 'normal' | 'urgent'
@@ -284,14 +417,24 @@ export interface GoodsInventory {
 export interface SimulationState {
   id: string
   status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed'
-  stopReason?: 'user' | 'safety_limit' | null
+  stopReason?: 'user' | 'safety_limit' | 'transfer_failed' | 'task_failed' | 'runtime_error' | null
+  runtimeError?: {
+    type: string
+    message: string
+    tick: number
+  } | null
   orderDriven?: boolean
   tick: number
+  speedMultiplier?: 1 | 2 | 4
+  tickIntervalSeconds?: number
+  eventCount?: number
   topologyId: string
   robots: SimulationRobot[]
   tasks: SimulationTask[]
   orders?: SimulationOrder[]
   inventory?: GoodsSlot[]
+  transferInventory?: TransferInventoryBalance[]
+  transferEvents?: TransferInventoryEvent[]
   alerts: SimulationAlert[]
   queues: SimulationQueues
   createdAt: string

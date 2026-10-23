@@ -3217,6 +3217,34 @@ select {
   border-radius: 11px;
 }
 
+.simulation-speed-control {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid rgba(100, 116, 139, 0.24);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.simulation-actions .simulation-speed-control button {
+  min-width: 35px;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-right: 1px solid rgba(100, 116, 139, 0.18);
+  border-radius: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.simulation-actions .simulation-speed-control button:last-child {
+  border-right: 0;
+}
+
+.simulation-actions .simulation-speed-control button.active {
+  color: #fff;
+  background: #0f766e;
+}
+
 .simulation-details-button b,
 .simulation-detail-tabs b {
   display: inline-grid;
@@ -3570,7 +3598,7 @@ select {
 .simulation-order-rail {
   position: absolute;
   z-index: 9;
-  top: 10px;
+  top: 54px;
   bottom: 10px;
   left: 10px;
   display: grid;
@@ -3584,6 +3612,228 @@ select {
   box-shadow: 18px 0 48px rgba(2, 6, 23, 0.24);
   backdrop-filter: blur(16px);
   transition: width 180ms ease;
+}
+
+.simulation-workspace-tabs {
+  position: absolute;
+  z-index: 11;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 306px;
+  padding: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 13px;
+  background: rgba(10, 19, 31, 0.93);
+  backdrop-filter: blur(16px);
+}
+
+.simulation-workspace-tabs button {
+  min-width: 0;
+  padding: 7px 5px;
+  border: 0;
+  border-radius: 9px;
+  color: #94a3b8;
+  background: transparent;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.simulation-workspace-tabs button.active {
+  color: #fff;
+  background: #0e7490;
+}
+
+.cross-level-transfer-panel {
+  position: absolute;
+  z-index: 9;
+  top: 54px;
+  bottom: 10px;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  width: 306px;
+  padding: 13px;
+  overflow-y: auto;
+  border: 1px solid rgba(251, 146, 60, 0.28);
+  border-radius: 17px;
+  color: #e2e8f0;
+  background: rgba(10, 19, 31, 0.94);
+  box-shadow: 18px 0 48px rgba(2, 6, 23, 0.28);
+  backdrop-filter: blur(16px);
+}
+
+.cross-level-panel-heading,
+.cross-level-panel-heading > div,
+.cross-level-form,
+.cross-level-list,
+.cross-level-inventory {
+  display: grid;
+  gap: 8px;
+}
+
+.cross-level-panel-heading {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  color: #fb923c;
+}
+
+.cross-level-panel-heading strong {
+  color: #f8fafc;
+}
+
+.cross-level-panel-heading span,
+.cross-level-form label,
+.cross-level-plan-card small,
+.cross-level-runtime-task small {
+  color: #94a3b8;
+  font-size: 0.66rem;
+}
+
+.cross-level-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.cross-level-form input,
+.cross-level-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 9px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.88);
+  font-size: 0.71rem;
+}
+
+.cross-level-field-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.cross-level-field-row-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.cross-level-form-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.cross-level-form-actions button {
+  flex: 1;
+  justify-content: center;
+  padding: 7px;
+  font-size: 0.69rem;
+}
+
+.cross-level-contract {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.cross-level-contract span {
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #fdba74;
+  background: rgba(154, 52, 18, 0.22);
+  font-size: 0.6rem;
+}
+
+.cross-level-plan-card {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 11px;
+  background: rgba(8, 145, 178, 0.1);
+}
+
+.cross-level-plan-card strong,
+.cross-level-list h4,
+.cross-level-inventory h4 {
+  margin: 0;
+  font-size: 0.74rem;
+}
+
+.cross-level-plan-card span {
+  color: #67e8f9;
+  font-size: 0.68rem;
+}
+
+.cross-level-list article,
+.cross-level-inventory article {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 9px 30px 9px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 11px;
+  background: rgba(30, 41, 59, 0.66);
+  font-size: 0.67rem;
+}
+
+.cross-level-list article > div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cross-level-list article > button:not(.cross-level-retry):not(.cross-level-cancel) {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  padding: 3px;
+  border: 0;
+  color: #cbd5e1;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cross-level-retry,
+.cross-level-cancel {
+  padding: 4px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 7px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.8);
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+
+.cross-level-inventory h4 {
+  display: flex;
+  justify-content: space-between;
+}
+
+.cross-level-inventory article {
+  grid-template-columns: 1fr auto auto;
+  padding-right: 9px;
+}
+
+.cross-level-inventory article small {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #64748b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cross-level-inventory p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.64rem;
+}
+
+.transfer-inventory-label {
+  min-width: 138px;
+  border-color: rgba(251, 146, 60, 0.35);
+  background: rgba(67, 20, 7, 0.9);
 }
 
 .simulation-order-rail-collapsed {
@@ -4168,6 +4418,113 @@ select {
 
 .simulation-order-composer-footer button {
   min-height: 38px;
+}
+
+.cross-level-stage-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.cross-level-stage-strip i {
+  padding: 3px 2px;
+  border-radius: 5px;
+  color: #64748b;
+  background: rgba(100, 116, 139, 0.1);
+  font-size: 0.52rem;
+  font-style: normal;
+  text-align: center;
+}
+
+.cross-level-stage-strip i.active {
+  color: #422006;
+  background: #fde047;
+  box-shadow: 0 0 0 1px rgba(202, 138, 4, 0.35);
+}
+
+.shuttle-lift-label.active {
+  border-color: rgba(253, 224, 71, 0.8);
+  color: #fef9c3;
+  background: rgba(66, 32, 6, 0.9);
+}
+
+.transfer-inventory-panel {
+  overflow-y: auto;
+}
+
+.transfer-inventory-sku-filter {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px 0;
+  color: #94a3b8;
+  font-size: 0.68rem;
+}
+
+.transfer-inventory-sku-filter select {
+  min-height: 34px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.88);
+}
+
+.transfer-inventory-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.transfer-inventory-summary span {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.transfer-inventory-summary small,
+.transfer-inventory-locations small,
+.transfer-inventory-current-task small,
+.transfer-inventory-events small {
+  color: #94a3b8;
+}
+
+.transfer-inventory-locations,
+.transfer-inventory-current-task,
+.transfer-inventory-events {
+  display: grid;
+  gap: 6px;
+  padding: 0 12px 12px;
+}
+
+.transfer-inventory-locations h4,
+.transfer-inventory-current-task h4,
+.transfer-inventory-events h4 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+}
+
+.transfer-inventory-locations article,
+.transfer-inventory-current-task article,
+.transfer-inventory-events p {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.5);
+  font-size: 0.64rem;
+}
+
+.transfer-inventory-locations article > div {
+  display: grid;
+  gap: 2px;
 }
 
 .simulation-empty-state {

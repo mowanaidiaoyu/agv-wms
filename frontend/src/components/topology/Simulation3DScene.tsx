@@ -12,11 +12,13 @@ import {
   buildGoodsSceneBoxes,
   buildSceneSpec,
   robotWorldPosition,
+  shuttleTrackWorldPosition,
   worldX,
   worldZ,
 } from '../../lib/topology3d'
 import { parseCellId } from '../../lib/topology'
-import type { GoodsSlot, SimulationRobot, SimulationTask, TopologyPayload } from '../../types'
+import { advanceInterpolationElapsed, interpolateScalar, interpolationProgress } from '../../lib/simulationMotion'
+import type { GoodsSlot, ShuttleContract, SimulationRobot, SimulationTask, TopologyPayload, TransferInventoryBalance } from '../../types'
 
 export type Simulation3DSceneProps = {
   topology: TopologyPayload
@@ -25,6 +27,13 @@ export type Simulation3DSceneProps = {
   tasks: SimulationTask[]
   activeFloor: string
   focusRequest?: number
+  transferInventory?: TransferInventoryBalance[]
+  shuttleLifts?: ShuttleContract['lifts']
+  selectedRobotId?: string
+  followSelectedRobot?: boolean
+  onSelectRobot?: (robotId: string) => void
+  paused?: boolean
+  transitionDuration?: number
 }
 
 const SHUTTLE_COLOR = '#c084fc'
@@ -33,32 +42,49 @@ const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
 /** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。 */
-function RobotGroup({ position, children }: { position: [number, number, number]; children: ReactNode }) {
+function RobotGroup({ position, children, onClick, paused = false, transitionDuration = 0.3 }: { position: [number, number, number]; children: ReactNode; onClick?: () => void; paused?: boolean; transitionDuration?: number }) {
   const groupRef = useRef<Group>(null)
   const current = useRef(new Vector3(position[0], position[1], position[2]))
+  const start = useRef(new Vector3(position[0], position[1], position[2]))
   const target = useRef(new Vector3(position[0], position[1], position[2]))
+  const elapsed = useRef(transitionDuration)
+  const durationRef = useRef(transitionDuration)
   const invalidate = useThree((state) => state.invalidate)
   const [x, y, z] = position
 
   useEffect(() => {
+    const targetChanged = target.current.x !== x || target.current.y !== y || target.current.z !== z
+    if (targetChanged) {
+      start.current.copy(current.current)
+      elapsed.current = 0
+    } else if (durationRef.current !== transitionDuration && elapsed.current < durationRef.current) {
+      start.current.copy(current.current)
+      elapsed.current = 0
+    }
+    durationRef.current = transitionDuration
     target.current.set(x, y, z)
+    // Reset restores a paused snapshot. If the backend position changes while
+    // paused, snap to that snapshot instead of leaving the mesh at the old run
+    // position forever. A normal pause does not change x/y/z and still freezes.
+    if (paused && targetChanged) {
+      current.current.copy(target.current)
+      start.current.copy(target.current)
+      elapsed.current = transitionDuration
+      groupRef.current?.position.copy(current.current)
+    }
     invalidate()
-  }, [invalidate, x, y, z])
+  }, [invalidate, paused, transitionDuration, x, y, z])
 
   useFrame((_, delta) => {
-    const cur = current.current
-    const tgt = target.current
-    if (cur.distanceTo(tgt) < 0.02) {
-      cur.copy(tgt)
-    } else {
-      // 后端每 0.6 秒推进一格；提高插值收敛速度，避免上一格动画尚未结束就收到下一格位置。
-      cur.lerp(tgt, Math.min(1, delta * 10))
-      invalidate()
-    }
+    if (paused) return
+    elapsed.current = advanceInterpolationElapsed(elapsed.current, delta, transitionDuration, false)
+    const progress = interpolationProgress(elapsed.current, transitionDuration)
+    const cur = current.current.lerpVectors(start.current, target.current, progress)
+    if (progress < 1) invalidate()
     if (groupRef.current) groupRef.current.position.copy(cur)
   })
 
-  return <group ref={groupRef}>{children}</group>
+  return <group ref={groupRef} position={current.current} onClick={(event) => { event.stopPropagation(); onClick?.() }}>{children}</group>
 }
 
 /**
@@ -69,10 +95,12 @@ function CtuCart({
   load,
   carrying,
   action,
+  paused = false,
 }: {
   load: number
   carrying?: GoodsSlot[]
   action?: SimulationRobot['handlingAction']
+  paused?: boolean
 }) {
   const liftRef = useRef<Group>(null)
   const forkRef = useRef<Group>(null)
@@ -92,10 +120,25 @@ function CtuCart({
   const targetForkZ = action?.stage === 'extending' ? -0.68 : 0
   const liftY = useRef(homeLiftY)
   const forkZ = useRef(0)
+  const mechanismTarget = useRef({ liftY: homeLiftY, forkZ: 0 })
   const actionSignature = `${action?.stage ?? 'idle'}:${action?.targetLayer ?? 1}:${action?.slotIndex ?? 0}`
 
-  useEffect(() => invalidate(), [actionSignature, invalidate])
+  useEffect(() => {
+    const targetChanged = mechanismTarget.current.liftY !== targetLiftY
+      || mechanismTarget.current.forkZ !== targetForkZ
+    mechanismTarget.current = { liftY: targetLiftY, forkZ: targetForkZ }
+    // As with vehicle translation, a reset can change the mechanism target
+    // while the restored run is paused. Apply only that state change directly.
+    if (paused && targetChanged) {
+      liftY.current = targetLiftY
+      forkZ.current = targetForkZ
+      if (liftRef.current) liftRef.current.position.y = targetLiftY
+      if (forkRef.current) forkRef.current.position.z = targetForkZ
+    }
+    invalidate()
+  }, [actionSignature, invalidate, paused, targetForkZ, targetLiftY])
   useFrame((_, delta) => {
+    if (paused) return
     const step = Math.min(1, delta * 7)
     liftY.current += (targetLiftY - liftY.current) * step
     forkZ.current += (targetForkZ - forkZ.current) * step
@@ -201,10 +244,17 @@ function CtuCart({
 function ShuttleCart() {
   const w = CELL * 2 * 0.88
   return (
-    <mesh position={[CELL / 2, 0.42, -CELL / 2]}>
-      <boxGeometry args={[w, 0.8, w]} />
-      <meshStandardMaterial color={SHUTTLE_COLOR} emissive={SHUTTLE_EMISSIVE} emissiveIntensity={0.3} roughness={0.5} />
-    </mesh>
+    <group position={[0, 0.42, 0]}>
+      <mesh>
+        <boxGeometry args={[w, 0.8, w]} />
+        <meshStandardMaterial color={SHUTTLE_COLOR} emissive={SHUTTLE_EMISSIVE} emissiveIntensity={0.5} roughness={0.42} />
+      </mesh>
+      <mesh position={[0, 0.46, 0]}>
+        <boxGeometry args={[w * 0.58, 0.12, w * 0.58]} />
+        <meshStandardMaterial color="#f5d0fe" emissive="#c026d3" emissiveIntensity={0.8} roughness={0.3} />
+      </mesh>
+      <pointLight color="#e879f9" intensity={1.8} distance={7} decay={2} />
+    </group>
   )
 }
 
@@ -309,15 +359,210 @@ function CameraTaskFocus({
   return null
 }
 
+function CameraRobotFollow({ target, enabled, paused, transitionDuration }: { target: [number, number, number] | null; enabled: boolean; paused: boolean; transitionDuration: number }) {
+  const camera = useThree((state) => state.camera)
+  const controls = useThree((state) => state.controls)
+  const invalidate = useThree((state) => state.invalidate)
+  const previous = useRef<Vector3 | null>(null)
+  const motion = useRef<{
+    elapsed: number
+    fromPosition: Vector3
+    toPosition: Vector3
+    fromTarget: Vector3
+    toTarget: Vector3
+  } | null>(null)
+
+  useEffect(() => {
+    if (!motion.current || !controls) return
+    const orbit = controls as unknown as { target: Vector3 }
+    motion.current.fromPosition.copy(camera.position)
+    motion.current.fromTarget.copy(orbit.target)
+    motion.current.elapsed = 0
+    invalidate()
+  }, [camera, controls, invalidate, transitionDuration])
+
+  useEffect(() => {
+    if (!enabled || !target || !controls) {
+      previous.current = null
+      motion.current = null
+      return
+    }
+    const next = new Vector3(target[0], target[1] + 0.5, target[2])
+    const orbit = controls as unknown as { target: Vector3; update: () => void }
+    if (!previous.current) {
+      previous.current = next
+      orbit.target.copy(next)
+      orbit.update()
+      invalidate()
+      return
+    }
+    if (previous.current.distanceToSquared(next) < 0.000001) return
+    const translation = next.clone().sub(previous.current)
+    motion.current = {
+      elapsed: 0,
+      fromPosition: camera.position.clone(),
+      toPosition: camera.position.clone().add(translation),
+      fromTarget: orbit.target.clone(),
+      toTarget: next.clone(),
+    }
+    previous.current = next
+    invalidate()
+  }, [camera, controls, enabled, invalidate, target])
+
+  useFrame((_, delta) => {
+    if (paused || !motion.current || !controls) return
+    const current = motion.current
+    current.elapsed = advanceInterpolationElapsed(current.elapsed, delta, transitionDuration, false)
+    const progress = interpolationProgress(current.elapsed, transitionDuration)
+    camera.position.lerpVectors(current.fromPosition, current.toPosition, progress)
+    const orbit = controls as unknown as { target: Vector3; update: () => void }
+    orbit.target.lerpVectors(current.fromTarget, current.toTarget, progress)
+    orbit.update()
+    if (progress < 1) invalidate()
+    else motion.current = null
+  })
+  return null
+}
+
+function TransferInventoryMarker({ balance }: { balance: TransferInventoryBalance }) {
+  return (
+    <group position={[balance.worldX, balance.worldY + 0.28, balance.worldZ]}>
+      <mesh>
+        <boxGeometry args={[0.72, 0.5, 0.72]} />
+        <meshStandardMaterial color="#fb923c" emissive="#9a3412" emissiveIntensity={0.28} roughness={0.55} />
+      </mesh>
+      <Html position={[0, 0.72, 0]} center zIndexRange={[28, 18]}>
+        <div className="simulation-scene-label transfer-inventory-label">
+          <b>{balance.skuId} · {balance.quantityOnHand} 箱</b>
+          <span>L{balance.level} · {balance.locationId}</span>
+        </div>
+      </Html>
+    </group>
+  )
+}
+
+function SmoothLiftCab({
+  y,
+  paused,
+  transitionDuration,
+  children,
+}: {
+  y: number
+  paused: boolean
+  transitionDuration: number
+  children: ReactNode
+}) {
+  const groupRef = useRef<Group>(null)
+  const current = useRef(y)
+  const start = useRef(y)
+  const target = useRef(y)
+  const elapsed = useRef(transitionDuration)
+  const durationRef = useRef(transitionDuration)
+  const invalidate = useThree((state) => state.invalidate)
+
+  useEffect(() => {
+    if (target.current === y) {
+      if (durationRef.current !== transitionDuration && elapsed.current < durationRef.current) {
+        start.current = current.current
+        elapsed.current = 0
+        durationRef.current = transitionDuration
+        invalidate()
+      }
+      return
+    }
+    start.current = current.current
+    target.current = y
+    elapsed.current = 0
+    durationRef.current = transitionDuration
+    if (paused) {
+      current.current = y
+      start.current = y
+      elapsed.current = transitionDuration
+      if (groupRef.current) groupRef.current.position.y = y
+    }
+    invalidate()
+  }, [invalidate, paused, transitionDuration, y])
+
+  useFrame((_, delta) => {
+    if (paused) return
+    elapsed.current = advanceInterpolationElapsed(elapsed.current, delta, transitionDuration, false)
+    const progress = interpolationProgress(elapsed.current, transitionDuration)
+    current.current = interpolateScalar(start.current, target.current, progress)
+    if (groupRef.current) groupRef.current.position.y = current.current
+    if (progress < 1) invalidate()
+  })
+
+  return <group ref={groupRef} position={[0, current.current, 0]}>{children}</group>
+}
+
+function ShuttleLiftView({
+  lift,
+  cols,
+  rows,
+  activeRobot,
+  activeTask,
+  paused,
+  transitionDuration,
+}: {
+  lift: ShuttleContract['lifts'][number]
+  cols: number
+  rows: number
+  activeRobot?: SimulationRobot
+  activeTask?: SimulationTask
+  paused: boolean
+  transitionDuration: number
+}) {
+  const height = ZONE_LEVEL_HEIGHT.shuttle * 4
+  const active = activeTask?.plan?.chosen_lift === lift.lift_id
+    && ['enter_lift', 'lift_moving', 'exit_lift'].includes(activeTask.phase)
+  const [x, trackY, z] = shuttleTrackWorldPosition(
+    lift.row,
+    lift.col,
+    Number(activeRobot?.currentLayer ?? 1),
+    cols,
+    rows,
+  )
+  const cabY = trackY - 0.07
+
+  return (
+    <group position={[x, 0, z]}>
+      <mesh position={[0, height / 2, 0]}>
+        <boxGeometry args={[CELL * 1.9, height, CELL * 1.9]} />
+        <meshBasicMaterial color={active ? '#fde047' : '#22c55e'} wireframe transparent opacity={active ? 0.95 : 0.55} />
+      </mesh>
+      <SmoothLiftCab y={cabY} paused={paused} transitionDuration={transitionDuration}>
+        <mesh>
+          <boxGeometry args={[CELL * 1.72, 0.14, CELL * 1.72]} />
+          <meshStandardMaterial
+            color={active ? '#fde047' : '#16a34a'}
+            emissive={active ? '#ca8a04' : '#14532d'}
+            emissiveIntensity={active ? 0.75 : 0.35}
+          />
+        </mesh>
+      </SmoothLiftCab>
+      <Html position={[0, height + 0.75, 0]} center zIndexRange={[27, 17]}>
+        <div className={`simulation-scene-label shuttle-lift-label ${active ? 'active' : ''}`}>
+          <b>{lift.label}</b>
+          <span>{active ? activeTask?.phaseLabel : 'L1～L4'}</span>
+        </div>
+      </Html>
+    </group>
+  )
+}
+
 function cellWorldPosition(
   cellId: string,
   layer: number,
   floors: string[],
   cols: number,
   rows: number,
+  robotType: SimulationRobot['type'] = 'ctu',
 ): [number, number, number] | null {
   const cell = parseCellId(cellId)
   if (!cell) return null
+  if (robotType === 'shuttle') {
+    return shuttleTrackWorldPosition(cell.row, cell.col, layer, cols, rows)
+  }
   const floorIndex = Math.max(0, floors.indexOf(cell.floor))
   return [
     worldX(cell.col, cols),
@@ -333,6 +578,13 @@ function Simulation3DScene({
   tasks,
   activeFloor,
   focusRequest = 0,
+  transferInventory = [],
+  shuttleLifts = [],
+  selectedRobotId = '',
+  followSelectedRobot = false,
+  onSelectRobot,
+  paused = false,
+  transitionDuration = 0.3,
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
@@ -395,11 +647,14 @@ function Simulation3DScene({
     [focusKeySignature],
   )
 
-  const focusTask = tasks.find((task) => task.status === 'assigned')
-    ?? tasks.find((task) => task.status !== 'completed')
-  const focusRobot = focusTask?.assignedRobotId
-    ? robots.find((robot) => robot.id === focusTask.assignedRobotId)
-    : undefined
+  const selectedRobot = robots.find((robot) => robot.id === selectedRobotId)
+  const focusTask = (selectedRobot?.currentTaskId
+    ? tasks.find((task) => task.id === selectedRobot.currentTaskId)
+    : undefined)
+    ?? tasks.find((task) => task.status === 'assigned')
+    ?? tasks.find((task) => !['completed', 'cancelled', 'failed'].includes(task.status))
+  const focusRobot = selectedRobot
+    ?? (focusTask?.assignedRobotId ? robots.find((robot) => robot.id === focusTask.assignedRobotId) : undefined)
   const isPicking = focusTask?.phase === 'pickup_from_ctu' || focusTask?.phase === 'pickup_from_shuttle'
   const handlingAction = focusRobot?.handlingAction
   const handlingLine = handlingAction
@@ -409,27 +664,39 @@ function Simulation3DScene({
     ? handlingLine ?? focusTask?.lines?.[Math.min(focusTask.currentLineIndex, Math.max(0, focusTask.lines.length - 1))]
     : undefined
   const focusTargetCellId = handlingAction?.cellId || focusLine?.cellId || focusTask?.deliveryCellId
-  const focusTargetLayer = handlingAction?.targetLayer ?? focusLine?.layer ?? 1
+  const focusTargetLayer = handlingAction?.targetLayer ?? focusLine?.layer ?? focusTask?.targetLayer ?? 1
   const focusTargetPosition = useMemo(
     () => focusTargetCellId
-      ? cellWorldPosition(focusTargetCellId, focusTargetLayer, spec.floors, spec.cols, spec.rows)
+      ? cellWorldPosition(focusTargetCellId, focusTargetLayer, spec.floors, spec.cols, spec.rows, focusRobot?.type)
       : null,
-    [focusTargetCellId, focusTargetLayer, spec.cols, spec.floors, spec.rows],
+    [focusRobot?.type, focusTargetCellId, focusTargetLayer, spec.cols, spec.floors, spec.rows],
   )
   const routePoints = useMemo(() => {
     if (!focusRobot?.path?.length) return [] as [number, number, number][]
     return focusRobot.path.flatMap((cellId, index) => {
       const parsed = parseCellId(cellId)
       if (!parsed) return []
-      const floorIndex = Math.max(0, spec.floors.indexOf(parsed.floor))
       const layer = focusRobot.pathLayers?.[index] ?? 1
+      const isShuttle = focusRobot.type === 'shuttle'
+      if (isShuttle) {
+        const [x, y, z] = shuttleTrackWorldPosition(parsed.row, parsed.col, layer, spec.cols, spec.rows)
+        return [[x, y + 0.05, z] as [number, number, number]]
+      }
+      const floorIndex = Math.max(0, spec.floors.indexOf(parsed.floor))
       return [[
         worldX(parsed.col, spec.cols),
         floorIndex * FLOOR_HEIGHT + Math.max(0.18, (layer - 1) * ZONE_LEVEL_HEIGHT.ctu + 0.18),
         worldZ(parsed.row, spec.rows),
       ] as [number, number, number]]
     })
-  }, [focusRobot?.path, focusRobot?.pathLayers, spec.cols, spec.floors, spec.rows])
+  }, [focusRobot?.path, focusRobot?.pathLayers, focusRobot?.type, spec.cols, spec.floors, spec.rows])
+  const transferTaskByLift = useMemo(() => {
+    const result = new Map<string, SimulationTask>()
+    for (const task of tasks) {
+      if (task.mode === 'shuttle_transfer' && task.plan?.chosen_lift) result.set(task.plan.chosen_lift, task)
+    }
+    return result
+  }, [tasks])
 
   return (
     <Canvas
@@ -472,6 +739,27 @@ function Simulation3DScene({
         dimUnfocused={focusKeys.size > 0}
       />
 
+      {transferInventory.map((balance) => (
+        <TransferInventoryMarker key={`${balance.locationId}-${balance.skuId}`} balance={balance} />
+      ))}
+
+      {shuttleLifts.map((lift) => {
+        const task = transferTaskByLift.get(lift.lift_id)
+        const robot = task?.assignedRobotId ? robots.find((item) => item.id === task.assignedRobotId) : undefined
+        return (
+          <ShuttleLiftView
+            key={lift.lift_id}
+            lift={lift}
+            cols={spec.cols}
+            rows={spec.rows}
+            activeTask={task}
+            activeRobot={robot}
+            paused={paused}
+            transitionDuration={transitionDuration}
+          />
+        )
+      })}
+
       {routePoints.length > 1 ? (
         <Line
           points={routePoints}
@@ -486,25 +774,37 @@ function Simulation3DScene({
       {focusTargetPosition && focusTask ? (
         <TaskTargetMarker
           position={focusTargetPosition}
-          location={focusLine ? `${focusLine.nodeId} · 第 ${focusLine.layer} 层` : '出库交付点'}
+          location={focusLine
+            ? `${focusLine.nodeId} · 第 ${focusLine.layer} 层`
+            : focusTask.mode === 'shuttle_transfer'
+              ? `${focusTask.destinationLocationId ?? focusTask.deliveryCellId} · L${focusTask.targetLayer}`
+              : '出库交付点'}
         />
       ) : null}
 
       {robots.map((robot) => {
-        const position = robotWorldPosition(
-          robot.currentFloor ?? '1F',
-          robot.currentRow,
-          robot.currentCol,
-          spec.floors,
-          spec.cols,
-          spec.rows,
-        )
+        const position: [number, number, number] = robot.type === 'shuttle'
+          ? shuttleTrackWorldPosition(
+            robot.currentRow,
+            robot.currentCol,
+            Number(robot.currentLayer ?? 1),
+            spec.cols,
+            spec.rows,
+          )
+          : robotWorldPosition(
+            robot.currentFloor ?? '1F',
+            robot.currentRow,
+            robot.currentCol,
+            spec.floors,
+            spec.cols,
+            spec.rows,
+          )
         return (
-          <RobotGroup key={robot.id} position={position}>
+          <RobotGroup key={robot.id} position={position} onClick={() => onSelectRobot?.(robot.id)} paused={paused} transitionDuration={transitionDuration}>
             {robot.type === 'ctu' ? (
-              <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} />
+              <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} paused={paused} />
             ) : <ShuttleCart />}
-            {robot.id === focusRobot?.id ? (
+            {robot.id === (selectedRobotId || focusRobot?.id) ? (
               <RobotFocusMarker
                 robotId={robot.id}
                 phase={`${robot.phaseLabel || focusTask?.phaseLabel || '执行任务'} · ${robot.load}/${robot.capacity} 箱`}
@@ -526,6 +826,30 @@ function Simulation3DScene({
         mouseButtons={{ LEFT: undefined, MIDDLE: MOUSE.ROTATE, RIGHT: MOUSE.PAN }}
       />
       <CameraTaskFocus target={focusTargetPosition} request={focusRequest} />
+      <CameraRobotFollow
+        enabled={followSelectedRobot}
+        paused={paused}
+        transitionDuration={transitionDuration}
+        target={(() => {
+          const selected = robots.find((robot) => robot.id === selectedRobotId)
+          if (!selected) return null
+          if (selected.type === 'shuttle') {
+            const [x, y, z] = shuttleTrackWorldPosition(
+              selected.currentRow,
+              selected.currentCol,
+              Number(selected.currentLayer ?? 1),
+              spec.cols,
+              spec.rows,
+            )
+            return [x, y + 0.42, z] as [number, number, number]
+          }
+          const base = robotWorldPosition(
+            selected.currentFloor ?? '1F', selected.currentRow, selected.currentCol,
+            spec.floors, spec.cols, spec.rows,
+          )
+          return base
+        })()}
+      />
       <ZoomToCursor />
     </Canvas>
   )

@@ -494,7 +494,7 @@ def test_runtime_continues_past_nominal_duration_until_tasks_finish(monkeypatch)
         metrics={},
     )
 
-    def step(current, *, persist, broadcast):
+    def step(current, *, persist):
         current.state["tick"] += 1
         if current.state["tick"] == 3:
             current.state["tasks"][0]["status"] = "completed"
