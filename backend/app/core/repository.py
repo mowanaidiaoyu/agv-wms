@@ -72,8 +72,15 @@ class Repository:
                 """,
                 (status, encode_json(payload), encode_json(metrics), now, run_id),
             )
-            row = conn.execute("SELECT * FROM simulation_runs WHERE id = ?", (run_id,)).fetchone()
-        return self._decode_run(row_to_dict(row))
+        # 直接用内存对象构造返回值；此前每 tick 把整份状态 JSON 回读解码一遍，
+        # 而 _persist 并不使用返回值，纯属浪费。
+        return {
+            "id": run_id,
+            "status": status,
+            "payload": payload,
+            "metrics": metrics,
+            "updated_at": now,
+        }
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         with get_conn() as conn:

@@ -295,6 +295,242 @@ def test_seed_tasks_never_share_one_storage_slot():
     assert len(keys) == len(set(keys))
 
 
+def test_split_ports_by_conveyor_kind():
+    # port 归属由入口格最近的输送块决定：地面输送块（conveyorGround）→ 地面线 port，
+    # 其余 → 架空线 port；附近没有输送块时按架空处理。
+    service = _service()
+    topology = {
+        "zones": [
+            {"id": "p-elevated", "label": "Port E", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
+            {"id": "p-ground", "label": "Port G", "type": "port", "x": 0, "y": 6, "width": 3, "height": 2},
+        ],
+        "cells": [
+            # p-elevated 入口格 cell-r5-c6 紧邻架空输送块
+            {"id": "cell-r5-c6", "floor": "1F", "row": 5, "col": 6, "type": "conveyor"},
+            # p-ground 入口格 cell-r7-c1 紧邻地面输送块
+            {"id": "cell-r7-c1", "floor": "1F", "row": 7, "col": 1, "type": "conveyor", "conveyorGround": True},
+        ],
+    }
+    ground_ports, elevated_ports = service._split_ports_by_conveyor_kind(topology)
+    assert ground_ports == ["cell-r7-c1"]
+    assert elevated_ports == ["cell-r5-c6"]
+
+
+def test_seed_tasks_routes_shuttle_to_ground_conveyor_anchor():
+    # 四向车（整箱）直接驶上地面输送线交付：目标取地面线 2×2 块锚点，
+    # 不需要 port 定位（port 是 CTU 概念）；CTU（零散件）仍走架空线 port。
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-port", "label": "Port", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            # 地面输送线块（2×2，锚点 (9,8)）：无任何 port 靠近它
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            # shuttle 区 4 格故意不建格 → 非 road → 该 2×2 槽为四向车取货位
+        ],
+    }
+    tasks = service._seed_tasks(topology, CONFIG)
+    ctu_tasks = [task for task in tasks if task["robotType"] == "ctu"]
+    shuttle_tasks = [task for task in tasks if task["robotType"] == "shuttle"]
+    assert ctu_tasks and shuttle_tasks
+    # 四向车交付到地面线锚点（cell-r9-c8），CTU 走架空 port（cell-r5-c6）
+    assert all(task["deliveryCellId"] == "cell-r9-c8" for task in shuttle_tasks)
+    assert all(task["deliveryCellId"] == "cell-r5-c6" for task in ctu_tasks)
+
+
+def test_seed_shuttle_dock_tasks():
+    # 四向车出货位（shuttle_dock）：设置取什么货物（skuId）与取多少（quantity），
+    # 生成对应数量的搬运任务（每箱一趟），交付到出货位所在地面输送线格；无需 port。
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {
+                "id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+                "zoneId": None, "capacity": 1, "label": "出货位 1",
+                "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "largeCategory": "建筑配件", "quantity": 3,
+            },
+        ],
+    }
+    tasks = service._seed_shuttle_tasks(topology)
+    assert [task["id"] for task in tasks] == [
+        "task-dock-dock-01-1",
+        "task-dock-dock-01-2",
+        "task-dock-dock-01-3",
+    ]
+    assert all(task["robotType"] == "shuttle" and task["mode"] == "cross_zone" for task in tasks)
+    assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
+    assert all(task["lines"][0]["skuId"] == "SKU-DOCK" for task in tasks)
+    assert all(task["lines"][0]["skuName"] == "脚手架 1.7米" for task in tasks)
+    assert all(task["sourceCellId"] == "cell-r8-c0" for task in tasks)  # 单槽位车库：源格唯一
+
+
+def test_update_shuttle_dock_runtime_settings():
+    # 四向车搬运工作台运行时改出货位设置：只重排「未分配」任务，执行中/已完成不受影响。
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-update-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {
+                "id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+                "zoneId": None, "capacity": 1, "label": "出货位 1",
+                "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "quantity": 1,
+            },
+        ],
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-update-topology"}).json()
+    run_id = run["runId"]
+    try:
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert len(state["shuttleDocks"]) == 1
+        assert state["shuttleDocks"][0]["dockId"] == "dock-01"
+
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-01",
+            json={"skuId": "SKU-X", "skuName": "测试箱", "quantity": 2, "priority": "urgent", "loop": True},
+        )
+        assert resp.status_code == 200
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        dock = state["shuttleDocks"][0]
+        assert dock["quantity"] == 2 and dock["priority"] == "urgent" and dock["loop"] is True
+        pending = [
+            task for task in state["tasks"]
+            if task.get("dockId") == "dock-01" and task["status"] == "pending"
+        ]
+        assert len(pending) == 2
+        assert all(task["lines"][0]["skuId"] == "SKU-X" for task in pending)
+        assert all(task["priority"] == 1 for task in pending)
+        assert all(task.get("requestedVehicleId") is None for task in pending)
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+def test_update_shuttle_dock_rejects_unknown_vehicle():
+    # 指定车辆必须是存在的四向车；否则 409。
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-vehicle-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {"id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+             "zoneId": None, "capacity": 1, "label": "出货位 1", "quantity": 1},
+        ],
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-vehicle-topology"}).json()
+    run_id = run["runId"]
+    try:
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-01",
+            json={"vehicleId": "SHUTTLE-NOT-EXIST"},
+        )
+        assert resp.status_code == 409
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+def test_update_shuttle_dock_autoprovisions_from_latest_topology():
+    # Run 启动后才保存进拓扑的出货位：工作台保存设置时自动补建（无需重启仿真），并立即派任务。
+    base_nodes = [node for node in TOPOLOGY["nodes"]]
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-late-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": base_nodes,  # 启动时拓扑里还没有出货位
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-late-topology"}).json()
+    run_id = run["runId"]
+    try:
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert state["shuttleDocks"] == []
+
+        # 模拟用户随后在编辑器把出货位存进同一拓扑，再在工作台保存设置。
+        topology["nodes"] = [
+            *base_nodes,
+            {"id": "dock-late", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+             "zoneId": None, "capacity": 1, "label": "后加出货位", "skuId": "SKU-LATE", "quantity": 2},
+        ]
+        assert client.post("/api/v1/topologies", json=topology).status_code == 200
+
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-late",
+            json={"quantity": 2},
+        )
+        assert resp.status_code == 200
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert [dock["dockId"] for dock in state["shuttleDocks"]] == ["dock-late"]
+        pending = [
+            task for task in state["tasks"]
+            if task.get("dockId") == "dock-late" and task["status"] == "pending"
+        ]
+        assert len(pending) == 2
+        assert all(task["lines"][0]["skuId"] == "SKU-LATE" for task in pending)
+
+        # 拓扑里根本不存在的出货位仍然 404。
+        resp = client.put(f"/api/v1/simulations/{run_id}/shuttle-docks/dock-ghost", json={})
+        assert resp.status_code == 404
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
 TWO_ROBOT_TOPOLOGY = {
     "id": "two-robot-topology",
     "name": "Two Robot Topology",

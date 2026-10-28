@@ -7,10 +7,11 @@ describe('shuttleTrackWorldPosition', () => {
     const liftB = shuttleTrackWorldPosition(188, 39, 4, 129, 216)
 
     expect(liftA[0]).toBe(-44.5)
-    expect(liftA[1]).toBeCloseTo(0.35)
+    // 一层轨道面 = 基座 0.25 + 层内偏移 0.35 = 0.6，与地面输送线带面齐平
+    expect(liftA[1]).toBeCloseTo(0.6)
     expect(liftA[2]).toBe(7)
     expect(liftB[0]).toBe(-24.5)
-    expect(liftB[1]).toBeCloseTo(4.55)
+    expect(liftB[1]).toBeCloseTo(4.8)
     expect(liftB[2]).toBe(-81)
   })
 })

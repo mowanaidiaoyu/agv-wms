@@ -3,7 +3,7 @@ import { PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { TopologyGlyph } from '../TopologyGlyph'
 import { OBJECT_LABELS, ZONE_LABELS, ZONE_TYPE_ORDER } from '../../lib/topology'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
-import type { CellType, EditorObjectType, ZoneType } from '../../types'
+import type { EditorObjectType, ZoneType } from '../../types'
 
 const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
   select: '点选格子 / 节点 / 区域；按住拖动框选多个库位',
@@ -11,11 +11,13 @@ const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
   erase: '点击或拖拽删除对象（节点优先）',
   road: '拖拽铺设通行路',
   blocked: '拖拽铺设障碍物（不可通行）',
-  conveyor: '拖拽铺设输送带，方向自动按走向',
+  conveyor: '拖拽铺设架空输送带（零散件，CTU 交付），方向自动按走向',
+  ground_conveyor: '拖拽铺设地面输送线（整箱，四向车出货）：贴地单层、无支腿；旁边拉一个 port 即可接四向车交付',
   ctu_robot: '点击放单个；拖拽矩形批量放置 CTU 设备',
   shuttle_robot: '点击放单个；拖拽矩形批量放置四向车设备',
   lift_transfer: '点击放单个；拖拽矩形批量放置升降移载机（可落在输送带格上）',
   turn_transfer: '点击放单个；拖拽矩形批量放置转向移载机（可落在输送带格上）',
+  shuttle_dock: '放在地面输送线上：设置取什么货物、取多少；仿真启动后四向车取货驶出，在此交付沿带面运走',
 }
 
 const ZONE_HINTS: Record<ZoneType, string> = {
@@ -26,8 +28,8 @@ const ZONE_HINTS: Record<ZoneType, string> = {
   drop_zone: '拖拽拉出放置区矩形（拣出的货物放置到这里）',
 }
 
-const CELL_TOOL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
-const NODE_TOOL_TYPES: EditorObjectType[] = ['ctu_robot', 'shuttle_robot', 'lift_transfer', 'turn_transfer']
+const CELL_TOOL_TYPES: EditorObjectType[] = ['road', 'blocked', 'conveyor', 'ground_conveyor']
+const NODE_TOOL_TYPES: EditorObjectType[] = ['ctu_robot', 'shuttle_robot', 'lift_transfer', 'turn_transfer', 'shuttle_dock']
 
 const COMPACT_TOOL_LABELS: Partial<Record<EditorObjectType, string>> = {
   select: '选择',
@@ -36,10 +38,12 @@ const COMPACT_TOOL_LABELS: Partial<Record<EditorObjectType, string>> = {
   road: '道路',
   blocked: '障碍',
   conveyor: '输送',
+  ground_conveyor: '地面线',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降',
   turn_transfer: '转向',
+  shuttle_dock: '出货位',
 }
 
 const COMPACT_ZONE_LABELS: Record<ZoneType, string> = {

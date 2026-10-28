@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+import json
+
+from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
 
 from ..core.config import API_PREFIX
 from ..schemas import (
+    ShuttleDockSettingsRequest,
     ShuttlePlanRequest,
     ShuttleTransferFailRequest,
     SimulationControlResponse,
@@ -14,10 +17,21 @@ from ..schemas import (
 )
 from ..services.goods import build_inventory, load_catalog
 from ..services.runtime import repo, simulation_service
+from ..services.shuttle_topology import topology_revision
 from ..services.unified_transfer import plan_transfer, shuttle_contract
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
+
+# 合同响应缓存：内容只随 (拓扑 revision, 配置 revision) 变化。缓存序列化后的
+# JSON 字节，跳过每次请求对 1402 个轨道节点的 jsonable_encoder 逐字段编码
+#（实测占热路径 ~230ms）。有界防止拓扑反复编辑时无限增长。
+_contract_response_cache: dict[tuple[str, str, str], bytes] = {}
+_CONTRACT_RESPONSE_CACHE_LIMIT = 16
+
+# 库存响应缓存：同上，4 万+条记录的逐字段编码实测 ~10 分钟。
+_goods_inventory_cache: dict[tuple[str, str], bytes] = {}
+_GOODS_INVENTORY_CACHE_LIMIT = 8
 
 
 @router.get("/health")
@@ -56,7 +70,21 @@ def goods_inventory(topology_id: str):
     topology = repo.get_topology(topology_id)
     if not topology:
         raise HTTPException(status_code=404, detail="Topology not found")
-    return {"topologyId": topology_id, "slots": build_inventory(topology["payload"])}
+    # 大型拓扑的库存是 4 万+ 条记录（~12MB）：jsonable_encoder 逐字段编码实测需要
+    # ~10 分钟并阻塞事件循环；这里直接 json.dumps 字节流返回（~0.4s），并按拓扑
+    # revision 缓存（库存只随拓扑 / 商品目录变化）。
+    payload = topology["payload"]
+    key = (topology_id, topology_revision(payload))
+    body = _goods_inventory_cache.get(key)
+    if body is None:
+        body = json.dumps(
+            {"topologyId": topology_id, "slots": build_inventory(payload)},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if len(_goods_inventory_cache) >= 8:
+            _goods_inventory_cache.clear()
+        _goods_inventory_cache[key] = body
+    return Response(content=body, media_type="application/json")
 
 
 @router.get("/goods/catalog")
@@ -70,9 +98,17 @@ def get_shuttle_contract(topology_id: str):
     if not topology:
         raise HTTPException(status_code=404, detail="Topology not found")
     try:
-        return shuttle_contract(topology["payload"])
+        result = shuttle_contract(topology["payload"])
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    key = (topology_id, str(result["topologyRevision"]), str(result["configRevision"]))
+    body = _contract_response_cache.get(key)
+    if body is None:
+        body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        if len(_contract_response_cache) >= _CONTRACT_RESPONSE_CACHE_LIMIT:
+            _contract_response_cache.clear()
+        _contract_response_cache[key] = body
+    return Response(content=body, media_type="application/json")
 
 
 @router.post("/shuttle/plan")
@@ -198,9 +234,28 @@ async def retry_shuttle_transfer(run_id: str, task_id: str):
 @router.get("/simulations/{run_id}/state")
 def get_simulation_state(run_id: str):
     try:
-        return simulation_service.get_state(run_id)
+        state = simulation_service.get_state(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
+    # 状态可能带全量库存（自动派单模式 4 万+条）：前端在 WebSocket 断开时会以
+    # 1.5s 间隔轮询本接口，jsonable_encoder 逐字段编码会拖死事件循环，
+    # 直接 json.dumps 字节流返回。
+    return Response(
+        json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"),
+        media_type="application/json",
+    )
+
+
+@router.put("/simulations/{run_id}/shuttle-docks/{dock_id}")
+def update_shuttle_dock(run_id: str, dock_id: str, payload: ShuttleDockSettingsRequest):
+    try:
+        return simulation_service.update_shuttle_dock(
+            run_id, dock_id, payload.model_dump(exclude_unset=True)
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Dock not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.get("/simulations/{run_id}/metrics")

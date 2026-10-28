@@ -8,11 +8,13 @@ import {
   CELL,
   CONVEYOR_DECK_BASE,
   CONVEYOR_DECK_STEP,
+  CONVEYOR_GROUND_BELT_Y,
   CTU_ROBOT_LEVELS,
   DIRECTION_VEC3,
   FLOOR_HEIGHT,
   GOODS_CATEGORY_COLORS,
   GOODS_DEFAULT_COLOR,
+  SHUTTLE_RACK_BASE_Y,
   ZONE_LEVEL_HEIGHT,
   buildGoodsSceneBoxes,
   buildSceneSpec,
@@ -416,6 +418,7 @@ function SpinningRollerBlock({
     floor: string
     direction: [number, number]
     levels: number
+    ground: boolean
   }
   cols: number
   rows: number
@@ -435,8 +438,11 @@ function SpinningRollerBlock({
   const rollers = useMemo(() => {
     const result: { position: [number, number, number]; axis: 'x' | 'z' }[] = []
     const count = 16
-    for (let level = 0; level < Math.min(block.levels, 2); level += 1) {
-      const y = floorY + CONVEYOR_DECK_BASE + level * CONVEYOR_DECK_STEP - 0.045
+    // 地面输送线贴地单层；架空线按层数铺滚筒。
+    const deckCount = block.ground ? 1 : Math.min(block.levels, 2)
+    const beltBase = block.ground ? CONVEYOR_GROUND_BELT_Y : CONVEYOR_DECK_BASE
+    for (let level = 0; level < deckCount; level += 1) {
+      const y = floorY + beltBase + level * CONVEYOR_DECK_STEP - 0.045
       for (let index = 0; index < count; index += 1) {
         const t = -beltW / 2 + pitch * (index + 0.5)
         result.push({
@@ -446,7 +452,7 @@ function SpinningRollerBlock({
       }
     }
     return result
-  }, [alongX, beltW, block.levels, cx, cz, floorY, pitch])
+  }, [alongX, beltW, block.ground, block.levels, cx, cz, floorY, pitch])
 
   useFrame((_, delta) => {
     const group = groupRef.current
@@ -752,7 +758,8 @@ function ShuttleLiftView({
 
   return (
     <group position={[x, 0, z]}>
-      <mesh position={[0, height / 2, 0]}>
+      {/* 井道线框随车库基座抬升；轿厢 trackY 已含基座高度 */}
+      <mesh position={[0, SHUTTLE_RACK_BASE_Y + height / 2, 0]}>
         <boxGeometry args={[CELL * 1.9, height, CELL * 1.9]} />
         <meshBasicMaterial color={active ? '#fde047' : '#22c55e'} wireframe transparent opacity={active ? 0.95 : 0.55} />
       </mesh>
@@ -766,7 +773,7 @@ function ShuttleLiftView({
           />
         </mesh>
       </SmoothLiftCab>
-      <Html position={[0, height + 0.75, 0]} center zIndexRange={[27, 17]}>
+      <Html position={[0, SHUTTLE_RACK_BASE_Y + height + 0.75, 0]} center zIndexRange={[27, 17]}>
         <div className={`simulation-scene-label shuttle-lift-label ${active ? 'active' : ''}`}>
           <b>{lift.label}</b>
           <span>{active ? activeTask?.phaseLabel : 'L1～L4'}</span>
@@ -860,7 +867,7 @@ function Simulation3DScene({
     }>()
     const blockMap = new Map<
       string,
-      { key: string; row: number; col: number; floor: string; direction: [number, number]; levels: number }
+      { key: string; row: number; col: number; floor: string; direction: [number, number]; levels: number; ground: boolean }
     >()
     const blockLookup = new Map<string, string>()
     const liftByPosition = new Map(
@@ -877,23 +884,35 @@ function Simulation3DScene({
       skipRise: boolean
     }[] = []
 
-    const nearestConveyor = (row: number, col: number, floor: string) => {
+    const nearestConveyor = (row: number, col: number, floor: string, preferGround = false) => {
+      // 按 port 归属的输送线形式优先取同类输送块；周围没有同类时回退任意输送块，
+      // 保证只画了一种线的旧拓扑动画不受影响。
       let best: (typeof cells)[number] | null = null
       let bestDistance = Number.POSITIVE_INFINITY
+      let fallback: (typeof cells)[number] | null = null
+      let fallbackDistance = Number.POSITIVE_INFINITY
       for (const cell of cells) {
         if (cell.type !== 'conveyor' || (cell.floor ?? '1F') !== floor) continue
         const distance = Math.abs(cell.row - row) + Math.abs(cell.col - col)
-        if (distance < bestDistance && distance <= 5) {
-          bestDistance = distance
-          best = cell
+        if (distance > 5) continue
+        const isGround = Boolean(cell.conveyorGround)
+        if (isGround === preferGround) {
+          if (distance < bestDistance) {
+            bestDistance = distance
+            best = cell
+          }
+        } else if (distance < fallbackDistance) {
+          fallbackDistance = distance
+          fallback = cell
         }
       }
-      return best
+      return best ?? fallback
     }
 
     // 从落货块出发，沿 conveyorDirection 逐格走到输送线末端，生成货箱的行走折线；
     // 末端若是升降移栽机，则在移栽机上从下层升到上层。
-    const conveyorPath = (start: (typeof cells)[number], lowerY: number) => {
+    // lowerY 为架空线带面高度，groundBeltY 为地面线带面高度；逐格按所在块取对应高度。
+    const conveyorPath = (start: (typeof cells)[number], lowerY: number, groundBeltY: number) => {
       const points: [number, number, number][] = []
       // 途经输送格：上层带面与下层是同一批格子，出站/回程沿这批格子行走，避免直线漂移。
       const beltCells: (typeof cells)[number][] = []
@@ -902,6 +921,7 @@ function Simulation3DScene({
       let guard = 0
       while (cell && cell.type === 'conveyor' && guard < 400) {
         guard += 1
+        y = cell.conveyorGround ? groundBeltY : lowerY
         points.push([worldX(cell.col, cols) + CELL / 2, y, worldZ(cell.row, rows) - CELL / 2])
         beltCells.push(cell)
         const blockAnchor = conveyorAnchorOf(cell)
@@ -926,6 +946,7 @@ function Simulation3DScene({
             floor: cell.floor ?? '1F',
             direction: [blockDirection.dx, blockDirection.dz],
             levels: Math.max(1, anchorCell?.levels ?? cell.levels ?? 1),
+            ground: Boolean(anchorCell?.conveyorGround ?? cell.conveyorGround),
           })
         }
         const direction = DIRECTION_VEC3[cell.conveyorDirection ?? 'right']
@@ -1022,12 +1043,13 @@ function Simulation3DScene({
         }
       }
 
-      if (hasPickStation) {
+      const robot = task.assignedRobotId ? robotsById.get(task.assignedRobotId) : undefined
+      if (hasPickStation && robot?.type !== 'shuttle') {
         if (!pickFlowPhases.has(task.phase)) continue
       } else {
-        // 没有拣货位时：任务完成即播放；CTU 已停在出入口的交付阶段也提前生成，
+        // 没有拣货位、或四向车任务（整箱走地面输送线，交付后即完成）：
+        // 任务完成即播放；机器人已停在出入口的交付阶段也提前生成，
         // 避免第一辆车交付瞬间因阶段推进而错过动画。
-        const robot = task.assignedRobotId ? robotsById.get(task.assignedRobotId) : undefined
         const atPort = robot?.currentCellId === task.deliveryCellId
         if (task.phase !== 'completed' && !(task.phase === 'delivery_to_port' && atPort)) continue
       }
@@ -1054,7 +1076,7 @@ function Simulation3DScene({
         entryCol = parsed.col
         entryFloor = parsed.floor ?? '1F'
       }
-      const conveyor = nearestConveyor(entryRow, entryCol, entryFloor)
+      const conveyor = nearestConveyor(entryRow, entryCol, entryFloor, robot?.type === 'shuttle')
       if (!conveyor) continue
       const anchor = conveyorAnchorOf(conveyor)
       const anchorCell = cells.find(
@@ -1065,22 +1087,27 @@ function Simulation3DScene({
       ) ?? conveyor
       const anchorKey = `${conveyor.floor ?? '1F'}:${anchor.row}:${anchor.col}`
       const floorIndex = Math.max(0, spec.floors.indexOf(conveyor.floor ?? '1F'))
-      // 货箱从最低一层带面进入（多层线也是先上底层）。
+      // 货箱从最低一层带面进入（多层线也是先上底层）；地面输送线（整箱）整段贴地。
+      const groundRun = Boolean(anchorCell.conveyorGround ?? conveyor.conveyorGround)
       const deckY = floorIndex * FLOOR_HEIGHT + CONVEYOR_DECK_BASE
       const lowerY = deckY + 0.16
-      let routeResult = pathCache.get(anchorKey)
+      const groundBeltY = floorIndex * FLOOR_HEIGHT + CONVEYOR_GROUND_BELT_Y
+      const baseY = groundRun ? groundBeltY : lowerY
+      const routeKey = `${anchorKey}:${groundRun ? 'g' : 'e'}`
+      let routeResult = pathCache.get(routeKey)
       if (!routeResult) {
-        routeResult = conveyorPath(anchorCell, lowerY)
-        pathCache.set(anchorKey, routeResult)
+        routeResult = conveyorPath(anchorCell, lowerY, groundBeltY)
+        pathCache.set(routeKey, routeResult)
       }
       const { points: route, beltCells } = routeResult
       const stationCell = task.pickStationCellId ? parseCellId(task.pickStationCellId) : null
-      const hold = Boolean(hasPickStation && stationCell)
+      // 地面输送线不衔接人工拣货台（整箱直接沿带面走到输送线末端）。
+      const hold = Boolean(hasPickStation && stationCell && !groundRun)
       const upperY = lowerY + CONVEYOR_DECK_STEP
       // 路线末端是否真的经过升降机抬升（末点明显高于前一点）；单层线没有升降段。
       const lifted = route.length >= 2 && route[route.length - 1][1] > route[route.length - 2][1] + 0.01
-      const stationY = lifted ? upperY : lowerY
-      const stationRaw: [number, number, number] | null = stationCell
+      const stationY = lifted ? upperY : baseY
+      const stationRaw: [number, number, number] | null = stationCell && !groundRun
         ? [
             worldX(stationCell.col, cols) + CELL / 2,
             stationY,
@@ -1091,7 +1118,7 @@ function Simulation3DScene({
       const liftRoute =
         lifted
           ? route
-          : route.length && stationY > lowerY + 0.01
+          : route.length && stationY > baseY + 0.01
             ? [
                 ...route,
                 [
@@ -1158,7 +1185,7 @@ function Simulation3DScene({
         const z = cz + direction.dz * along + perp[1] * side
         const startPoint: [number, number, number] = [
           x,
-          lowerY + Math.floor(stack / 2) * 0.32,
+          baseY + Math.floor(stack / 2) * 0.32,
           z,
         ]
         const outboundPath = [startPoint, ...stationRoute]

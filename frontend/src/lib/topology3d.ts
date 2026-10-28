@@ -20,6 +20,10 @@ export const FLOOR_HEIGHT = 4 // 楼层净高
 /** 输送带最低带面离地高度；多层带面按 CONVEYOR_DECK_STEP 依次抬升。 */
 export const CONVEYOR_DECK_BASE = 1.5
 export const CONVEYOR_DECK_STEP = 1.5
+/** 地面输送线（整箱，四向车出货用）带面离地高度：与四向车库一层轨道面齐平（0.25 + 0.35）。 */
+export const CONVEYOR_GROUND_BELT_Y = 0.6
+/** 四向车库整体抬升的基座高度：一层轨道面 = 0.25 + 0.35 = 0.6，与地面输送线带面齐平（后端 shuttle_topology.SHUTTLE_RACK_BASE_Y 同值）。 */
+export const SHUTTLE_RACK_BASE_Y = 0.25
 export const LEVEL_HEIGHT = 0.5 // 货架每层高度
 export const ZONE_LEVELS: Record<ZoneType, number> = {
   ctu: 17,
@@ -256,7 +260,7 @@ export function shuttleTrackWorldPosition(
 ): [number, number, number] {
   return [
     worldX(col, cols) + CELL / 2,
-    SHUTTLE_TRACK_SURFACE_OFFSET + (Math.max(1, level) - 1) * ZONE_LEVEL_HEIGHT.shuttle,
+    SHUTTLE_RACK_BASE_Y + SHUTTLE_TRACK_SURFACE_OFFSET + (Math.max(1, level) - 1) * ZONE_LEVEL_HEIGHT.shuttle,
     worldZ(row, rows) - CELL / 2,
   ]
 }
@@ -373,7 +377,8 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       items.push({
         kind: 'box',
         key: cell.id,
-        position: [x, y + 0.2, z],
+        // 四向车库巷道标线画在抬升基座面上；其余道路标线贴楼层地面
+        position: [x, y + (isShuttleAisle ? SHUTTLE_RACK_BASE_Y + 0.02 : 0.2), z],
         size: [CELL * 0.92, 0.04, CELL * 0.92],
         color: isShuttleAisle ? aisleColor : cellColor.road,
         floor,
@@ -400,10 +405,15 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       const cz = z - CELL / 2
       const alongX = dir.dx !== 0
 
-      const deckYs = Array.from(
-        { length: levels },
-        (_, i) => CONVEYOR_DECK_BASE + i * CONVEYOR_DECK_STEP,
-      )
+      // 地面输送线（整箱）：贴地单层带面，无支腿/拉撑/上层甲板
+      const isGroundBlock = Boolean(cell.conveyorGround)
+
+      const deckYs = isGroundBlock
+        ? [CONVEYOR_GROUND_BELT_Y]
+        : Array.from(
+            { length: levels },
+            (_, i) => CONVEYOR_DECK_BASE + i * CONVEYOR_DECK_STEP,
+          )
 
       // 参照实拍滚筒线：蓝色槽钢侧梁 + 密排镀锌滚筒 + 支腿（脚板/横撑）。
       const frameH = 0.16
@@ -509,40 +519,42 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         })
       })
 
-      // 支腿：四角立柱撑到最下层侧梁，落地脚板 + 横向拉撑
-      const legTop = y + deckYs[0] - rollerR - frameH + 0.01
-      const legBottom = y + 0.02
-      const legHeight = Math.max(0.05, legTop - legBottom)
-      for (const [ox, oz] of corners) {
+      // 支腿：四角立柱撑到最下层侧梁，落地脚板 + 横向拉撑（地面输送线带面 0.6，配同款短腿）
+      {
+        const legTop = y + deckYs[0] - rollerR - frameH + 0.01
+        const legBottom = y + 0.02
+        const legHeight = Math.max(0.05, legTop - legBottom)
+        for (const [ox, oz] of corners) {
+          items.push({
+            kind: 'box',
+            key: `${cell.id}-leg-${ox}-${oz}`,
+            position: [cx + ox, legBottom + legHeight / 2, cz + oz],
+            size: [0.07, legHeight, 0.07],
+            color: '#1e40af',
+            floor,
+            entity,
+          })
+          items.push({
+            kind: 'box',
+            key: `${cell.id}-foot-${ox}-${oz}`,
+            position: [cx + ox, y + 0.015, cz + oz],
+            size: [0.16, 0.03, 0.16],
+            color: '#1e3a8a',
+            floor,
+            entity,
+          })
+        }
+        const braceY = y + Math.min(0.35, legHeight * 0.5)
         items.push({
           kind: 'box',
-          key: `${cell.id}-leg-${ox}-${oz}`,
-          position: [cx + ox, legBottom + legHeight / 2, cz + oz],
-          size: [0.07, legHeight, 0.07],
+          key: `${cell.id}-brace`,
+          position: [cx, braceY, cz],
+          size: alongX ? [0.05, 0.05, beltW - 0.12] : [beltW - 0.12, 0.05, 0.05],
           color: '#1e40af',
           floor,
           entity,
         })
-        items.push({
-          kind: 'box',
-          key: `${cell.id}-foot-${ox}-${oz}`,
-          position: [cx + ox, y + 0.015, cz + oz],
-          size: [0.16, 0.03, 0.16],
-          color: '#1e3a8a',
-          floor,
-          entity,
-        })
       }
-      const braceY = y + Math.min(0.35, legHeight * 0.5)
-      items.push({
-        kind: 'box',
-        key: `${cell.id}-brace`,
-        position: [cx, braceY, cz],
-        size: alongX ? [0.05, 0.05, beltW - 0.12] : [beltW - 0.12, 0.05, 0.05],
-        color: '#1e40af',
-        floor,
-        entity,
-      })
     }
   }
 
@@ -558,12 +570,13 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       const entity: SceneEntity = { kind: 'zone', id: zone.id, floor }
       if (zone.type === 'shuttle') {
         // 四向车库：类似 CTU 货架，按 2×2 槽位铺 4 层货架；某槽位 4 格全为 road（巷道）则挖空，
-        // 让四向车在其中上下左右通行。薄底板 + 线框仅用于标出区域边界。
+        // 让四向车在其中上下左右通行。整库坐在抬升基座上，使一层轨道面与地面输送线带面齐平。
+        const rackBase = y + SHUTTLE_RACK_BASE_Y
         items.push({
           kind: 'box',
           key: `zone-${zone.id}-${floor}`,
-          position: [cx, y + 0.21, cz],
-          size: [zone.width * CELL, 0.1, zone.height * CELL],
+          position: [cx, y + SHUTTLE_RACK_BASE_Y / 2, cz],
+          size: [zone.width * CELL, SHUTTLE_RACK_BASE_Y, zone.height * CELL],
           color: baseColor,
           emissive: baseColor,
           opacity: 0.4,
@@ -573,7 +586,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         items.push({
           kind: 'box',
           key: `zone-${zone.id}-${floor}-outline`,
-          position: [cx, y + 0.26, cz],
+          position: [cx, rackBase + 0.05, cz],
           size: [zone.width * CELL + 0.06, 0.2, zone.height * CELL + 0.06],
           color: baseColor,
           wire: true,
@@ -587,7 +600,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
               items.push({
                 kind: 'box',
                 key: `zone-${zone.id}-${floor}-slot-${r}-${c}-empty`,
-                position: [worldX(c, cols) + CELL / 2, y + 0.28, worldZ(r, rows) - CELL / 2],
+                position: [worldX(c, cols) + CELL / 2, rackBase + 0.28, worldZ(r, rows) - CELL / 2],
                 size: [2 * CELL - 0.14, 0.02, 2 * CELL - 0.14],
                 color: '#94a3b8',
                 wire: true,
@@ -604,7 +617,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
               items.push({
                 kind: 'box',
                 key: `zone-${zone.id}-${floor}-slot-${r}-${c}-lift`,
-                position: [worldX(c, cols) + CELL / 2, y + liftHeight / 2, worldZ(r, rows) - CELL / 2],
+                position: [worldX(c, cols) + CELL / 2, rackBase + liftHeight / 2, worldZ(r, rows) - CELL / 2],
                 size: [2 * CELL - 0.14, liftHeight, 2 * CELL - 0.14],
                 color: shuttleLiftColor,
                 emissive: '#15803d',
@@ -640,7 +653,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
               key: `zone-${zone.id}-${floor}-slot-${r}-${c}`,
               x: worldX(c, cols) + CELL / 2,
               z: worldZ(r, rows) - CELL / 2,
-              y,
+              y: rackBase,
               cellsW: 2,
               cellsD: 2,
               levels: levelCount,
@@ -792,6 +805,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
     shuttle_robot: '#c084fc',
     lift_transfer: '#f97316',
     turn_transfer: '#14b8a6',
+    shuttle_dock: '#0d9488',
   }
   for (const node of topology.nodes) {
     const floor = itemFloor(node)
@@ -822,6 +836,41 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
           size: [CELL * 0.7, 0.6, CELL * 0.7],
           color,
           emissive: '#202b3c',
+          floor,
+          entity,
+        })
+      }
+      continue
+    }
+    if (node.type === 'shuttle_dock') {
+      // 四向车出货位：地面输送线上的交付垫 + 待发货箱（按 quantity 最多示意 4 箱）。
+      // 四向车驶上该垫交付后，货箱沿带面运走。
+      const under = cellAt.get(`${floor}:${node.row}:${node.col}`)
+      const beltBase = under?.conveyorGround ? CONVEYOR_GROUND_BELT_Y : CONVEYOR_DECK_BASE
+      const beltY = y + beltBase
+      const qty = Math.max(1, Math.min(4, Number(node.quantity ?? 1)))
+      items.push({
+        kind: 'box',
+        key: `${node.id}-pad`,
+        position: [x + CELL / 2, beltY + 0.03, z - CELL / 2],
+        size: [CELL * 1.7, 0.06, CELL * 1.7],
+        color: '#0d9488',
+        emissive: '#134e4a',
+        floor,
+        entity,
+      })
+      for (let index = 0; index < qty; index += 1) {
+        items.push({
+          kind: 'box',
+          key: `${node.id}-goods-${index}`,
+          position: [
+            x + CELL / 2 + ((index % 2) - 0.5) * 0.42,
+            beltY + 0.2 + Math.floor(index / 2) * 0.34,
+            z - CELL / 2 + ((Math.floor(index / 2) % 2) - 0.5) * 0.42,
+          ],
+          size: [CELL * 0.4, CELL * 0.3, CELL * 0.4],
+          color: '#f59e0b',
+          emissive: '#b45309',
           floor,
           entity,
         })
@@ -955,6 +1004,8 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       ].find((cell) => cell?.type === 'conveyor')
       const mount = onConveyor ? under : adjacentConveyor
       const levels = Math.max(1, mount?.levels ?? 1)
+      // 装在地面输送线上的设备贴地安装；架空线保持甲板高度
+      const mountBeltBase = mount?.conveyorGround ? CONVEYOR_GROUND_BELT_Y : CONVEYOR_DECK_BASE
       const isLift = node.type === 'lift_transfer'
       const w = CELL * 2 * 0.96
       const cx = x + CELL / 2
@@ -962,7 +1013,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       const frameH = 0.18
       const rollerR = 0.05
       const railW = 0.07
-      const frameBottom = y + CONVEYOR_DECK_BASE - rollerR - frameH
+      const frameBottom = y + mountBeltBase - rollerR - frameH
       const underDir = DIRECTION_VEC3[mount?.conveyorDirection ?? 'right']
       // 移栽滚筒与主线走向垂直，便于区分主线与移栽段
       const rollerAxis: 'x' | 'z' = underDir.dx !== 0 ? 'x' : 'z'
@@ -970,8 +1021,8 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       if (isLift) {
         // 升降移栽机：底座 + 两根导轨立柱 + 顶部横梁 + 液压杆 + 单个升降平台。
         // 平台停在最低层带面高度，立柱延伸到最高层上方，直观表达「平台可上下移动」。
-        const lowerDeck = y + CONVEYOR_DECK_BASE
-        const upperDeck = y + CONVEYOR_DECK_BASE + (levels - 1) * CONVEYOR_DECK_STEP
+        const lowerDeck = y + mountBeltBase
+        const upperDeck = y + mountBeltBase + (levels - 1) * CONVEYOR_DECK_STEP
         const travelTop = upperDeck + 0.22
 
         // 底座
@@ -1068,7 +1119,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       } else {
         // 转向移栽机：每层一套机架 + 滚筒台面 + 护边（双层线下层也有）。
         for (let level = 0; level < levels; level += 1) {
-          const deckTop = y + CONVEYOR_DECK_BASE + level * CONVEYOR_DECK_STEP
+          const deckTop = y + mountBeltBase + level * CONVEYOR_DECK_STEP
           items.push({
             kind: 'box',
             key: `${node.id}-frame-${level}`,

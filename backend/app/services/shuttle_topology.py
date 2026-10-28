@@ -16,7 +16,10 @@ SHUTTLE_LEVEL_HEIGHT = 1.4
 # surface sits one quarter of a bay above that bay's lower boundary; L4
 # therefore retains vehicle clearance below the structural top at 4 * 1.4.
 SHUTTLE_TRACK_SURFACE_OFFSET = SHUTTLE_LEVEL_HEIGHT / 4
-SHUTTLE_RACK_TOP_Y = len(SHUTTLE_LEVELS) * SHUTTLE_LEVEL_HEIGHT
+# 四向车库整体抬升的基座高度（与前端 SHUTTLE_RACK_BASE_Y 对齐）：
+# 一层轨道面 = 0.25 + 0.35 = 0.6，与地面输送线带面（0.6）齐平，整箱交接无高度差。
+SHUTTLE_RACK_BASE_Y = 0.25
+SHUTTLE_RACK_TOP_Y = SHUTTLE_RACK_BASE_Y + len(SHUTTLE_LEVELS) * SHUTTLE_LEVEL_HEIGHT
 SHUTTLE_COORDINATE_CONTRACT_REVISION = "shuttle-internal-levels-v1"
 DEFAULT_FLOOR = "1F"
 
@@ -24,7 +27,7 @@ DEFAULT_FLOOR = "1F"
 def shuttle_level_world_y(level: int) -> float:
     if level not in SHUTTLE_LEVELS:
         raise ValueError(f"Unsupported shuttle level: {level}")
-    return SHUTTLE_TRACK_SURFACE_OFFSET + (level - 1) * SHUTTLE_LEVEL_HEIGHT
+    return SHUTTLE_RACK_BASE_Y + SHUTTLE_TRACK_SURFACE_OFFSET + (level - 1) * SHUTTLE_LEVEL_HEIGHT
 
 
 def topology_revision(topology: dict[str, Any]) -> str:
@@ -192,22 +195,41 @@ class ShuttleConfigStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _lift_footprint_is_clear(topology: dict[str, Any], lift: dict[str, Any]) -> tuple[bool, list[str]]:
+def _node_coords(topology: dict[str, Any]) -> set[tuple[int, int]]:
+    return {
+        (int(node["row"]), int(node["col"]))
+        for node in topology.get("nodes", [])
+        if node.get("row") is not None and node.get("col") is not None
+    }
+
+
+def _lift_footprint_is_clear(
+    topology: dict[str, Any],
+    lift: dict[str, Any],
+    cells: dict[tuple[str, int, int], dict[str, Any]] | None = None,
+    node_coords: set[tuple[int, int]] | None = None,
+) -> tuple[bool, list[str]]:
     evidence: list[str] = []
     zone = next((item for item in topology.get("zones", []) if item.get("id") == lift.get("zone_id")), None)
     if not zone or zone.get("type") != "shuttle":
         return False, ["Lift zone is missing or is not a shuttle zone."]
     row, col = int(lift["row"]), int(lift["col"])
-    mask = _slot_mask(zone, row, col, _cell_lookup(topology))
+    # Reuse caller-provided lookups; rebuilding them per candidate is O(cells)
+    # each time and dominates the contract endpoint cost.
+    if cells is None:
+        cells = _cell_lookup(topology)
+    if node_coords is None:
+        node_coords = _node_coords(topology)
+    mask = _slot_mask(zone, row, col, cells)
     required_mask = sum(1 << (level - 1) for level in SHUTTLE_LEVELS)
     if mask & required_mask != required_mask:
         return False, ["The configured 2x2 slot is not an aisle on every L1-L4 level."]
     if any(
-        node.get("row") in {row, row + 1} and node.get("col") in {col, col + 1}
-        for node in topology.get("nodes", [])
+        (row + d_row, col + d_col) in node_coords
+        for d_row in (0, 1)
+        for d_col in (0, 1)
     ):
         return False, ["The lift footprint overlaps an existing topology node."]
-    cells = _cell_lookup(topology)
     floor = str(zone.get("floor") or DEFAULT_FLOOR)
     footprint = [cells.get((floor, row + d_row, col + d_col)) for d_row in (0, 1) for d_col in (0, 1)]
     if any(not cell or cell.get("type") != "road" or not cell.get("walkable", True) for cell in footprint):
@@ -227,17 +249,25 @@ def _lift_footprint_is_clear(topology: dict[str, Any], lift: dict[str, Any]) -> 
 def scan_lift_candidates(
     topology: dict[str, Any], graph: dict[str, dict[str, Any]] | None = None
 ) -> list[dict[str, Any]]:
-    """Return only real 2x2 aisle slots that can host an L1-L4 shaft.
+    """Return only the shafts explicitly marked in the editor (zone.slotLifts).
 
-    This is an audit result, not an automatic topology mutation. A candidate must
-    still be selected in a versioned configuration and reviewed by researcher B.
+    Cross-level travel must enter a marked lift shaft (升降通道) and change
+    levels inside it — never lift in a plain aisle slot. Every candidate still
+    has to pass the deterministic checks (L1-L4 track nodes with at least two
+    same-level connections, clear 2x2 road footprint). This is an audit result,
+    not an automatic topology mutation. A candidate must still be selected in a
+    versioned configuration and reviewed by researcher B.
     """
     graph = graph or build_shuttle_track_graph(topology)
+    cells = _cell_lookup(topology)
+    node_coords = _node_coords(topology)
     coordinates = sorted(
         {
-            (int(node["row"]), int(node["col"]), str(node["zone_id"]))
-            for node in graph.values()
-            if int(node["shuttle_level"]) == 1
+            (int(key.split(",")[0]), int(key.split(",")[1]), str(zone["id"]))
+            for zone in topology.get("zones", [])
+            if zone.get("type") == "shuttle"
+            for key in (zone.get("slotLifts") or [])
+            if "," in key
         }
     )
     candidates: list[dict[str, Any]] = []
@@ -246,7 +276,7 @@ def scan_lift_candidates(
         if any(node_id not in graph or len(graph[node_id]["neighbors"]) < 2 for node_id in node_ids):
             continue
         clear, evidence = _lift_footprint_is_clear(
-            topology, {"zone_id": zone_id, "row": row, "col": col}
+            topology, {"zone_id": zone_id, "row": row, "col": col}, cells, node_coords
         )
         if not clear:
             continue
@@ -273,6 +303,8 @@ def validate_shuttle_configuration(
     warnings: list[str] = []
     candidates = scan_lift_candidates(topology, graph)
     candidate_keys = {(item["row"], item["col"], item["zone_id"]) for item in candidates}
+    cells = _cell_lookup(topology)
+    node_coords = _node_coords(topology)
     if config is None:
         return {
             "topology_revision": revision,
@@ -321,7 +353,7 @@ def validate_shuttle_configuration(
         if candidate_key not in candidate_keys:
             warnings.append(f"{lift['lift_id']} is not present in the deterministic verified candidate scan.")
             continue
-        clear, evidence = _lift_footprint_is_clear(topology, lift)
+        clear, evidence = _lift_footprint_is_clear(topology, lift, cells, node_coords)
         expected_nodes = [track_node_id(level, *key) for level in SHUTTLE_LEVELS]
         if not clear or any(node_id not in graph for node_id in expected_nodes):
             warnings.extend([f"{lift['lift_id']}: {item}" for item in evidence])

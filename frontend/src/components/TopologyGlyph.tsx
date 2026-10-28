@@ -62,6 +62,22 @@ export function TopologyGlyph({
         </>
       ) : null}
 
+      {kind === 'ground_conveyor' ? (
+        <>
+          <span className="topology-glyph-conveyor-track topology-glyph-ground-track" />
+          <span className="topology-glyph-conveyor-arrow topology-glyph-ground-arrow" />
+          <span className="topology-glyph-ground-line" />
+        </>
+      ) : null}
+
+      {kind === 'shuttle_dock' ? (
+        <>
+          <span className="topology-glyph-dock-pad" />
+          <span className="topology-glyph-dock-box" />
+          <span className="topology-glyph-dock-arrow" />
+        </>
+      ) : null}
+
       {kind === 'storage' ? (
         <>
           <span className="topology-glyph-storage-frame" />

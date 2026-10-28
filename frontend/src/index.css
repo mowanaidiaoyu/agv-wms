@@ -939,6 +939,32 @@ select {
   border-color: transparent transparent transparent rgba(15, 23, 42, 0.9);
 }
 
+/* 地面输送线（整箱，四向车出货）：绿色贴地输送带 + 地面基准线 */
+.topology-glyph-ground_conveyor {
+  color: #15803d;
+}
+
+.topology-glyph-ground-track {
+  background: rgba(187, 247, 208, 0.98);
+  box-shadow: 0 0 0 2px rgba(21, 128, 61, 0.45);
+}
+
+.topology-glyph-ground-arrow {
+  border-width: 6px 0 6px 8px;
+  border-color: transparent transparent transparent rgba(15, 23, 42, 0.9);
+  top: auto;
+  bottom: 24%;
+  right: 12%;
+}
+
+.topology-glyph-ground-line {
+  width: 86%;
+  height: 2px;
+  bottom: 12%;
+  border-radius: 999px;
+  background: currentColor;
+}
+
 .topology-glyph-conveyor[data-direction='right'] .topology-glyph-conveyor-arrow,
 .topology-glyph[data-direction='right'] .topology-glyph-conveyor-arrow {
   right: 10%;
@@ -4500,6 +4526,211 @@ select {
   color: #422006;
   background: #fde047;
   box-shadow: 0 0 0 1px rgba(202, 138, 4, 0.35);
+}
+
+/* 四向车搬运（整箱出库）面板 */
+.shuttle-delivery-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.shuttle-delivery-robots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shuttle-delivery-robot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #dbe4ef;
+  border-radius: 10px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.shuttle-delivery-robot span {
+  color: #2563eb;
+}
+
+.shuttle-delivery-robot small {
+  margin-left: auto;
+  color: #64748b;
+}
+
+.shuttle-delivery-summary {
+  display: flex;
+  gap: 8px;
+}
+
+.shuttle-delivery-summary span {
+  flex: 1;
+  text-align: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #eef4fb;
+  color: #1e3a8a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shuttle-delivery-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shuttle-delivery-task {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid #dbe4ef;
+  border-left: 3px solid #2f6f9f;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.shuttle-delivery-task.done {
+  border-left-color: #16a34a;
+  opacity: 0.75;
+}
+
+.shuttle-delivery-task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.shuttle-delivery-task-head span {
+  color: #2563eb;
+  font-size: 11px;
+}
+
+.shuttle-delivery-task-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #64748b;
+  font-size: 11px;
+}
+
+/* 四向车出货位：带面上的交付垫 + 货箱 + 落箱箭头 */
+.topology-glyph-shuttle_dock {
+  color: #0f766e;
+}
+
+.topology-glyph-dock-pad {
+  width: 78%;
+  height: 22%;
+  bottom: 14%;
+  border-radius: 4px;
+  background: rgba(153, 246, 228, 0.95);
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.5);
+}
+
+.topology-glyph-dock-box {
+  width: 26%;
+  height: 26%;
+  bottom: 38%;
+  left: 37%;
+  border-radius: 3px;
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(180, 83, 9, 0.45);
+}
+
+.topology-glyph-dock-arrow {
+  width: 0;
+  height: 0;
+  top: 14%;
+  left: 42%;
+  border-style: solid;
+  border-width: 7px 0 7px 8px;
+  border-color: transparent transparent transparent rgba(15, 23, 42, 0.85);
+  transform: rotate(90deg);
+}
+
+/* 四向车出货位卡片（运行时设置） */
+.shuttle-dock-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #dbe4ef;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.shuttle-dock-card.disabled {
+  opacity: 0.6;
+}
+
+.shuttle-dock-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.shuttle-dock-card-head span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.shuttle-dock-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shuttle-dock-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: #475569;
+}
+
+.shuttle-dock-form select,
+.shuttle-dock-form input[type='number'] {
+  border: 1px solid #dbe4ef;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: #fff;
+}
+
+.shuttle-dock-check {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px !important;
+}
+
+.shuttle-dock-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shuttle-dock-actions .accent-button {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+.shuttle-dock-error {
+  color: #b91c1c;
+  font-size: 11px;
+}
+
+.shuttle-dock-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .shuttle-lift-label.active {

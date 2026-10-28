@@ -10,23 +10,38 @@ from .shuttle_topology import (
     SHUTTLE_COORDINATE_CONTRACT_REVISION,
     ShuttleConfigStore,
     build_shuttle_track_graph,
+    topology_revision,
     validate_shuttle_configuration,
 )
 
 
 TRANSFER_DATA_SOURCE = "run_isolated_simulation_snapshot"
 
+# Graph + validation only depend on (topology revision, config revision), so the
+# expensive rebuild is reused across contract/plan/runtime calls until either
+# input changes. Bounded to avoid unbounded growth across topology edits.
+_context_cache: dict[tuple[str, str, str], tuple[dict[str, dict[str, Any]], dict[str, Any]]] = {}
+_CONTEXT_CACHE_LIMIT = 16
+
 
 def shuttle_context(topology: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    graph = build_shuttle_track_graph(topology)
-    validation = validate_shuttle_configuration(
-        topology,
-        ShuttleConfigStore().load(str(topology["id"])),
-        graph,
+    config = ShuttleConfigStore().load(str(topology["id"]))
+    cache_key = (
+        str(topology["id"]),
+        topology_revision(topology),
+        str((config or {}).get("config_revision", "missing")),
     )
+    cached = _context_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    graph = build_shuttle_track_graph(topology)
+    validation = validate_shuttle_configuration(topology, config, graph)
     if not validation["planning_enabled"]:
         reason = "; ".join(validation["warnings"]) or "ShuttleGraph planning is not enabled"
         raise ValueError(reason)
+    if len(_context_cache) >= _CONTEXT_CACHE_LIMIT:
+        _context_cache.clear()
+    _context_cache[cache_key] = (graph, validation)
     return graph, validation
 
 

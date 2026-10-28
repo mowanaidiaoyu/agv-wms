@@ -66,6 +66,9 @@ def greedy_assign(
             for task in remaining:
                 if robot["type"] != task["robotType"]:
                     continue
+                # 出货位指定的车辆：任务只派给该四向车。
+                if task.get("requestedVehicleId") and robot["id"] != task["requestedVehicleId"]:
+                    continue
                 score = task_cost(robot, task, topology, path_policy, extra_blocked)
                 candidate = AssignmentInput(robot, task, score)
                 if best is None or candidate.score < best.score:

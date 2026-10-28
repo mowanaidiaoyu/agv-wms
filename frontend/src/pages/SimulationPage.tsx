@@ -27,6 +27,7 @@ import {
   OrderTimeline,
 } from '../components/simulation/OrderWorkspace'
 import { CrossLevelTransferPanel } from '../components/simulation/CrossLevelTransferPanel'
+import { ShuttleDeliveryPanel } from '../components/simulation/ShuttleDeliveryPanel'
 import { SimulationSceneBoundary } from '../components/simulation/SimulationSceneBoundary'
 import { TransferInventoryPanel } from '../components/simulation/TransferInventoryPanel'
 import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSimulationSocket'
@@ -49,7 +50,7 @@ const robotTypeLabels = {
 }
 
 type DetailTab = 'metrics' | 'devices' | 'tasks' | 'alerts'
-type WorkspaceTab = 'orders' | 'transfer' | 'inventory'
+type WorkspaceTab = 'orders' | 'shuttle' | 'transfer' | 'inventory'
 
 const runStatusLabels: Record<string, string> = {
   idle: '未启动',
@@ -484,6 +485,7 @@ export function SimulationPage() {
       <main className={`simulation-scene-stage ${workspaceTab === 'orders' && ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
         <div className="simulation-workspace-tabs" role="tablist" aria-label="工作台功能">
           <button className={workspaceTab === 'orders' ? 'active' : ''} onClick={() => setWorkspaceTab('orders')} type="button">订单任务</button>
+          <button className={workspaceTab === 'shuttle' ? 'active' : ''} onClick={() => setWorkspaceTab('shuttle')} type="button">四向车搬运</button>
           <button className={workspaceTab === 'transfer' ? 'active' : ''} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
           <button className={workspaceTab === 'inventory' ? 'active' : ''} onClick={() => setWorkspaceTab('inventory')} type="button">库存详情</button>
         </div>
@@ -495,6 +497,19 @@ export function SimulationPage() {
             onSelect={setSelectedOrderId}
             onToggle={() => setOrdersCollapsed((collapsed) => !collapsed)}
             onCreate={() => setOrderComposerOpen(true)}
+          />
+        ) : workspaceTab === 'shuttle' ? (
+          <ShuttleDeliveryPanel
+            runId={selectedRunId}
+            dockNodes={
+              topologyQuery.data?.payload.nodes.filter((node) => node.type === 'shuttle_dock') ?? []
+            }
+            runDocks={currentState?.shuttleDocks ?? []}
+            tasks={sortedTasks}
+            robots={robots}
+            onChanged={() => {
+              void refreshRunState()
+            }}
           />
         ) : workspaceTab === 'transfer' ? (
           <CrossLevelTransferPanel

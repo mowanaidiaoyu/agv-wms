@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Trash2, Layers, Box, MapPin, Type, RefreshCw } from 'lucide-react'
 import { TopologyGlyph } from '../TopologyGlyph'
+import { api } from '../../lib/api'
 import {
   CELL_LABELS,
   DIRECTION_LABELS,
@@ -19,7 +21,7 @@ import {
 } from '../../lib/topology'
 import type { EditorObjectType } from '../../types'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
-import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyPayload, ZoneType } from '../../types'
+import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyNode, TopologyPayload, ZoneType } from '../../types'
 
 const CELL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
 const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
@@ -95,6 +97,7 @@ export function TopologyPropertyPanel() {
   const deleteSelectedNode = useTopologyEditorStore((state) => state.deleteSelectedNode)
   const deleteSelectedCell = useTopologyEditorStore((state) => state.deleteSelectedCell)
   const updateConveyorLevels = useTopologyEditorStore((state) => state.updateConveyorLevels)
+  const updateConveyorGround = useTopologyEditorStore((state) => state.updateConveyorGround)
   const applyShuttleAisle = useTopologyEditorStore((state) => state.applyShuttleAisle)
   const applyShuttleSlotRemove = useTopologyEditorStore((state) => state.applyShuttleSlotRemove)
   const applyShuttleLift = useTopologyEditorStore((state) => state.applyShuttleLift)
@@ -149,6 +152,7 @@ export function TopologyPropertyPanel() {
         draft={draft}
         onUpdateCell={updateCell}
         onSetLevels={updateConveyorLevels}
+        onSetGround={updateConveyorGround}
       />
     )
   }
@@ -274,6 +278,7 @@ export function TopologyPropertyPanel() {
           <input value={node.label} onChange={(event) => updateNode(node.id, { label: event.target.value })} />
         </label>
         <NumericField label="容量" value={node.capacity} min={1} onChange={(capacity) => updateNode(node.id, { capacity: Math.max(1, Math.floor(capacity)) })} />
+        {node.type === 'shuttle_dock' ? <ShuttleDockFields node={node} onChange={updateNode} /> : null}
         <label className="topo-property-field">
           <span>所属区域</span>
           <select value={node.zoneId ?? ''} onChange={(event) => updateNode(node.id, { zoneId: event.target.value || null })}>
@@ -459,16 +464,66 @@ function ConveyorBatchEditor({
   )
 }
 
+/** 四向车出货位设置：取什么货物（商品目录）+ 取多少（箱）。 */
+function ShuttleDockFields({
+  node,
+  onChange,
+}: {
+  node: TopologyNode
+  onChange: (id: string, patch: Partial<TopologyNode>) => void
+}) {
+  const catalogQuery = useQuery({ queryKey: ['goods', 'catalog'], queryFn: () => api.getGoodsCatalog() })
+  const skus = catalogQuery.data?.skus ?? []
+
+  return (
+    <>
+      <label className="topo-property-field">
+        <span>取什么货物</span>
+        <select
+          value={node.skuId ?? ''}
+          onChange={(event) => {
+            const sku = skus.find((item) => item.skuId === event.target.value)
+            onChange(node.id, {
+              skuId: sku?.skuId ?? null,
+              skuName: sku?.name ?? null,
+              largeCategory: sku?.largeCategory ?? null,
+            })
+          }}
+        >
+          <option value="">（未设置）</option>
+          {skus.map((sku) => (
+            <option key={sku.skuId} value={sku.skuId}>
+              {sku.name}（{sku.skuId}）
+            </option>
+          ))}
+        </select>
+      </label>
+      <NumericField
+        label="取多少（箱）"
+        value={node.quantity ?? 1}
+        min={1}
+        onChange={(quantity) => onChange(node.id, { quantity: Math.max(1, Math.floor(quantity)) })}
+      />
+      <div className="topo-property-note">
+        <strong>四向车出货位</strong>
+        <p>放在地面输送线上。启动仿真后按此处设置生成搬运任务：四向车从车库取货 → 经巷道出库 → 在此交付，货箱沿带面运走。每箱一趟任务。</p>
+      </div>
+    </>
+  )
+}
+
 function ConveyorRunEditor({
   selection,
   draft,
   onUpdateCell,
   onSetLevels,
+  onSetGround,
 }: {
   selection: { kind: 'conveyor-run'; cellId: string; ids: string[]; floor: string }
   draft: TopologyPayload
   onUpdateCell: (id: string, patch: Partial<TopologyCell>) => void
   onSetLevels: (ids: string[], levels: number) => void
+  onSetGround: (ids: string[], ground: boolean) => void
 }) {
   const runCells = draft.cells.filter((cell) => selection.ids.includes(cell.id))
 
@@ -490,6 +545,7 @@ function ConveyorRunEditor({
   }
 
   const level = runCells[0]?.levels ?? 1
+  const ground = runCells[0]?.conveyorGround ?? false
 
   return (
     <div className="topo-property-body">
@@ -510,6 +566,16 @@ function ConveyorRunEditor({
         <select value={level} onChange={(event) => onSetLevels(selection.ids, Number(event.target.value))}>
           <option value={1}>单层</option>
           <option value={2}>双层</option>
+        </select>
+      </label>
+      <label className="topo-property-field">
+        <span>输送线形式</span>
+        <select
+          value={ground ? 'ground' : 'elevated'}
+          onChange={(event) => onSetGround(selection.ids, event.target.value === 'ground')}
+        >
+          <option value="elevated">架空（零散件 · CTU 交付）</option>
+          <option value="ground">地面（整箱 · 四向车出货）</option>
         </select>
       </label>
       {blocks.map((block) => (

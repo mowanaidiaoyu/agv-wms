@@ -378,12 +378,17 @@ class SimulationService:
         robots.extend(robot for robot in transfer_robots if robot["id"] not in existing_robot_ids)
 
         inventory = build_inventory(topology)
+        # 四向车出货位运行时设置（可在「四向车搬运」工作台调整，独立于拓扑编辑）。
+        shuttle_docks = self._shuttle_dock_states(topology)
         if orders:
             tasks, order_states = self._seed_order_tasks(topology, orders, inventory)
+            # 订单驱动模式同样派发四向车出库搬运任务（独立于订单、不挂订单），
+            # 否则 UI 带演示订单启动时四向车搬运永远不会出现。
+            tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks))
         elif transfers:
             tasks, order_states = [], []
         else:
-            tasks = self._seed_tasks(topology, config, inventory)
+            tasks = self._seed_tasks(topology, config, inventory, shuttle_docks)
             order_states = []
         tasks.extend(transfer_tasks)
         state = {
@@ -400,6 +405,7 @@ class SimulationService:
             "tasks": tasks,
             "orders": order_states,
             "inventory": inventory,
+            "shuttleDocks": shuttle_docks,
             "transferInventory": transfer_inventory,
             "transferEvents": transfer_events,
             "alerts": [],
@@ -522,13 +528,55 @@ class SimulationService:
         return tasks, order_states
 
     def _first_delivery_cell(self, topology: dict[str, Any]) -> str:
-        """输送线出入口（port 区域）入口格；无 port 区域时返回空串。"""
-        for zone in topology.get("zones", []):
-            if zone.get("type") == "port":
-                return port_entry_cell(topology, zone)
-        return ""
+        """输送线出入口（port 区域）入口格；无 port 区域时返回空串。
 
-    def _seed_tasks(self, topology: dict[str, Any], config: dict[str, Any], inventory: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        订单任务由 CTU 执行（零散件），优先取架空输送线的 port；
+        拓扑只画了地面线时回退第一个 port。
+        """
+        ground_ports, elevated_ports = self._split_ports_by_conveyor_kind(topology)
+        preferred = elevated_ports or ground_ports
+        return preferred[0] if preferred else ""
+
+    def _split_ports_by_conveyor_kind(self, topology: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """按最近输送块的类型把 port 分成（地面线, 架空线）两组。
+
+        地面输送线（conveyorGround）承接四向车出来的整箱货，架空输送线承接 CTU
+        的零散件。port 归属取其入口格曼哈顿 ≤5 格内最近输送块；两类都有时各自
+        独立派单，缺某一类时由调用方回退全部 port（兼容只画了一种线的拓扑）。
+        """
+        ground_ports: list[str] = []
+        elevated_ports: list[str] = []
+        for zone in topology.get("zones", []):
+            if zone.get("type") != "port":
+                continue
+            entry = port_entry_cell(topology, zone)
+            try:
+                floor, row, col = parse_cell_id(entry)
+            except (TypeError, ValueError):
+                elevated_ports.append(entry)
+                continue
+            best: tuple[int, bool] | None = None
+            for cell in topology.get("cells", []):
+                if cell.get("type") != "conveyor" or (cell.get("floor") or "1F") != floor:
+                    continue
+                distance = abs(int(cell["row"]) - row) + abs(int(cell["col"]) - col)
+                if distance > 5:
+                    continue
+                if best is None or distance < best[0]:
+                    best = (distance, bool(cell.get("conveyorGround")))
+            if best and best[1]:
+                ground_ports.append(entry)
+            else:
+                elevated_ports.append(entry)
+        return ground_ports, elevated_ports
+
+    def _seed_tasks(
+        self,
+        topology: dict[str, Any],
+        config: dict[str, Any],
+        inventory: list[dict[str, Any]] | None = None,
+        shuttle_docks: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         if inventory is None:
             inventory = build_inventory(topology)
         order_gen = config.get("orderGenerator") or {}
@@ -585,6 +633,24 @@ class SimulationService:
             # 没有输送线出入口就无法交付，返回空任务（前端会提示用户先画 port 区域）。
             return []
 
+        # 两类输送线分流：CTU（零散件）走架空线 port；四向车（整箱）直接驶上地面
+        # 输送线交付，目标取地面线的 2×2 块锚点——port 是 CTU 定位概念，四向车不需要。
+        # 无地面线时回退地面 port / 全部 port，保持旧行为。
+        ground_ports, elevated_ports = self._split_ports_by_conveyor_kind(topology)
+        ctu_delivery_cells = elevated_ports or delivery_cells
+        ground_anchor_cells: set[str] = set()
+        for cell in topology.get("cells", []):
+            if cell.get("type") != "conveyor" or not cell.get("conveyorGround"):
+                continue
+            anchor = cell.get("conveyorAnchor") or {"row": cell["row"], "col": cell["col"]}
+            ground_anchor_cells.add(
+                cell_id(int(anchor["row"]), int(anchor["col"]), cell.get("floor") or "1F")
+            )
+        if ground_anchor_cells:
+            shuttle_delivery_cells = sorted(ground_anchor_cells)
+        else:
+            shuttle_delivery_cells = ground_ports or delivery_cells
+
         max_orders = max(1, int(order_gen.get("maxOrders", 8)))
         lines_min = max(1, int(order_gen.get("linesPerOrderMin", 1)))
         lines_max = max(lines_min, int(order_gen.get("linesPerOrderMax", lines_min)))
@@ -593,18 +659,92 @@ class SimulationService:
 
         tasks: list[dict[str, Any]] = []
         for index in range(max_orders):
-            delivery = delivery_cells[index % len(delivery_cells)]
+            delivery = ctu_delivery_cells[index % len(ctu_delivery_cells)]
             line_count = rng.randint(lines_min, lines_max)
             lines = take_lines(line_count)
             if not lines:
                 break
             tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, delivery, False, 2))
 
+        tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks))
+        return tasks
+
+    @staticmethod
+    def _shuttle_dock_states(topology: dict[str, Any]) -> list[dict[str, Any]]:
+        """从拓扑节点构建出货位运行时设置（含库位轮转游标）。"""
+        return [
+            {
+                "dockId": node["id"],
+                "label": node.get("label") or node["id"],
+                "row": int(node["row"]),
+                "col": int(node["col"]),
+                "floor": node.get("floor") or "1F",
+                "skuId": node.get("skuId"),
+                "skuName": node.get("skuName"),
+                "largeCategory": node.get("largeCategory"),
+                "quantity": max(1, int(node.get("quantity") or 1)),
+                "priority": "normal",
+                "vehicleId": None,
+                "loop": False,
+                "enabled": True,
+                "cursor": 0,
+            }
+            for node in topology.get("nodes", [])
+            if node.get("type") == "shuttle_dock"
+        ]
+
+    def _seed_shuttle_tasks(
+        self,
+        topology: dict[str, Any],
+        shuttle_docks: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """四向车出库搬运任务：库位 → 驶出车库 → 地面输送线交付。
+
+        独立于订单流程（不挂订单），订单驱动 / 自动派单两种模式都会追加这组任务。
+        运行时出货位设置（shuttle_docks 状态）优先：按出货位生成搬运任务（每箱一趟）；
+        未传状态时回退读取拓扑上的出货位节点；都没有时自动派 6 个任务（随机库位）。
+        """
+        shuttle_sources = shuttle_rack_slots(topology)
+        if not shuttle_sources:
+            return []
+        if shuttle_docks is None:
+            shuttle_docks = self._shuttle_dock_states(topology)
+        docks = [
+            dock for dock in shuttle_docks
+            if dock.get("enabled", True)
+        ]
+        if docks:
+            tasks: list[dict[str, Any]] = []
+            for dock in docks:
+                for _ in range(int(dock.get("quantity") or 1)):
+                    tasks.append(self._build_dock_task(topology, dock, shuttle_sources))
+            return tasks
+        delivery_cells = [
+            port_entry_cell(topology, zone)
+            for zone in topology.get("zones", [])
+            if zone.get("type") == "port"
+        ]
+        if not delivery_cells:
+            return []
+        ground_ports, elevated_ports = self._split_ports_by_conveyor_kind(topology)
+        ground_anchor_cells: set[str] = set()
+        for cell in topology.get("cells", []):
+            if cell.get("type") != "conveyor" or not cell.get("conveyorGround"):
+                continue
+            anchor = cell.get("conveyorAnchor") or {"row": cell["row"], "col": cell["col"]}
+            ground_anchor_cells.add(
+                cell_id(int(anchor["row"]), int(anchor["col"]), cell.get("floor") or "1F")
+            )
+        # 四向车交付目标：优先地面线 2×2 块锚点（直接驶上带面交付，port 是 CTU 概念）；
+        # 无地面线时回退地面 port / 全部 port，保持旧行为。
+        shuttle_delivery_cells: list[str] = (
+            sorted(ground_anchor_cells) if ground_anchor_cells else (ground_ports or delivery_cells)
+        )
+
+        tasks = []
         for index in range(6):
-            if not shuttle_sources:
-                break
             cell, layer = shuttle_sources[index % len(shuttle_sources)]
-            delivery = delivery_cells[index % len(delivery_cells)]
+            delivery = shuttle_delivery_cells[index % len(shuttle_delivery_cells)]
             tasks.append(
                 self._build_task(
                     topology,
@@ -618,6 +758,153 @@ class SimulationService:
                 )
             )
         return tasks
+
+    def _build_dock_task(
+        self,
+        topology: dict[str, Any],
+        dock: dict[str, Any],
+        shuttle_sources: list[tuple[str, int]],
+        created_tick: int = 0,
+    ) -> dict[str, Any]:
+        """按出货位设置构建一趟搬运任务（每箱一趟），并推进该出货位的库位轮转游标。"""
+        dock["cursor"] = int(dock.get("cursor") or 0) + 1
+        cell, layer = shuttle_sources[dock["cursor"] % len(shuttle_sources)]
+        delivery_cell = cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F")
+        line: dict[str, Any] = {"cellId": cell, "layer": layer}
+        for field in ("skuId", "skuName", "largeCategory"):
+            value = str(dock.get(field) or "").strip()
+            if value:
+                line[field] = value
+        priority = 1 if dock.get("priority") == "urgent" else 2
+        task = self._build_task(
+            topology,
+            f"task-dock-{dock['dockId']}-{dock['cursor']}",
+            "shuttle",
+            "cross_zone",
+            [line],
+            delivery_cell,
+            dock.get("priority") == "urgent",
+            priority,
+            created_tick=created_tick,
+        )
+        task["dockId"] = dock["dockId"]
+        if dock.get("vehicleId"):
+            task["requestedVehicleId"] = dock["vehicleId"]
+        return task
+
+    def update_shuttle_dock(self, run_id: str, dock_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        """运行时调整出货位设置（取什么货物/取多少/优先级/指定车辆/循环/启停）。
+
+        仅重排该出货位「未分配」的任务；执行中与已完成的任务保持不变。
+        """
+        runtime = self._require_runtime(run_id)
+        state = runtime.state
+        dock = next(
+            (item for item in state.get("shuttleDocks", []) if item["dockId"] == dock_id),
+            None,
+        )
+        if dock is None:
+            # 出货位不在 Run 状态里时自动补建（无需重启 Run）：
+            # 先查启动时的拓扑快照，再查最新保存的拓扑（Run 启动后新加的出货位）。
+            dock = next(
+                (
+                    item for item in self._shuttle_dock_states(runtime.topology)
+                    if item["dockId"] == dock_id
+                ),
+                None,
+            )
+            if dock is None:
+                latest = self.repo.get_topology(runtime.topology["id"])
+                dock = next(
+                    (
+                        item for item in self._shuttle_dock_states((latest or {}).get("payload") or {})
+                        if item["dockId"] == dock_id
+                    ),
+                    None,
+                )
+            if dock is None:
+                raise KeyError(dock_id)
+            state.setdefault("shuttleDocks", []).append(dock)
+        if "priority" in patch and patch["priority"] not in {None, "normal", "urgent"}:
+            raise ValueError(f"不支持的出货位优先级: {patch['priority']}")
+        vehicle_id = patch.get("vehicleId")
+        if vehicle_id:
+            robot = next(
+                (
+                    item for item in state.get("robots", [])
+                    if item["id"] == vehicle_id and item.get("type") == "shuttle"
+                ),
+                None,
+            )
+            if robot is None:
+                raise ValueError(f"指定车辆不存在或不是四向车: {vehicle_id}")
+
+        for field in ("skuId", "skuName", "largeCategory"):
+            if field in patch:
+                dock[field] = (str(patch[field]).strip() or None) if patch[field] else None
+        if "quantity" in patch and patch["quantity"] is not None:
+            dock["quantity"] = max(1, int(patch["quantity"]))
+        if "priority" in patch:
+            dock["priority"] = patch["priority"] or "normal"
+        if "vehicleId" in patch:
+            dock["vehicleId"] = (str(patch["vehicleId"]).strip() or None) if patch["vehicleId"] else None
+        for field in ("loop", "enabled"):
+            if field in patch:
+                dock[field] = bool(patch[field])
+
+        tick = int(state["tick"])
+        tasks = state["tasks"]
+        # 只移除「未分配」的任务重新生成；执行中 / 已完成保持不变。
+        tasks[:] = [
+            task for task in tasks
+            if not (task.get("dockId") == dock_id and task["status"] == "pending")
+        ]
+        if dock.get("enabled", True):
+            shuttle_sources = shuttle_rack_slots(runtime.topology)
+            if shuttle_sources:
+                for _ in range(int(dock.get("quantity") or 1)):
+                    tasks.append(
+                        self._build_dock_task(runtime.topology, dock, shuttle_sources, created_tick=tick)
+                    )
+        dock["regeneratedTick"] = tick
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"dockId": dock_id, "settings": {key: dock.get(key) for key in ("skuId", "skuName", "quantity", "priority", "vehicleId", "loop", "enabled")}},
+        )
+        self._refresh_metrics(runtime)
+        self._persist(runtime)
+        return {"runId": run_id, "dockId": dock_id, **{key: dock.get(key) for key in ("skuId", "skuName", "largeCategory", "quantity", "priority", "vehicleId", "loop", "enabled")}}
+
+    def _maybe_loop_dock_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """循环搬运：出货位开启 loop 时，任务完成后自动补一趟（队列保持 quantity 上限）。"""
+        dock_id = task.get("dockId")
+        if not dock_id:
+            return
+        dock = next(
+            (item for item in runtime.state.get("shuttleDocks", []) if item["dockId"] == dock_id),
+            None,
+        )
+        if not dock or not dock.get("loop") or not dock.get("enabled", True):
+            return
+        outstanding = sum(
+            1
+            for other in runtime.state.get("tasks", [])
+            if other.get("dockId") == dock_id and other["status"] in {"pending", "assigned"}
+        )
+        if outstanding >= int(dock.get("quantity") or 1):
+            return
+        shuttle_sources = shuttle_rack_slots(runtime.topology)
+        if not shuttle_sources:
+            return
+        new_task = self._build_dock_task(
+            runtime.topology,
+            dock,
+            shuttle_sources,
+            created_tick=int(runtime.state["tick"]),
+        )
+        runtime.state["tasks"].append(new_task)
 
     def _build_task(
         self,
@@ -828,7 +1115,9 @@ class SimulationService:
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
-        if persist:
+        # 全量状态落库很重（任务含完整 plan，状态随历史增长）；常规 tick 降频为
+        # 每 10 tick 一次，结束/控制操作仍即时落库（其余 _persist 调用点不变）。
+        if persist and tick % 10 == 0:
             self._persist(runtime)
 
     def _inject_faults(self, runtime: RunRuntime, tick: int) -> None:
@@ -1037,6 +1326,7 @@ class SimulationService:
                 if robot.get("type") == task.get("robotType")
                 and not robot.get("failed")
                 and robot.get("status") not in {"failed", "exception"}
+                and (not task.get("requestedVehicleId") or robot["id"] == task["requestedVehicleId"])
             ]
             if not compatible:
                 self._fail_pending_task(runtime, task, "no_compatible_robot")
@@ -1931,6 +2221,8 @@ class SimulationService:
             runtime.metrics["urgentOrdersHandled"] += 1
         task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
         self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+        # 出货位循环搬运：开启 loop 的出货位任务完成后自动补一趟。
+        self._maybe_loop_dock_task(runtime, task)
 
     async def complete_picking(self, run_id: str, task_id: str) -> dict[str, Any]:
         """人工拣货手动跳过：立即结束拣货（有放置区时进入放置阶段），并广播当前 tick。"""
@@ -2030,6 +2322,8 @@ class SimulationService:
         if task["phase"] == "pickup_from_shuttle":
             robot["load"] = min(robot.get("capacity", 1), robot.get("load", 0) + 1)
             task["picked"] = task.get("picked", 0) + 1
+            # 记录车载货箱，交付动作才能把实载数据写进 deliveredGoods（前端按它渲染交付货箱）。
+            robot["carrying"] = [dict(line) for line in (task.get("lines") or [])]
             if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=1):
                 task["phaseLabel"] = "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})

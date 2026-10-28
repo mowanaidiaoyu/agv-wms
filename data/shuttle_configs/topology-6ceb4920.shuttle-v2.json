@@ -1,25 +1,40 @@
 {
   "topology_id": "topology-6ceb4920",
   "topology_version": "2.0.0",
-  "source_topology_revision": "2.0.0:46a05caff18ff61b",
-  "config_revision": "shuttle-4l-lift-pyc-v1",
+  "source_topology_revision": "2.0.0:fe9fd41bf5cec86b",
+  "config_revision": "shuttle-4l-lift-slotlifts-v6",
   "data_source": "topology_slot_aisles",
   "review_status": "program_verified_pending_human",
   "selection_basis": [
-    "Lift-A and Lift-B reuse C's reviewed ShuttleGraph coordinates after deterministic validation against the PYC topology revision.",
-    "Both positions are real 2x2 road-backed slotAisles passages with L1-L4 bits enabled.",
+    "Lift-A and Lift-B are placed on the shafts explicitly marked in the topology editor (zone.slotLifts): cross-level travel must enter a marked shaft and lift inside it, never in a plain aisle slot.",
+    "Both positions are real 2x2 road-backed slotAisles passages with L1-L4 bits enabled and at least two same-level track connections on every level.",
     "The coordinate mapping is derived from topology row/col and shuttle level height; physical placement still requires human review."
   ],
   "lifts": [
     {
       "lift_id": "shuttle-lift-a",
       "label": "Lift-A",
-      "zone_id": "zone-shuttle-3",
-      "row": 100,
-      "col": 19,
-      "supported_levels": [1, 2, 3, 4],
-      "level_entrances": {"L1": "L1-r100-c19", "L2": "L2-r100-c19", "L3": "L3-r100-c19", "L4": "L4-r100-c19"},
-      "level_exits": {"L1": "L1-r100-c19", "L2": "L2-r100-c19", "L3": "L3-r100-c19", "L4": "L4-r100-c19"},
+      "zone_id": "zone-shuttle-2",
+      "row": 98,
+      "col": 21,
+      "supported_levels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "level_entrances": {
+        "L1": "L1-r98-c21",
+        "L2": "L2-r98-c21",
+        "L3": "L3-r98-c21",
+        "L4": "L4-r98-c21"
+      },
+      "level_exits": {
+        "L1": "L1-r98-c21",
+        "L2": "L2-r98-c21",
+        "L3": "L3-r98-c21",
+        "L4": "L4-r98-c21"
+      },
       "capacity": 1,
       "enter_time_seconds": 1.0,
       "travel_time_per_level_seconds": 3.0,
@@ -30,12 +45,27 @@
     {
       "lift_id": "shuttle-lift-b",
       "label": "Lift-B",
-      "zone_id": "zone-shuttle-30",
-      "row": 188,
-      "col": 39,
-      "supported_levels": [1, 2, 3, 4],
-      "level_entrances": {"L1": "L1-r188-c39", "L2": "L2-r188-c39", "L3": "L3-r188-c39", "L4": "L4-r188-c39"},
-      "level_exits": {"L1": "L1-r188-c39", "L2": "L2-r188-c39", "L3": "L3-r188-c39", "L4": "L4-r188-c39"},
+      "zone_id": "zone-shuttle-2",
+      "row": 98,
+      "col": 49,
+      "supported_levels": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "level_entrances": {
+        "L1": "L1-r98-c49",
+        "L2": "L2-r98-c49",
+        "L3": "L3-r98-c49",
+        "L4": "L4-r98-c49"
+      },
+      "level_exits": {
+        "L1": "L1-r98-c49",
+        "L2": "L2-r98-c49",
+        "L3": "L3-r98-c49",
+        "L4": "L4-r98-c49"
+      },
       "capacity": 1,
       "enter_time_seconds": 1.0,
       "travel_time_per_level_seconds": 3.0,

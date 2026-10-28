@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
 CellType = Literal["road", "blocked", "conveyor"]
 ConveyorDirection = Literal["right", "left", "up", "down"]
-NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer"]
+NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer", "shuttle_dock"]
 SimulationStatus = Literal["idle", "running", "paused", "stopped", "completed"]
 
 
@@ -45,6 +45,8 @@ class TopologyCell(BaseModel):
     conveyorDirection: ConveyorDirection | None = None
     levels: int = 1
     conveyorAnchor: dict[str, int] | None = None
+    # 地面输送线（整箱，四向车出货用）：贴地单层带面；架空输送线（零散件，CTU 用）保持默认 False
+    conveyorGround: bool = False
 
 
 class TopologyNode(BaseModel):
@@ -56,6 +58,12 @@ class TopologyNode(BaseModel):
     zoneId: str | None = None
     capacity: int = 1
     label: str
+    # 四向车出货位（shuttle_dock）专用：设置取什么货物、取多少。
+    # 仿真启动时按出货位生成搬运任务：四向车取货 → 经巷道出库 → 在地面输送线上交付移动。
+    skuId: str | None = None
+    skuName: str | None = None
+    largeCategory: str | None = None
+    quantity: int | None = None
 
 
 class TopologyMeta(BaseModel):
@@ -137,6 +145,19 @@ class SimulationStartRequest(BaseModel):
     topologyId: str
     orders: list[SimulationOrderInput] = Field(default_factory=list)
     transfers: list[ShuttleTransferInput] = Field(default_factory=list)
+
+
+class ShuttleDockSettingsRequest(BaseModel):
+    """四向车出货位运行时设置（四向车搬运工作台）。未传字段保持不变。"""
+
+    skuId: str | None = None
+    skuName: str | None = None
+    largeCategory: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    priority: Literal["normal", "urgent"] | None = None
+    vehicleId: str | None = None
+    loop: bool | None = None
+    enabled: bool | None = None
 
 
 class ShuttlePlanRequest(BaseModel):

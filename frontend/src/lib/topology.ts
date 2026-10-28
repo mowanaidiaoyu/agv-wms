@@ -20,10 +20,12 @@ export const OBJECT_LABELS: Record<EditorObjectType, string> = {
   road: '通行路',
   blocked: '障碍物',
   conveyor: '输送带',
+  ground_conveyor: '地面输送线',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
+  shuttle_dock: '四向车出货位',
 }
 
 export const CELL_LABELS: Record<CellType, string> = {
@@ -38,6 +40,7 @@ export const NODE_LABELS: Record<NodeType, string> = {
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
+  shuttle_dock: '四向车出货位',
 }
 
 export const ZONE_LABELS: Record<ZoneType, string> = {
@@ -61,6 +64,7 @@ export const NODE_PREFIX: Record<NodeType, string> = {
   shuttle_robot: 'shuttle',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
+  shuttle_dock: 'dock',
 }
 
 /** 只读展示型（节点需要“贴地”，通常在通行路格上承载）。 */
@@ -69,7 +73,7 @@ export const BUSINESS_NODE_TYPES: ReadonlySet<NodeType> = new Set(['storage'])
 export const DEVICE_NODE_TYPES: ReadonlySet<NodeType> = new Set(['ctu_robot', 'shuttle_robot'])
 
 /** 可落在输送带格上的节点（升降移载机 / 转向移载机）。 */
-export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer'])
+export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer', 'shuttle_dock'])
 
 export const NODE_TOOL: Partial<Record<NodeType, EditorObjectType>> = {
   ctu_robot: 'ctu_robot',
@@ -84,13 +88,20 @@ export function isNodeTool(tool: EditorObjectType): boolean {
 
 export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
 
-export const CELL_BRUSH_TOOLS: ReadonlySet<CellType> = new Set(['road', 'blocked', 'conveyor'])
+/** 画刷工具（铺格）；ground_conveyor 是伪工具：铺 conveyor 格并带地面标记。 */
+export const CELL_BRUSH_TOOLS: ReadonlySet<EditorObjectType> = new Set([
+  'road',
+  'blocked',
+  'conveyor',
+  'ground_conveyor',
+])
 
 /** 「批量选择」工具在「批量放置」动作下可选放置的对象类型（铺格 + 节点）。 */
 export const BATCH_PLACE_TYPES: EditorObjectType[] = [
   'road',
   'blocked',
   'conveyor',
+  'ground_conveyor',
   'ctu_robot',
   'shuttle_robot',
   'lift_transfer',
@@ -227,8 +238,8 @@ export function nodeFootprint(
   node: Pick<TopologyNode, 'type' | 'zoneId'>,
 ): number {
   const zoneType = findZoneById(topology, node.zoneId ?? '')?.type
-  // 输送带上的设备（升降移载机 / 转向移载机）固定 2×2，与输送带块同口径
-  if (node.type === 'lift_transfer' || node.type === 'turn_transfer') {
+  // 输送带上的设备（升降移载机 / 转向移载机 / 四向车出货位）固定 2×2，与输送带块同口径
+  if (node.type === 'lift_transfer' || node.type === 'turn_transfer' || node.type === 'shuttle_dock') {
     return 2
   }
   // 库位 / 四向车：四向车库位(托盘) 2×2，CTU 料箱位 1×1
@@ -312,6 +323,7 @@ const NODE_ZONE_AFFINITY: Record<NodeType, ReadonlySet<ZoneType>> = {
   shuttle_robot: new Set(['shuttle']),
   lift_transfer: new Set<ZoneType>(),
   turn_transfer: new Set<ZoneType>(),
+  shuttle_dock: new Set<ZoneType>(),
 }
 
 export function zoneRefForNodeType(
@@ -514,7 +526,7 @@ export function paintCell(
   col: number,
   floor = GROUND_FLOOR,
   directionFrom?: GridPoint | null,
-  options?: { skipOccupied?: boolean },
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   if (type === 'conveyor') {
     return paintConveyorBlock(topology, row, col, floor, directionFrom, options)
@@ -530,7 +542,7 @@ function paintSingleCell(
   floor: string,
   direction: ConveyorDirection | null,
   anchor: GridPoint | null = null,
-  options?: { skipOccupied?: boolean },
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) return { topology, painted: false }
   const node = findNodeAt(topology, row, col, floor)
@@ -561,7 +573,8 @@ function paintSingleCell(
       walkable: walkableForType(type),
       conveyorDirection: type === 'conveyor' ? (direction ?? existing.conveyorDirection ?? 'right') : null,
       conveyorAnchor: type === 'conveyor' ? (anchor ?? { row, col }) : null,
-      ...(type === 'conveyor' ? { levels: existing.levels ?? 1 } : {}),
+      // 重铺时显式写标记：普通输送带工具会把地面线刷回架空线
+      ...(type === 'conveyor' ? { levels: existing.levels ?? 1, conveyorGround: Boolean(options?.ground) } : {}),
     }
   } else {
     const cell = makeCell(row, col, type, floor)
@@ -569,6 +582,7 @@ function paintSingleCell(
     if (type === 'conveyor') {
       cell.conveyorDirection = direction ?? 'right'
       cell.conveyorAnchor = anchor ?? { row, col }
+      cell.conveyorGround = Boolean(options?.ground)
     }
     next.cells.push(cell)
   }
@@ -582,7 +596,7 @@ function paintConveyorBlock(
   col: number,
   floor: string,
   directionFrom: GridPoint | null | undefined,
-  options?: { skipOccupied?: boolean },
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   const anchor = { row, col }
   if (anchor.row < 0 || anchor.row + 1 >= topology.grid.rows || anchor.col < 0 || anchor.col + 1 >= topology.grid.cols) {
@@ -613,13 +627,14 @@ export function paintStroke(
   type: CellType,
   cells: GridPoint[],
   floor = GROUND_FLOOR,
+  options?: { ground?: boolean },
 ): TopologyPayload {
   const ordered = type === 'conveyor' ? snapConveyorAnchors(uniqueOrderedCells(cells)) : uniqueOrderedCells(cells)
   let current = topology
   let previous: GridPoint | null = null
   for (const point of ordered) {
     if (previous && previous.row === point.row && previous.col === point.col) continue
-    const result = paintCell(current, type, point.row, point.col, floor, previous)
+    const result = paintCell(current, type, point.row, point.col, floor, previous, options)
     current = result.topology
     previous = point
   }
@@ -652,6 +667,13 @@ export function placeNode(
 ): { topology: TopologyPayload; message?: string } | null {
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
+  }
+  // 出货位只能放在地面输送线上：四向车仅沿车库巷道、升降通道和地面输送线移动。
+  if (type === 'shuttle_dock') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
+    }
   }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(type)) {
@@ -721,9 +743,10 @@ export function fillNodes(
   type: NodeType,
   box: CellBox,
   floor = GROUND_FLOOR,
-): { topology: TopologyPayload; placed: number } {
+): { topology: TopologyPayload; placed: number; message?: string } {
   let current = topology
   let placed = 0
+  let lastMessage: string | undefined
   for (let row = box.row0; row <= box.row1; row += 1) {
     for (let col = box.col0; col <= box.col1; col += 1) {
       if (findNodeAt(current, row, col, floor)) continue
@@ -731,10 +754,12 @@ export function fillNodes(
       if (result && !result.message) {
         current = result.topology
         placed += 1
+      } else if (result?.message) {
+        lastMessage = result.message
       }
     }
   }
-  return { topology: current, placed }
+  return { topology: current, placed, message: placed ? undefined : lastMessage }
 }
 
 /**
@@ -752,6 +777,13 @@ export function moveNode(
   if (!node) return { topology, message: '找不到该节点。' }
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
+  }
+  // 出货位只能放在地面输送线上：四向车仅沿车库巷道、升降通道和地面输送线移动。
+  if (node.type === 'shuttle_dock') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
+    }
   }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(node.type)) {

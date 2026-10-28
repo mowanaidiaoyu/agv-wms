@@ -73,6 +73,7 @@ const NODE_TOOL_OF: Partial<Record<EditorObjectType, NodeType>> = {
   shuttle_robot: 'shuttle_robot',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
+  shuttle_dock: 'shuttle_dock',
 }
 
 interface DragState {
@@ -180,6 +181,7 @@ interface TopologyEditorStore {
   resyncZone: (id: string) => void
   batchAssignZone: (nodeIds: string[], zoneId: string | null) => void
   updateConveyorLevels: (ids: string[], levels: number) => void
+  updateConveyorGround: (ids: string[], ground: boolean) => void
   applyShuttleAisle: (slots: { row: number; col: number }[], aisle: boolean, floor?: string) => void
   applyShuttleSlotRemove: (slots: { row: number; col: number }[], removed: boolean, floor?: string) => void
   applyShuttleLift: (slots: { row: number; col: number }[], lift: boolean, floor?: string) => void
@@ -250,11 +252,12 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       return
     }
     const placeType = state.batchPlaceType
-    if (CELL_BRUSH_TOOLS.has(placeType as CellType)) {
-      const brush = placeType as CellType
-      const next = paintStroke(state.draft, brush, cellsInBox(box), state.activeFloor)
+    if (CELL_BRUSH_TOOLS.has(placeType)) {
+      const isGround = placeType === 'ground_conveyor'
+      const brush = (isGround ? 'conveyor' : placeType) as CellType
+      const next = paintStroke(state.draft, brush, cellsInBox(box), state.activeFloor, { ground: isGround })
       withSelection(() => next)
-      set({ notice: { kind: 'info', text: `已批量铺设 ${CELL_LABELS[brush]}。` } })
+      set({ notice: { kind: 'info', text: `已批量铺设 ${isGround ? '地面输送线' : CELL_LABELS[brush]}。` } })
       return
     }
     const nodeType = NODE_TOOL_OF[placeType]
@@ -264,7 +267,7 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       set({
         notice: result.placed
           ? { kind: 'info', text: `已批量放置 ${result.placed} 个${NODE_LABELS[nodeType]}。` }
-          : { kind: 'warn', text: '该区域没有可放置的格子。' },
+          : { kind: 'warn', text: result.message || '该区域没有可放置的格子。' },
       })
     }
   }
@@ -465,9 +468,10 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         set({ pointerDown: true, lastPaint: { row, col }, drag: { mode: 'paint', origin: { row, col }, current: { row, col }, moved: false } })
         return
       }
-      if (CELL_BRUSH_TOOLS.has(state.activeTool as CellType)) {
-        const brushType = state.activeTool as CellType
-        const painted = paintCell(state.draft, brushType, row, col, state.activeFloor, null)
+      if (CELL_BRUSH_TOOLS.has(state.activeTool)) {
+        const isGround = state.activeTool === 'ground_conveyor'
+        const brushType = (isGround ? 'conveyor' : state.activeTool) as CellType
+        const painted = paintCell(state.draft, brushType, row, col, state.activeFloor, null, { ground: isGround })
         withSelection(() => painted.topology)
         set({ pointerDown: true, lastPaint: { row, col }, drag: { mode: 'paint', origin: { row, col }, current: { row, col }, moved: false } })
         return
@@ -537,8 +541,10 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         set({ lastPaint: { row, col } })
         return
       }
-      if (CELL_BRUSH_TOOLS.has(tool as CellType)) {
-        const next = paintStroke(state.draft, tool as CellType, [state.lastPaint, { row, col }], state.activeFloor)
+      if (CELL_BRUSH_TOOLS.has(tool)) {
+        const isGround = tool === 'ground_conveyor'
+        const brush = (isGround ? 'conveyor' : tool) as CellType
+        const next = paintStroke(state.draft, brush, [state.lastPaint, { row, col }], state.activeFloor, { ground: isGround })
         withSelection(() => next)
         set({ lastPaint: { row, col } })
       }
@@ -588,13 +594,13 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         const nodeType = NODE_TOOL_OF[state.activeTool]
         if (nodeType && drag.origin) {
           const box = normalizeSelectionBox(drag.origin, drag.current ?? drag.origin)
-          const { topology, placed } = fillNodes(state.draft, nodeType, box, state.activeFloor)
+          const { topology, placed, message } = fillNodes(state.draft, nodeType, box, state.activeFloor)
           withSelection(() => topology)
           set({
             marquee: null,
             notice: placed
               ? { kind: 'info', text: `已放置 ${placed} 个${NODE_LABELS[nodeType]}。` }
-              : { kind: 'warn', text: '该区域没有可放置的格子。' },
+              : { kind: 'warn', text: message || '该区域没有可放置的格子。' },
           })
         }
         set({ marquee: null, drag: { mode: 'none', origin: null, current: null, moved: false } })
@@ -765,10 +771,13 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       withSelection((draft) => {
         const cell = draft.cells.find((item) => item.id === id)
         if (!cell) return draft
-        // 输送带按 2×2 块联动：方向/层数/介质类型变更同步到整块 4 格
+        // 输送带按 2×2 块联动：方向/层数/地面标记/介质类型变更同步到整块 4 格
         const touchesConveyorField =
           cell.type === 'conveyor' &&
-          (patch.conveyorDirection !== undefined || patch.levels !== undefined || patch.type !== undefined)
+          (patch.conveyorDirection !== undefined ||
+            patch.levels !== undefined ||
+            patch.conveyorGround !== undefined ||
+            patch.type !== undefined)
         const ids = touchesConveyorField ? new Set(conveyorBlockCellIds(draft, id)) : new Set([id])
         const cells = draft.cells.map((item) => (ids.has(item.id) ? ({ ...item, ...patch } as TopologyCell) : item))
         return { ...draft, cells }
@@ -821,6 +830,15 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         const setIds = new Set(ids)
         const cells = draft.cells.map((cell) =>
           setIds.has(cell.id) && cell.type === 'conveyor' ? { ...cell, levels } : cell,
+        )
+        return { ...draft, cells }
+      }),
+
+    updateConveyorGround: (ids, ground) =>
+      withSelection((draft) => {
+        const setIds = new Set(ids)
+        const cells = draft.cells.map((cell) =>
+          setIds.has(cell.id) && cell.type === 'conveyor' ? { ...cell, conveyorGround: ground } : cell,
         )
         return { ...draft, cells }
       }),

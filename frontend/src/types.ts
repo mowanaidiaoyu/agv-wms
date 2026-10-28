@@ -1,7 +1,7 @@
 export type ZoneType = 'ctu' | 'shuttle' | 'port' | 'pick_station' | 'drop_zone'
 export type CellType = 'road' | 'blocked' | 'conveyor'
 export type ConveyorDirection = 'right' | 'left' | 'up' | 'down'
-export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer'
+export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock'
 export type EditorObjectType =
   | 'select'
   | 'batch'
@@ -9,10 +9,12 @@ export type EditorObjectType =
   | 'road'
   | 'blocked'
   | 'conveyor'
+  | 'ground_conveyor'
   | 'ctu_robot'
   | 'shuttle_robot'
   | 'lift_transfer'
   | 'turn_transfer'
+  | 'shuttle_dock'
 export type RobotType = 'ctu' | 'shuttle'
 
 export interface Zone {
@@ -53,6 +55,8 @@ export interface TopologyCell {
   levels?: number
   /** 所属 2×2 输送带块的左上锚点（奇数起点支持）。缺失时回退到 floor-到-偶。 */
   conveyorAnchor?: { row: number; col: number } | null
+  /** 地面输送线（整箱，四向车出货用）：贴地单层带面；缺省为架空输送线（零散件，CTU 用） */
+  conveyorGround?: boolean
 }
 
 export interface TopologyNode {
@@ -64,6 +68,12 @@ export interface TopologyNode {
   zoneId?: string | null
   capacity: number
   label: string
+  /** 四向车出货位（shuttle_dock）：取什么货物（商品目录 skuId） */
+  skuId?: string | null
+  skuName?: string | null
+  largeCategory?: string | null
+  /** 四向车出货位：取多少（箱，每箱一趟搬运任务） */
+  quantity?: number | null
 }
 
 export interface TopologyPayload {
@@ -166,6 +176,24 @@ export interface SimulationTaskLine {
   material?: string
   surfaceTreatment?: string
   quantity?: number
+}
+
+/** 四向车出货位运行时设置（可在「四向车搬运」工作台调整，存在 Run 状态里，不改拓扑）。 */
+export interface ShuttleDockState {
+  dockId: string
+  label: string
+  row: number
+  col: number
+  floor: string
+  skuId?: string | null
+  skuName?: string | null
+  largeCategory?: string | null
+  quantity: number
+  priority: 'normal' | 'urgent'
+  vehicleId?: string | null
+  loop: boolean
+  enabled: boolean
+  cursor?: number
 }
 
 export interface ShuttleTrackNode {
@@ -291,6 +319,8 @@ export interface TransferInventoryEvent {
 export interface SimulationTask {
   id: string
   orderId?: string | null
+  dockId?: string | null
+  requestedVehicleId?: string | null
   robotType: RobotType
   mode: 'direct' | 'cross_zone' | 'shuttle_transfer'
   status: string
@@ -332,7 +362,6 @@ export interface SimulationTask {
   createdTick: number
   startedTick: number | null
   completedTick: number | null
-  requestedVehicleId?: string
   skuId?: string
   skuName?: string
   quantity?: number
@@ -451,6 +480,7 @@ export interface SimulationState {
   tasks: SimulationTask[]
   orders?: SimulationOrder[]
   inventory?: GoodsSlot[]
+  shuttleDocks?: ShuttleDockState[]
   transferInventory?: TransferInventoryBalance[]
   transferEvents?: TransferInventoryEvent[]
   alerts: SimulationAlert[]

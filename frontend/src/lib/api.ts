@@ -157,4 +157,23 @@ export const api = {
   getGoodsCatalog() {
     return request<GoodsCatalog>('/goods/catalog')
   },
+  updateShuttleDock(
+    runId: string,
+    dockId: string,
+    patch: {
+      skuId?: string | null
+      skuName?: string | null
+      largeCategory?: string | null
+      quantity?: number
+      priority?: 'normal' | 'urgent'
+      vehicleId?: string | null
+      loop?: boolean
+      enabled?: boolean
+    },
+  ) {
+    return request<{ runId: string; dockId: string }>(
+      `/simulations/${runId}/shuttle-docks/${dockId}`,
+      { method: 'PUT', body: JSON.stringify(patch) },
+    )
+  },
 }

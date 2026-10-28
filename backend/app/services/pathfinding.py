@@ -60,9 +60,72 @@ def build_cell_lookup(topology: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {cell["id"]: cell for cell in topology.get("cells", [])}
 
 
+# ---------------------------------------------------------------------------
+# 派生查找结构缓存：一次仿真运行始终持有同一个 topology dict，而分配器每 tick
+# 对每对「空闲机器人 × 待处理任务」都会重新规划路径——此前每次调用都全量重建
+# walkable / occupied / shuttle 查找（Demo 6.6 约 2.8 万格 + 全车库槽位），
+# 累计把 tick 循环拖到分钟级。按 id(topology) 缓存并持有强引用（防 id 复用）：
+# 拓扑编辑 / 新运行解析出新 dict → 新 id → 自动重建；上限 4 份。
+# ---------------------------------------------------------------------------
+_derived_cache: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+_DERIVED_CACHE_LIMIT = 4
+
+
+def _derived_bundle(topology: dict[str, Any]) -> dict[str, Any]:
+    entry = _derived_cache.get(id(topology))
+    if entry is not None and entry[0] is topology:
+        return entry[1]
+    if len(_derived_cache) >= _DERIVED_CACHE_LIMIT:
+        _derived_cache.clear()
+    bundle: dict[str, Any] = {
+        "walkable": None,
+        "occupied": None,
+        "shuttle": None,
+        "shuttle_paths": {},
+        "storage_entry_dirs": None,
+        "walkable_no_storage": None,
+        "shuttle_cells": None,
+    }
+    _derived_cache[id(topology)] = (topology, bundle)
+    return bundle
+
+
+def _occupied_internal(topology: dict[str, Any]) -> set[tuple[str, int, int]]:
+    bundle = _derived_bundle(topology)
+    if bundle["occupied"] is None:
+        occupied: set[tuple[str, int, int]] = set()
+        for node in topology.get("nodes", []):
+            if node.get("type") == "storage":
+                occupied.add(node_position(node))
+        for cell in topology.get("cells", []):
+            if cell.get("type") == "conveyor":
+                occupied.add(cell_position(cell))
+        bundle["occupied"] = occupied
+    return bundle["occupied"]
+
+
+def _walkable_no_storage(topology: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, Any]]:
+    """可通行格去掉库位/输送带占用（CTU 规则的基表，按拓扑缓存，调用方复制后再改写端点）。"""
+    bundle = _derived_bundle(topology)
+    if bundle["walkable_no_storage"] is None:
+        walkable = build_walkable_lookup(topology)
+        occupied = _occupied_internal(topology)
+        bundle["walkable_no_storage"] = {
+            pos: cell for pos, cell in walkable.items() if pos not in occupied
+        }
+    return bundle["walkable_no_storage"]
+
+
 def build_walkable_lookup(topology: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, Any]]:
     """可通行格 = 整张网格（grid.rows×cols）内非 blocked 的格子，叠加显式 cells 补 cost/type。
     CTU 规则是「格子上没放东西就能走」，所以不再要求格子在 cells 里被显式标成 road。"""
+    bundle = _derived_bundle(topology)
+    if bundle["walkable"] is None:
+        bundle["walkable"] = _build_walkable_lookup_uncached(topology)
+    return bundle["walkable"]
+
+
+def _build_walkable_lookup_uncached(topology: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, Any]]:
     grid = topology.get("grid", {})
     rows = int(grid.get("rows") or 0)
     cols = int(grid.get("cols") or 0)
@@ -92,17 +155,17 @@ def build_walkable_lookup(topology: dict[str, Any]) -> dict[tuple[str, int, int]
 
 def build_occupied_lookup(topology: dict[str, Any]) -> set[tuple[str, int, int]]:
     """放了东西的格子：库位 storage 所在格 + 输送带 conveyor 格，CTU 不能穿行，只能作为取货终点进入。"""
-    occupied: set[tuple[str, int, int]] = set()
-    for node in topology.get("nodes", []):
-        if node.get("type") == "storage":
-            occupied.add(node_position(node))
-    for cell in topology.get("cells", []):
-        if cell.get("type") == "conveyor":
-            occupied.add(cell_position(cell))
-    return occupied
+    return set(_occupied_internal(topology))
 
 
 def storage_entry_dirs(topology: dict[str, Any]) -> dict[tuple[str, int, int], set[tuple[int, int]]]:
+    bundle = _derived_bundle(topology)
+    if bundle["storage_entry_dirs"] is None:
+        bundle["storage_entry_dirs"] = _storage_entry_dirs_uncached(topology)
+    return bundle["storage_entry_dirs"]
+
+
+def _storage_entry_dirs_uncached(topology: dict[str, Any]) -> dict[tuple[str, int, int], set[tuple[int, int]]]:
     """库位格允许的进入方向：只能从货架长方形（区域）的长边进入。
 
     竖向长条（高 > 宽，如 666 的 1 列 17 层货架）：长边在左右两侧，只允许水平进入；
@@ -211,10 +274,10 @@ def shortest_path(
         # 出发格 / 目标格允许落在库位/占用格上（机器人停靠位 / 要进去取货的终点），先记下它们的原始格子再减占用。
         endpoints = {pos: walkable[pos] for pos in (start, goal) if pos in walkable}
         if avoid_storage:
-            occupied = build_occupied_lookup(topology)
-            walkable = {pos: cell for pos, cell in walkable.items() if pos not in occupied}
-            # 取货终点是库位时，只允许从货架长边进入（禁止从长方形短边/端头进入）。
-            if goal in occupied:
+            # 基表（去占用）按拓扑缓存，这里只需浅拷贝再补回端点。
+            walkable = dict(_walkable_no_storage(topology))
+            if goal in _occupied_internal(topology):
+                # 取货终点是库位时，只允许从货架长边进入（禁止从长方形短边/端头进入）。
                 goal_entry_dirs = storage_entry_dirs(topology).get(goal)
         if extra_blocked:
             walkable = {pos: cell for pos, cell in walkable.items() if pos not in extra_blocked}
@@ -328,6 +391,16 @@ SHUTTLE_LAYERS = 4
 def build_shuttle_lookup(
     topology: dict[str, Any],
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], set[tuple[int, int, int]], set[tuple[int, int]]]:
+    """返回 (zone_at, aisle, lift)，结果按拓扑对象缓存（见 _derived_bundle）。"""
+    bundle = _derived_bundle(topology)
+    if bundle["shuttle"] is None:
+        bundle["shuttle"] = _build_shuttle_lookup_uncached(topology)
+    return bundle["shuttle"]
+
+
+def _build_shuttle_lookup_uncached(
+    topology: dict[str, Any],
+) -> tuple[dict[tuple[int, int], dict[str, Any]], set[tuple[int, int, int]], set[tuple[int, int]]]:
     """返回 (zone_at, aisle, lift)。
 
     - zone_at: {(row, col): zone}，标记每个格子属于哪个四向车库（判「车库内」用）。
@@ -412,6 +485,33 @@ def shortest_path_shuttle(
     goal_layer: int,
     policy: str = "astar",
 ) -> list[tuple[int, int, int]]:
+    """四向车 A*，结果按 (起点, 终点, 层, 策略) 记忆化。
+
+    分配器每 tick 会对同一对「空闲机器人 × 待处理任务」重复规划（机器人待命时
+    位置不变），命中缓存后为 O(1)；不可达结果同样被缓存，避免每 tick 全图搜索。
+    拓扑更换（新运行/编辑保存）→ 新 topology 对象 → 缓存自动失效。
+    """
+    bundle = _derived_bundle(topology)
+    cache_key = (start_cell, start_layer, goal_cell, goal_layer, policy)
+    cached = bundle["shuttle_paths"].get(cache_key)
+    if cached is not None:
+        return list(cached)
+    path = _shortest_path_shuttle_uncached(topology, start_cell, start_layer, goal_cell, goal_layer, policy)
+    paths = bundle["shuttle_paths"]
+    if len(paths) >= 4096:
+        paths.clear()
+    paths[cache_key] = path
+    return list(path)
+
+
+def _shortest_path_shuttle_uncached(
+    topology: dict[str, Any],
+    start_cell: str,
+    start_layer: int,
+    goal_cell: str,
+    goal_layer: int,
+    policy: str = "astar",
+) -> list[tuple[int, int, int]]:
     """四向车 A*：状态为 (row, col, layer)。车库内只在巷道格水平移动、经电梯竖井跨层；
     车库外视为地面层（layer=1）的普通空格。返回 [(row, col, layer), ...]，首元素为起点。"""
     try:
@@ -422,13 +522,19 @@ def shortest_path_shuttle(
 
     zone_at, aisle, lift = build_shuttle_lookup(topology)
 
-    blocked: set[tuple[int, int]] = set()
-    conveyor: set[tuple[int, int]] = set()
-    for cell in topology.get("cells", []):
-        if cell.get("type") == "blocked" or not cell.get("walkable", True):
-            blocked.add((int(cell["row"]), int(cell["col"])))
-        elif cell.get("type") == "conveyor":
-            conveyor.add((int(cell["row"]), int(cell["col"])))
+    bundle = _derived_bundle(topology)
+    if bundle["shuttle_cells"] is None:
+        blocked: set[tuple[int, int]] = set()
+        conveyor: set[tuple[int, int]] = set()
+        for cell in topology.get("cells", []):
+            if cell.get("type") == "blocked" or not cell.get("walkable", True):
+                blocked.add((int(cell["row"]), int(cell["col"])))
+            elif cell.get("type") == "conveyor":
+                # 只有架空输送带是四向车的物理障碍；地面输送线（整箱线）四向车可直接驶上沿线移动。
+                if not cell.get("conveyorGround"):
+                    conveyor.add((int(cell["row"]), int(cell["col"])))
+        bundle["shuttle_cells"] = (blocked, conveyor)
+    blocked, conveyor = bundle["shuttle_cells"]
 
     grid = topology.get("grid", {})
     rows = int(grid.get("rows") or 0)
