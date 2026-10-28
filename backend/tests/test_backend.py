@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.assignment import assign_tasks
-from app.services.pathfinding import node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle
+from app.services.pathfinding import cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle
 from app.services.runtime import repo
 from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, RunRuntime, SimulationService
 
@@ -611,6 +611,23 @@ def test_shuttle_without_dock_falls_back_to_any_boundary_crossing():
     topology = _strict_shuttle_topology(None)
     path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r3-c0", 1)
     assert path and _first_out_zone_cell(path) in _GATE_A
+
+
+def test_shuttle_does_not_cut_through_lift_shaft_on_same_layer():
+    # 升降通道只用于换层：起讫同层的路径不允许借道竖井格（经过轿厢会视觉重叠）。
+    topology = _strict_shuttle_topology(None)
+    # 在车库巷道中段放一个竖井：把 (0,2) 锚点改为全层巷道 + slotLifts
+    topology["zones"][0]["slotAisles"]["0,2"] = 0b1111
+    topology["zones"][0]["slotLifts"] = ["0,2"]
+    shaft = ("cell-r0-c2", "cell-r0-c3", "cell-r1-c2", "cell-r1-c3")
+    # 同层：从 (0,0) 到 (0,5) 本可直线穿过竖井，必须绕行且不踩竖井格
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r0-c5", 1)
+    assert path, "同层路径应绕开竖井仍可达"
+    assert all(cell_id(row, col, "1F") not in shaft for row, col, _ in path), f"同层路径不得穿过升降通道: {path}"
+    # 跨层：从 (0,0)L1 到竖井块内 L2 格需要借道竖井换层，仍然可达
+    cross = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r0-c3", 2)
+    assert cross, "跨层路径应可进入竖井换层"
+    assert any(cell_id(row, col, "1F") == "cell-r0-c2" for row, col, _ in cross), "跨层路径应经过竖井"
 
 
 TWO_ROBOT_TOPOLOGY = {

@@ -600,6 +600,10 @@ def _shortest_path_shuttle_uncached(
             return False
         zone = zone_at.get((row, col))
         if zone is not None:
+            # 升降通道（竖井）只用于跨层：起讫同层的任务不允许借道竖井格通行，
+            # 四向车仅在真正换层时才进入竖井（否则会与轿厢视觉重叠）。
+            if (row, col) in lift and start_layer == goal_layer:
+                return False
             # 车库内：巷道格（或电梯竖井格，已在 aisle 里登记）。
             return (row, col, layer) in aisle
         # 车库外：仅地面层，且严格限定在地面输送线上（四向车不走普通道路）。
