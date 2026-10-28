@@ -1,7 +1,7 @@
 {
   "topology_id": "topology-6ceb4920",
   "topology_version": "2.0.0",
-  "source_topology_revision": "2.0.0:fe9fd41bf5cec86b",
+  "source_topology_revision": "2.0.0:2bab7b76dbf775c3",
   "config_revision": "shuttle-4l-lift-slotlifts-v6",
   "data_source": "topology_slot_aisles",
   "review_status": "program_verified_pending_human",
