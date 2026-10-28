@@ -29,6 +29,7 @@ from .pathfinding import (
     shortest_path,
     shortest_path_shuttle,
     shuttle_rack_slots,
+    shuttle_servable_slots,
 )
 from .simulation_config import build_simulation_config
 from .unified_transfer import (
@@ -591,7 +592,7 @@ class SimulationService:
             if node_position(node) in serviceable
         ]
         ctu_source_ids = set(ctu_sources)
-        shuttle_sources = shuttle_rack_slots(topology)
+        shuttle_sources = shuttle_servable_slots(topology)
 
         # 一个库位槽（nodeId + layer）只有一箱货：同一槽派两单会让两台车抢同一格，
         # 后到的一台永远进不去，形成对头死锁。
@@ -703,8 +704,9 @@ class SimulationService:
         独立于订单流程（不挂订单），订单驱动 / 自动派单两种模式都会追加这组任务。
         运行时出货位设置（shuttle_docks 状态）优先：按出货位生成搬运任务（每箱一趟）；
         未传状态时回退读取拓扑上的出货位节点；都没有时自动派 6 个任务（随机库位）。
+        取货源只使用「可服务货位」（邻接可达巷道），深藏货架内部的货位四向车物理上到不了。
         """
-        shuttle_sources = shuttle_rack_slots(topology)
+        shuttle_sources = shuttle_servable_slots(topology)
         if not shuttle_sources:
             return []
         if shuttle_docks is None:
@@ -860,7 +862,7 @@ class SimulationService:
             if not (task.get("dockId") == dock_id and task["status"] == "pending")
         ]
         if dock.get("enabled", True):
-            shuttle_sources = shuttle_rack_slots(runtime.topology)
+            shuttle_sources = shuttle_servable_slots(runtime.topology)
             if shuttle_sources:
                 for _ in range(int(dock.get("quantity") or 1)):
                     tasks.append(
@@ -895,7 +897,7 @@ class SimulationService:
         )
         if outstanding >= int(dock.get("quantity") or 1):
             return
-        shuttle_sources = shuttle_rack_slots(runtime.topology)
+        shuttle_sources = shuttle_servable_slots(runtime.topology)
         if not shuttle_sources:
             return
         new_task = self._build_dock_task(

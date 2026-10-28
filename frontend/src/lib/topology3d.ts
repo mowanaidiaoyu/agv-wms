@@ -265,6 +265,64 @@ export function shuttleTrackWorldPosition(
   ]
 }
 
+/** 地面输送线格的吸附信息：所在 2×2 块锚点 + 带的延伸方向（横向=沿 col）。 */
+export type GroundBeltSnap = { anchorRow: number; anchorCol: number; horizontal: boolean }
+
+/**
+ * 构建「地面线格 → 块锚点 + 走向」查找表。带走向按相邻块判断：
+ * 左右（col±2）有同类块即横向延伸，否则纵向。
+ */
+export function buildGroundBeltLookup(
+  cells: Array<{
+    row: number
+    col: number
+    type?: string
+    conveyorGround?: boolean | null
+    conveyorAnchor?: { row: number; col: number } | null
+  }>,
+): Map<string, GroundBeltSnap> {
+  const groundCells = new Map<string, { row: number; col: number }>()
+  const anchors = new Set<string>()
+  for (const cell of cells) {
+    if (cell.type !== 'conveyor' || !cell.conveyorGround) continue
+    const anchor = cell.conveyorAnchor ?? { row: cell.row, col: cell.col }
+    groundCells.set(`${cell.row},${cell.col}`, { row: anchor.row, col: anchor.col })
+    anchors.add(`${anchor.row},${anchor.col}`)
+  }
+  const lookup = new Map<string, GroundBeltSnap>()
+  for (const [key, anchor] of groundCells) {
+    lookup.set(key, {
+      anchorRow: anchor.row,
+      anchorCol: anchor.col,
+      horizontal:
+        anchors.has(`${anchor.row},${anchor.col - 2}`) || anchors.has(`${anchor.row},${anchor.col + 2}`),
+    })
+  }
+  return lookup
+}
+
+/**
+ * 四向车在地面输送线上的渲染位置。车身 2×2、输送块也 2×2，但轨道坐标以格为步长：
+ * 若路径走在带面的第二排/列上，车身中心会偏离带面中心线半格，视觉上只有 1×2 重叠。
+ * 这里把横带方向吸附到带面中心线（2×2 块的内分界），沿带方向保持逐格连续移动，
+ * 使车身与带面始终保持 2×2 重叠。
+ */
+export function shuttleGroundSnapPosition(
+  row: number,
+  col: number,
+  snap: GroundBeltSnap,
+  cols: number,
+  rows: number,
+): [number, number, number] {
+  const [x, y, z] = shuttleTrackWorldPosition(row, col, 1, cols, rows)
+  if (snap.horizontal) {
+    // 带沿 col 延伸：横带方向是 row，中心线 = anchor.row 与 anchor.row+1 的分界
+    return [x, y, rows / 2 - (snap.anchorRow + 1)]
+  }
+  // 带沿 row 延伸：横带方向是 col，中心线 = anchor.col 与 anchor.col+1 的分界
+  return [snap.anchorCol + 1 - cols / 2, y, z]
+}
+
 /** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */
 export function robotWorldPosition(
   floor: string,

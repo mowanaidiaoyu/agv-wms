@@ -17,12 +17,15 @@ import {
   SHUTTLE_RACK_BASE_Y,
   ZONE_LEVEL_HEIGHT,
   buildGoodsSceneBoxes,
+  buildGroundBeltLookup,
   buildSceneSpec,
   robotWorldPosition,
+  shuttleGroundSnapPosition,
   shuttleTrackWorldPosition,
   worldToCell,
   worldX,
   worldZ,
+  type GroundBeltSnap,
   type SceneCylinder,
 } from '../../lib/topology3d'
 import { conveyorAnchorOf, parseCellId } from '../../lib/topology'
@@ -804,6 +807,25 @@ function cellWorldPosition(
   ]
 }
 
+/**
+ * 四向车渲染位置：在地面输送线上时横带方向吸附带面中心线（车身 2×2 与输送块
+ * 2×2 始终全重叠）；车库内 / 其它位置用轨道坐标（天然与 2×2 槽块对齐）。
+ */
+function shuttleRobotRenderPosition(
+  robot: SimulationRobot,
+  cols: number,
+  rows: number,
+  groundBelt: Map<string, GroundBeltSnap>,
+): [number, number, number] {
+  const row = robot.currentRow
+  const col = robot.currentCol
+  const snap = groundBelt.get(`${row},${col}`)
+  if (snap) {
+    return shuttleGroundSnapPosition(row, col, snap, cols, rows)
+  }
+  return shuttleTrackWorldPosition(row, col, Number(robot.currentLayer ?? 1), cols, rows)
+}
+
 function Simulation3DScene({
   topology,
   goods,
@@ -821,6 +843,8 @@ function Simulation3DScene({
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
+  // 地面线吸附表：四向车车身 2×2 在带面上与输送块 2×2 保持全重叠。
+  const groundBeltLookup = useMemo(() => buildGroundBeltLookup(topology.cells), [topology.cells])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1436,13 +1460,7 @@ function Simulation3DScene({
 
       {robots.map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
-          ? shuttleTrackWorldPosition(
-            robot.currentRow,
-            robot.currentCol,
-            Number(robot.currentLayer ?? 1),
-            spec.cols,
-            spec.rows,
-          )
+          ? shuttleRobotRenderPosition(robot, spec.cols, spec.rows, groundBeltLookup)
           : robotWorldPosition(
             robot.currentFloor ?? '1F',
             robot.currentRow,
@@ -1486,13 +1504,7 @@ function Simulation3DScene({
           const selected = robots.find((robot) => robot.id === selectedRobotId)
           if (!selected) return null
           if (selected.type === 'shuttle') {
-            const [x, y, z] = shuttleTrackWorldPosition(
-              selected.currentRow,
-              selected.currentCol,
-              Number(selected.currentLayer ?? 1),
-              spec.cols,
-              spec.rows,
-            )
+            const [x, y, z] = shuttleRobotRenderPosition(selected, spec.cols, spec.rows, groundBeltLookup)
             return [x, y + 0.42, z] as [number, number, number]
           }
           const base = robotWorldPosition(

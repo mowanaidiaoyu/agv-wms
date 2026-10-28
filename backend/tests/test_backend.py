@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
@@ -325,7 +325,7 @@ def test_seed_tasks_routes_shuttle_to_ground_conveyor_anchor():
         "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
         "zones": [
             {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
-            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
             {"id": "zone-port", "label": "Port", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
         ],
         "cells": [
@@ -356,7 +356,7 @@ def test_seed_shuttle_dock_tasks():
         "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
         "zones": [
             {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
-            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
         ],
         "cells": [
             *TOPOLOGY["cells"],
@@ -384,7 +384,7 @@ def test_seed_shuttle_dock_tasks():
     assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
     assert all(task["lines"][0]["skuId"] == "SKU-DOCK" for task in tasks)
     assert all(task["lines"][0]["skuName"] == "脚手架 1.7米" for task in tasks)
-    assert all(task["sourceCellId"] == "cell-r8-c0" for task in tasks)  # 单槽位车库：源格唯一
+    assert all(task["sourceCellId"] == "cell-r8-c2" for task in tasks)  # 巷道块(8,0)邻接的唯一货位
 
 
 def test_update_shuttle_dock_runtime_settings():
@@ -395,7 +395,7 @@ def test_update_shuttle_dock_runtime_settings():
         "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
         "zones": [
             {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
-            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
         ],
         "cells": [
             *TOPOLOGY["cells"],
@@ -449,7 +449,7 @@ def test_update_shuttle_dock_rejects_unknown_vehicle():
         "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
         "zones": [
             {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
-            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
         ],
         "cells": [
             *TOPOLOGY["cells"],
@@ -484,7 +484,7 @@ def test_update_shuttle_dock_autoprovisions_from_latest_topology():
         "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
         "zones": [
             {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
-            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
         ],
         "cells": [
             *TOPOLOGY["cells"],
@@ -529,6 +529,88 @@ def test_update_shuttle_dock_autoprovisions_from_latest_topology():
         assert resp.status_code == 404
     finally:
         client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+def _strict_shuttle_topology(dock_rows_cols: list[tuple[int, int]] | None) -> dict:
+    """严格移动测试拓扑：车库 rows0-1 cols0-5（L1 全巷道）；正下方两条地面线块
+    A=rows2-3 cols0-1、B=rows2-3 cols4-5（经 row3 cols2-3 地面线相连）；其余为普通道路。"""
+    ground_cells: list[dict] = []
+    for anchor_col, prefix in ((0, "g"), (4, "d")):
+        for r in (2, 3):
+            for c in (anchor_col, anchor_col + 1):
+                ground_cells.append({
+                    "id": f"cell-{prefix}{r}-{c}", "floor": "1F", "row": r, "col": c, "type": "conveyor",
+                    "conveyorGround": True, "conveyorAnchor": {"row": 2, "col": anchor_col},
+                })
+    for c in (2, 3):
+        ground_cells.append({
+            "id": f"cell-r3-c{c}", "floor": "1F", "row": 3, "col": c, "type": "conveyor",
+            "conveyorGround": True, "conveyorAnchor": {"row": 2, "col": 4},
+        })
+    return {
+        "id": "shuttle-strict-topology",
+        "name": "Shuttle Strict Topology",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": 8, "cols": 8, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [
+            {
+                "id": "zone-shuttle", "label": "S", "type": "shuttle", "x": 0, "y": 0, "width": 6, "height": 2,
+                "slotAisles": {"0,0": 1, "0,2": 1, "0,4": 1},
+            },
+        ],
+        "cells": ground_cells,
+        "nodes": [
+            {
+                "id": f"dock-{i}", "type": "shuttle_dock", "floor": "1F", "row": r, "col": c,
+                "zoneId": None, "capacity": 1, "label": f"出货口 {i}",
+            }
+            for i, (r, c) in enumerate(dock_rows_cols or [], start=1)
+        ],
+    }
+
+
+_GATE_A = {(2, 0), (2, 1), (3, 0), (3, 1)}
+_GATE_B = {(2, 4), (2, 5), (3, 4), (3, 5)}
+_ZONE_CELLS = {(0, c) for c in range(6)} | {(1, c) for c in range(6)}
+
+
+def _first_out_zone_cell(path: list[tuple[int, int, int]]) -> tuple[int, int] | None:
+    for row, col, _ in path:
+        if (row, col) not in _ZONE_CELLS:
+            return (row, col)
+    return None
+
+
+def test_shuttle_exits_rack_through_dock_gate():
+    # 出货位在车库正下方块 A 上：四向车从巷道经闸口 A 驶上地面线。
+    topology = _strict_shuttle_topology([(2, 0)])
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r3-c0", 1)
+    assert path, "经过闸口时四向车应可从巷道驶上地面线"
+    assert _first_out_zone_cell(path) in _GATE_A
+
+
+def test_shuttle_cannot_exit_rack_without_dock_gate():
+    # 出货位只在块 B 时：车库正下方的块 A（无 dock）不可跨越，必须绕行从 B 出库。
+    topology = _strict_shuttle_topology([(2, 4)])
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r3-c0", 1)
+    assert path, "存在连接地面线时应可从远端闸口出库再沿线交付"
+    assert _first_out_zone_cell(path) in _GATE_B, "出库位置必须落在出货位闸口块上"
+    # 目标在闸口对侧（B 块）同理。
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r3-c5", 1)
+    assert path and _first_out_zone_cell(path) in _GATE_B
+
+
+def test_shuttle_never_walks_on_plain_road():
+    # 车库外普通道路不可通行：目标在纯道路格上时不可达。
+    topology = _strict_shuttle_topology([(2, 0)])
+    assert shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r5-c5", 1) == []
+
+
+def test_shuttle_without_dock_falls_back_to_any_boundary_crossing():
+    # 没有任何出货位时保持旧行为：车库与地面线的任意邻接都可跨越（兼容旧拓扑）。
+    topology = _strict_shuttle_topology(None)
+    path = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r3-c0", 1)
+    assert path and _first_out_zone_cell(path) in _GATE_A
 
 
 TWO_ROBOT_TOPOLOGY = {
