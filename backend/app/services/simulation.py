@@ -385,7 +385,7 @@ class SimulationService:
             tasks, order_states = self._seed_order_tasks(topology, orders, inventory)
             # 订单驱动模式同样派发四向车出库搬运任务（独立于订单、不挂订单），
             # 否则 UI 带演示订单启动时四向车搬运永远不会出现。
-            tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks))
+            tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks, inventory))
         elif transfers:
             tasks, order_states = [], []
         else:
@@ -667,7 +667,7 @@ class SimulationService:
                 break
             tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, delivery, False, 2))
 
-        tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks))
+        tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks, inventory))
         return tasks
 
     @staticmethod
@@ -698,12 +698,14 @@ class SimulationService:
         self,
         topology: dict[str, Any],
         shuttle_docks: list[dict[str, Any]] | None = None,
+        inventory: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """四向车出库搬运任务：库位 → 驶出车库 → 地面输送线交付。
 
         独立于订单流程（不挂订单），订单驱动 / 自动派单两种模式都会追加这组任务。
-        运行时出货位设置（shuttle_docks 状态）优先：按出货位生成搬运任务（每箱一趟）；
-        未传状态时回退读取拓扑上的出货位节点；都没有时自动派 6 个任务（随机库位）。
+        运行时出货位设置（shuttle_docks 状态）优先：按出货位生成搬运任务（每箱一趟，
+        目标箱被外层箱挡住时先生成倒库任务）；未传状态时回退读取拓扑上的出货位节点；
+        都没有时自动派 6 个任务（随机库位）。
         取货源只使用「可服务货位」（邻接可达巷道），深藏货架内部的货位四向车物理上到不了。
         """
         shuttle_sources = shuttle_servable_slots(topology)
@@ -717,11 +719,14 @@ class SimulationService:
         ]
         if docks:
             tasks: list[dict[str, Any]] = []
-            source_cursor = {"value": 0}
+            batch: dict[str, Any] = {"cursor": 0}
             for dock in docks:
                 for _ in range(int(dock.get("quantity") or 1)):
-                    tasks.append(
-                        self._build_dock_task(topology, dock, shuttle_sources, source_cursor=source_cursor, existing_tasks=tasks)
+                    tasks.extend(
+                        self._build_dock_tasks(
+                            topology, inventory or [], dock, shuttle_sources,
+                            0, batch, tasks,
+                        )
                     )
             return tasks
         delivery_cells = [
@@ -764,60 +769,180 @@ class SimulationService:
             )
         return tasks
 
-    def _build_dock_task(
+    def _build_dock_tasks(
         self,
         topology: dict[str, Any],
+        inventory: list[dict[str, Any]],
         dock: dict[str, Any],
         shuttle_sources: list[tuple[str, int]],
-        created_tick: int = 0,
-        source_cursor: dict[str, int] | None = None,
-        existing_tasks: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """按出货位设置构建一趟搬运任务，并推进库位轮转游标。
+        created_tick: int,
+        batch: dict[str, Any],
+        existing_tasks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """按出货位生成一趟取货任务；目标箱被外层箱挡住时先生成倒库任务。
 
-        取货位用 source_cursor（跨出货位共享的全局轮转）+ existing_tasks 中
-        pending/assigned 任务已占用的货位去重——多台车/多个出货位并发时，
-        两趟任务绝不指向同一货位（否则在货位前头对头死锁）。
+        货道模型：每条货道（cellId+layer）纵深最多 SHUTTLE_LANE_DEPTH 箱，depth=1 外层
+        靠巷道面；取深处箱前必须先把前方箱移走。
+        - dock.skuId 有值：取该 SKU 的最浅箱；前方未认领的箱逐个倒库到空货道
+          （blockedBy 依赖），前方箱已被其它任务认领则直接挂依赖等它完成。
+        - dock.skuId 为空：轮转取下一货道的最浅未认领箱（同货道更深箱自动串行）。
+        - 无匹配 SKU / 无空货道：优雅降级为取可及的最浅未认领箱。
+        batch 为跨出货位共享的批处理状态（cursor + 箱/货道认领），调用方持久化游标。
+        返回 [倒库任务..., 取货任务]（可能为空）。
         """
-        dock["cursor"] = int(dock.get("cursor") or 0) + 1
-        holder = source_cursor if source_cursor is not None else {"value": int(dock.get("cursor") or 0)}
-        used = {
-            task["sourceCellId"]
-            for task in (existing_tasks or [])
-            if task.get("dockId") and task["status"] in {"pending", "assigned"}
-        }
-        pick_index = -1
-        for offset in range(len(shuttle_sources)):
-            idx = (holder["value"] + offset) % len(shuttle_sources)
-            if shuttle_sources[idx][0] not in used:
-                pick_index = idx
-                break
-        if pick_index < 0:
-            pick_index = holder["value"] % len(shuttle_sources)
-        holder["value"] = pick_index + 1
-        cell, layer = shuttle_sources[pick_index]
-        delivery_cell = cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F")
-        line: dict[str, Any] = {"cellId": cell, "layer": layer}
-        for field in ("skuId", "skuName", "largeCategory"):
-            value = str(dock.get(field) or "").strip()
-            if value:
-                line[field] = value
-        priority = 1 if dock.get("priority") == "urgent" else 2
-        task = self._build_task(
-            topology,
-            f"task-dock-{dock['dockId']}-{dock['cursor']}",
-            "shuttle",
-            "cross_zone",
-            [line],
-            delivery_cell,
-            dock.get("priority") == "urgent",
-            priority,
-            created_tick=created_tick,
-        )
-        task["dockId"] = dock["dockId"]
-        if dock.get("vehicleId"):
-            task["requestedVehicleId"] = dock["vehicleId"]
-        return task
+        created_tick = int(created_tick)
+        existing = existing_tasks or []
+        claimed_boxes: dict[tuple[str, int, int], str] = dict(batch.get("claimed_boxes") or {})
+        claimed_relocate_lanes: set[str] = set(batch.get("claimed_relocate_lanes") or [])
+        # 在途任务占位：取货任务认领其目标箱；倒库任务认领其目标货道
+        for task in existing:
+            if not task.get("dockId"):
+                continue
+            if task.get("taskKind") == "relocate":
+                if task["status"] in {"pending", "assigned"}:
+                    claimed_relocate_lanes.add(str(task.get("deliveryCellId")))
+            elif task["status"] in {"pending", "assigned"}:
+                line = (task.get("lines") or [{}])[0]
+                if line.get("depth") is not None:
+                    claimed_boxes[(str(line["cellId"]), int(line.get("layer", 1)), int(line["depth"]))] = task["id"]
+
+        def box_key(box: dict[str, Any]) -> tuple[str, int, int]:
+            return (str(box["cellId"]), int(box.get("layer", 1)), int(box.get("depth", 1)))
+
+        # 货道分组：inventory 里带 depth 的四向车库箱
+        lane_boxes: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        for item in inventory:
+            if item.get("depth") is None or not item.get("cellId"):
+                continue
+            lane_boxes.setdefault((str(item["cellId"]), int(item.get("layer", 1))), []).append(item)
+        for boxes in lane_boxes.values():
+            boxes.sort(key=lambda box: int(box.get("depth", 1)))
+
+        sku = str(dock.get("skuId") or "").strip()
+        pick_box: dict[str, Any] | None = None
+        relocate_wanted: list[dict[str, Any]] = []
+        depends: list[str] = []
+        if sku:
+            candidates = [box for boxes in lane_boxes.values() for box in boxes if box_key(box) not in claimed_boxes and box.get("skuId") == sku]
+            if candidates:
+                pick_box = min(candidates, key=lambda box: int(box.get("depth", 1)))
+                siblings = lane_boxes.get((str(pick_box["cellId"]), int(pick_box.get("layer", 1))), [])
+                for item in siblings:
+                    if box_key(item) == box_key(pick_box):
+                        break
+                    dep_id = claimed_boxes.get(box_key(item))
+                    if dep_id:
+                        depends.append(dep_id)  # 前方箱正被其它任务取走：等它完成即可
+                    else:
+                        relocate_wanted.append(item)
+        if pick_box is None:
+            # 无 SKU / SKU 无匹配：轮转取第一个有箱且未被占用的货道的最浅箱
+            for offset in range(len(shuttle_sources)):
+                idx = (int(batch.get("cursor") or 0) + offset) % len(shuttle_sources)
+                cell, layer = shuttle_sources[idx]
+                unclaimed = [b for b in lane_boxes.get((cell, layer), []) if box_key(b) not in claimed_boxes]
+                if unclaimed:
+                    pick_box = unclaimed[0]
+                    for item in lane_boxes.get((cell, layer), []):
+                        if box_key(item) == box_key(pick_box):
+                            break
+                        dep_id = claimed_boxes.get(box_key(item))
+                        if dep_id:
+                            depends.append(dep_id)
+                    batch["cursor"] = idx + 1
+                    break
+            if pick_box is None:
+                batch["claimed_boxes"] = claimed_boxes
+                batch["claimed_relocate_lanes"] = claimed_relocate_lanes
+                return []
+
+        tasks: list[dict[str, Any]] = []
+        if relocate_wanted:
+            for blocker in relocate_wanted:
+                dest_cell = next(
+                    (
+                        cell
+                        for cell, layer in shuttle_sources
+                        if cell not in claimed_relocate_lanes and not lane_boxes.get((cell, layer))
+                    ),
+                    None,
+                )
+                if dest_cell is None:
+                    # 没有空货道承接倒库：放弃深处目标，降级取该货道最浅未认领箱
+                    pick_box = next(
+                        (b for b in lane_boxes.get((str(pick_box["cellId"]), int(pick_box.get("layer", 1))), []) if box_key(b) not in claimed_boxes),
+                        None,
+                    )
+                    relocate_wanted = []
+                    tasks = []
+                    depends = []
+                    break
+                claimed_relocate_lanes.add(dest_cell)
+                dock["cursor"] = int(dock.get("cursor") or 0) + 1
+                line = self._lane_line(blocker)
+                task = self._build_task(
+                    topology,
+                    f"task-dock-{dock['dockId']}-{dock['cursor']}",
+                    "shuttle",
+                    "cross_zone",
+                    [line],
+                    dest_cell,
+                    False,
+                    2,
+                    created_tick=created_tick,
+                )
+                task["dockId"] = dock["dockId"]
+                task["taskKind"] = "relocate"
+                task["sourceDepth"] = int(blocker.get("depth", 1))
+                task["relocateDepth"] = 1
+                task["targetLayer"] = int(next(layer for cell, layer in shuttle_sources if cell == dest_cell))
+                task["phaseLabel"] = "倒库：为深处货物让位"
+                if dock.get("vehicleId"):
+                    task["requestedVehicleId"] = dock["vehicleId"]
+                tasks.append(task)
+                depends.append(task["id"])
+            if pick_box is None:
+                batch["claimed_boxes"] = claimed_boxes
+                batch["claimed_relocate_lanes"] = claimed_relocate_lanes
+                return tasks
+
+        if pick_box is not None:
+            claimed_boxes[box_key(pick_box)] = f"task-dock-{dock['dockId']}-{int(dock.get('cursor') or 0) + 1}"
+            dock["cursor"] = int(dock.get("cursor") or 0) + 1
+            line = self._lane_line(pick_box)
+            task = self._build_task(
+                topology,
+                f"task-dock-{dock['dockId']}-{dock['cursor']}",
+                "shuttle",
+                "cross_zone",
+                [line],
+                cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F"),
+                dock.get("priority") == "urgent",
+                1 if dock.get("priority") == "urgent" else 2,
+                created_tick=created_tick,
+            )
+            task["dockId"] = dock["dockId"]
+            if depends:
+                task["blockedBy"] = depends
+                task["phaseLabel"] = "等待倒库让位"
+            if dock.get("vehicleId"):
+                task["requestedVehicleId"] = dock["vehicleId"]
+            tasks.append(task)
+
+        batch["claimed_boxes"] = claimed_boxes
+        batch["claimed_relocate_lanes"] = claimed_relocate_lanes
+        return tasks
+
+    @staticmethod
+    def _lane_line(box: dict[str, Any]) -> dict[str, Any]:
+        """货道箱 → 任务行（带实际 SKU 与深度）。"""
+        line: dict[str, Any] = {"cellId": str(box["cellId"]), "layer": int(box.get("layer", 1))}
+        if box.get("depth") is not None:
+            line["depth"] = int(box["depth"])
+        for field in SKU_FIELDS:
+            if box.get(field) not in (None, ""):
+                line[field] = box[field]
+        return line
 
     def update_shuttle_dock(self, run_id: str, dock_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         """运行时调整出货位设置（取什么货物/取多少/优先级/指定车辆/循环/启停）。
@@ -889,15 +1014,15 @@ class SimulationService:
         if dock.get("enabled", True):
             shuttle_sources = shuttle_servable_slots(runtime.topology)
             if shuttle_sources:
-                source_cursor = {"value": int(state.get("shuttleSlotCursor") or 0)}
+                batch: dict[str, Any] = {"cursor": int(state.get("shuttleSlotCursor") or 0)}
                 for _ in range(int(dock.get("quantity") or 1)):
-                    tasks.append(
-                        self._build_dock_task(
-                            runtime.topology, dock, shuttle_sources, created_tick=tick,
-                            source_cursor=source_cursor, existing_tasks=tasks,
+                    tasks.extend(
+                        self._build_dock_tasks(
+                            runtime.topology, state.get("inventory", []), dock, shuttle_sources,
+                            tick, batch, tasks,
                         )
                     )
-                state["shuttleSlotCursor"] = source_cursor["value"]
+                state["shuttleSlotCursor"] = int(batch.get("cursor") or 0)
         dock["regeneratedTick"] = tick
         self._record_event(
             runtime,
@@ -930,17 +1055,18 @@ class SimulationService:
         shuttle_sources = shuttle_servable_slots(runtime.topology)
         if not shuttle_sources:
             return
-        source_cursor = {"value": int(runtime.state.get("shuttleSlotCursor") or 0)}
-        new_task = self._build_dock_task(
+        batch: dict[str, Any] = {"cursor": int(runtime.state.get("shuttleSlotCursor") or 0)}
+        new_tasks = self._build_dock_tasks(
             runtime.topology,
+            runtime.state.get("inventory", []),
             dock,
             shuttle_sources,
-            created_tick=int(runtime.state["tick"]),
-            source_cursor=source_cursor,
-            existing_tasks=runtime.state.get("tasks", []),
+            int(runtime.state["tick"]),
+            batch,
+            runtime.state.get("tasks", []),
         )
-        runtime.state["shuttleSlotCursor"] = source_cursor["value"]
-        runtime.state["tasks"].append(new_task)
+        runtime.state["shuttleSlotCursor"] = int(batch.get("cursor") or 0)
+        runtime.state["tasks"].extend(new_tasks)
 
     def _build_task(
         self,
@@ -962,6 +1088,9 @@ class SimulationService:
         for line in lines:
             cell = line.get("cellId") or node_to_cell_id(topology, line["nodeId"])
             entry = {"nodeId": line.get("nodeId"), "cellId": cell, "layer": int(line.get("layer", 1))}
+            # 货道深度（四向车库倒库/按深度取货用）；普通任务无此字段。
+            if line.get("depth") is not None:
+                entry["depth"] = int(line["depth"])
             for field in SKU_FIELDS:
                 if line.get(field) not in (None, ""):
                     entry[field] = line[field]
@@ -2044,11 +2173,48 @@ class SimulationService:
 
         # stowing：货箱已落到输送线，交给转运阶段；拓扑没有拣货位则任务直接完成。
         robot["handlingAction"] = None
+        if task.get("taskKind") == "relocate":
+            # 倒库交付：货箱放入目标空货道（写回带深度库存），不走上带/拣货链路。
+            self._complete_shuttle_relocate(runtime, robot, task)
+            return
         zone = self._pick_station_for(runtime, task)
         if zone is not None:
             self._start_conveyor_to_lift(runtime, robot, task, zone, occupied_cells)
         else:
             self._complete_task(runtime, robot, task, occupied_cells)
+
+    def _complete_shuttle_relocate(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        """倒库交付：货箱写入目标空货道（depth=1 外层面），任务完成。"""
+        carrying = robot.get("carrying") or []
+        box = dict(carrying[0]) if carrying else {}
+        inventory = runtime.state.setdefault("inventory", [])
+        inventory.append({
+            **box,
+            "cellId": task.get("deliveryCellId"),
+            "layer": int(task.get("targetLayer", 1)),
+            "depth": int(task.get("relocateDepth", 1)),
+        })
+        robot["carrying"] = []
+        robot["load"] = 0
+        tick = runtime.state["tick"]
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {
+                "taskId": task["id"],
+                "phase": task["phase"],
+                "status": task["status"],
+                "relocateTo": task.get("deliveryCellId"),
+                "relocateDepth": int(task.get("relocateDepth", 1)),
+            },
+        )
+        self._complete_task(runtime, robot, task)
 
     def _pick_station_for(self, runtime: RunRuntime, task: dict[str, Any]) -> dict[str, Any] | None:
         """为任务选择人工拣货位（取离交付出入口最近的一个）；仅 CTU 任务启用。"""
@@ -2460,12 +2626,26 @@ class SimulationService:
             return
 
         if task["phase"] == "pickup_from_shuttle":
+            # 从货道库存移除被取的箱（带深度货道）；车载记录用任务行的实际箱数据。
+            line = (task.get("lines") or [{}])[0]
+            if line.get("depth") is not None:
+                inventory = runtime.state.setdefault("inventory", [])
+                for index, item in enumerate(inventory):
+                    if (
+                        item.get("cellId") == line.get("cellId")
+                        and int(item.get("layer", 1)) == int(line.get("layer", 1))
+                        and int(item.get("depth", 1)) == int(line["depth"])
+                    ):
+                        inventory.pop(index)
+                        break
             robot["load"] = min(robot.get("capacity", 1), robot.get("load", 0) + 1)
             task["picked"] = task.get("picked", 0) + 1
             # 记录车载货箱，交付动作才能把实载数据写进 deliveredGoods（前端按它渲染交付货箱）。
-            robot["carrying"] = [dict(line) for line in (task.get("lines") or [])]
-            if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=1):
-                task["phaseLabel"] = "输送线交付"
+            robot["carrying"] = [dict(line_item) for line_item in (task.get("lines") or [])]
+            # 倒库任务交付到库内目标货道（其层随目标货道）；出货任务交付到地面线（L1）。
+            delivery_layer = int(task.get("targetLayer", 1)) if task.get("taskKind") == "relocate" else 1
+            if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=delivery_layer):
+                task["phaseLabel"] = "倒库移位" if task.get("taskKind") == "relocate" else "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
             return

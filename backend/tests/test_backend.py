@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.assignment import assign_tasks
-from app.services.pathfinding import cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle
+from app.services.pathfinding import cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle, shuttle_servable_slots
 from app.services.runtime import repo
 from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, RunRuntime, SimulationService
 
@@ -374,7 +374,12 @@ def test_seed_shuttle_dock_tasks():
             },
         ],
     }
-    tasks = service._seed_shuttle_tasks(topology)
+    # 货道深度库存：唯一货道 cell-r8-c2 L1 上 3 箱同 SKU（depth 1..3），轮转串行取
+    inventory = [
+        {"cellId": "cell-r8-c2", "layer": 1, "depth": depth, "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "qty": 1}
+        for depth in (1, 2, 3)
+    ]
+    tasks = service._seed_shuttle_tasks(topology, None, inventory)
     assert [task["id"] for task in tasks] == [
         "task-dock-dock-01-1",
         "task-dock-dock-01-2",
@@ -382,9 +387,10 @@ def test_seed_shuttle_dock_tasks():
     ]
     assert all(task["robotType"] == "shuttle" and task["mode"] == "cross_zone" for task in tasks)
     assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
-    assert all(task["lines"][0]["skuId"] == "SKU-DOCK" for task in tasks)
-    assert all(task["lines"][0]["skuName"] == "脚手架 1.7米" for task in tasks)
-    assert all(task["sourceCellId"] == "cell-r8-c2" for task in tasks)  # 巷道块(8,0)邻接的唯一货位
+    # 任务行携带货道箱的实际 SKU（货道深度库存），不再是出货位设置的透传
+    assert all(task["lines"][0].get("skuId") for task in tasks)
+    assert all(task["lines"][0].get("depth") for task in tasks)
+    assert all(task["sourceCellId"] == "cell-r8-c2" for task in tasks)  # 巷道块(8,0)邻接的唯一货道
 
 
 def test_update_shuttle_dock_runtime_settings():
@@ -434,7 +440,8 @@ def test_update_shuttle_dock_runtime_settings():
             if task.get("dockId") == "dock-01" and task["status"] == "pending"
         ]
         assert len(pending) == 2
-        assert all(task["lines"][0]["skuId"] == "SKU-X" for task in pending)
+        assert all(task["lines"][0].get("skuId") for task in pending)  # 任务行携带货道箱实际 SKU
+        assert all(task["lines"][0].get("depth") for task in pending)
         assert all(task["priority"] == 1 for task in pending)
         assert all(task.get("requestedVehicleId") is None for task in pending)
     finally:
@@ -522,7 +529,8 @@ def test_update_shuttle_dock_autoprovisions_from_latest_topology():
             if task.get("dockId") == "dock-late" and task["status"] == "pending"
         ]
         assert len(pending) == 2
-        assert all(task["lines"][0]["skuId"] == "SKU-LATE" for task in pending)
+        assert all(task["lines"][0].get("skuId") for task in pending)
+        assert all(task["lines"][0].get("depth") for task in pending)
 
         # 拓扑里根本不存在的出货位仍然 404。
         resp = client.put(f"/api/v1/simulations/{run_id}/shuttle-docks/dock-ghost", json={})
@@ -628,6 +636,52 @@ def test_shuttle_does_not_cut_through_lift_shaft_on_same_layer():
     cross = shortest_path_shuttle(topology, "cell-r0-c0", 1, "cell-r0-c3", 2)
     assert cross, "跨层路径应可进入竖井换层"
     assert any(cell_id(row, col, "1F") == "cell-r0-c2" for row, col, _ in cross), "跨层路径应经过竖井"
+
+
+def test_dock_task_generates_relocation_for_deep_target():
+    # 目标 SKU 的箱在货道深处（depth=2）：外层异 SKU 箱先生成倒库任务搬到空货道，
+    # 取货任务挂 blockedBy 依赖，倒库完成后才能取。
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 8, "height": 2,
+             "slotAisles": {"8,0": 1, "8,4": 1}},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {"id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+             "zoneId": None, "capacity": 1, "label": "出货位 1"},
+        ],
+    }
+    inventory = [
+        {"cellId": "cell-r8-c2", "layer": 1, "depth": 1, "skuId": "SKU-OTHER", "skuName": "外层箱", "qty": 1},
+        {"cellId": "cell-r8-c2", "layer": 1, "depth": 2, "skuId": "SKU-TARGET", "skuName": "目标箱", "qty": 1},
+        # (8,6) 为空货道：倒库目的地
+    ]
+    dock = {
+        "dockId": "dock-01", "row": 9, "col": 8, "floor": "1F",
+        "skuId": "SKU-TARGET", "quantity": 1, "cursor": 0, "enabled": True,
+    }
+    sources = shuttle_servable_slots(topology)
+    batch: dict = {"cursor": 0}
+    tasks = service._build_dock_tasks(topology, inventory, dock, sources, 0, batch, [])
+    assert [task.get("taskKind") for task in tasks] == ["relocate", None]
+    relocate, pick = tasks
+    assert relocate["sourceCellId"] == "cell-r8-c2" and relocate["lines"][0]["skuId"] == "SKU-OTHER"
+    assert relocate["deliveryCellId"] == "cell-r8-c6"  # 搬到空货道
+    assert pick["sourceCellId"] == "cell-r8-c2" and pick["lines"][0]["skuId"] == "SKU-TARGET"
+    assert pick["lines"][0]["depth"] == 2
+    assert pick["blockedBy"] == [relocate["id"]]
 
 
 TWO_ROBOT_TOPOLOGY = {

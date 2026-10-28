@@ -321,6 +321,10 @@ export interface SimulationTask {
   orderId?: string | null
   dockId?: string | null
   requestedVehicleId?: string | null
+  /** 任务种类：relocate = 倒库（为取深处货物让位）；缺省为普通取货/交付 */
+  taskKind?: string | null
+  /** 前置任务（如倒库）未全部完成时不可派发 */
+  blockedBy?: string[] | null
   robotType: RobotType
   mode: 'direct' | 'cross_zone' | 'shuttle_transfer'
   status: string
