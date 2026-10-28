@@ -717,9 +717,12 @@ class SimulationService:
         ]
         if docks:
             tasks: list[dict[str, Any]] = []
+            source_cursor = {"value": 0}
             for dock in docks:
                 for _ in range(int(dock.get("quantity") or 1)):
-                    tasks.append(self._build_dock_task(topology, dock, shuttle_sources))
+                    tasks.append(
+                        self._build_dock_task(topology, dock, shuttle_sources, source_cursor=source_cursor, existing_tasks=tasks)
+                    )
             return tasks
         delivery_cells = [
             port_entry_cell(topology, zone)
@@ -767,10 +770,32 @@ class SimulationService:
         dock: dict[str, Any],
         shuttle_sources: list[tuple[str, int]],
         created_tick: int = 0,
+        source_cursor: dict[str, int] | None = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """按出货位设置构建一趟搬运任务（每箱一趟），并推进该出货位的库位轮转游标。"""
+        """按出货位设置构建一趟搬运任务，并推进库位轮转游标。
+
+        取货位用 source_cursor（跨出货位共享的全局轮转）+ existing_tasks 中
+        pending/assigned 任务已占用的货位去重——多台车/多个出货位并发时，
+        两趟任务绝不指向同一货位（否则在货位前头对头死锁）。
+        """
         dock["cursor"] = int(dock.get("cursor") or 0) + 1
-        cell, layer = shuttle_sources[dock["cursor"] % len(shuttle_sources)]
+        holder = source_cursor if source_cursor is not None else {"value": int(dock.get("cursor") or 0)}
+        used = {
+            task["sourceCellId"]
+            for task in (existing_tasks or [])
+            if task.get("dockId") and task["status"] in {"pending", "assigned"}
+        }
+        pick_index = -1
+        for offset in range(len(shuttle_sources)):
+            idx = (holder["value"] + offset) % len(shuttle_sources)
+            if shuttle_sources[idx][0] not in used:
+                pick_index = idx
+                break
+        if pick_index < 0:
+            pick_index = holder["value"] % len(shuttle_sources)
+        holder["value"] = pick_index + 1
+        cell, layer = shuttle_sources[pick_index]
         delivery_cell = cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F")
         line: dict[str, Any] = {"cellId": cell, "layer": layer}
         for field in ("skuId", "skuName", "largeCategory"):
@@ -864,10 +889,15 @@ class SimulationService:
         if dock.get("enabled", True):
             shuttle_sources = shuttle_servable_slots(runtime.topology)
             if shuttle_sources:
+                source_cursor = {"value": int(state.get("shuttleSlotCursor") or 0)}
                 for _ in range(int(dock.get("quantity") or 1)):
                     tasks.append(
-                        self._build_dock_task(runtime.topology, dock, shuttle_sources, created_tick=tick)
+                        self._build_dock_task(
+                            runtime.topology, dock, shuttle_sources, created_tick=tick,
+                            source_cursor=source_cursor, existing_tasks=tasks,
+                        )
                     )
+                state["shuttleSlotCursor"] = source_cursor["value"]
         dock["regeneratedTick"] = tick
         self._record_event(
             runtime,
@@ -900,12 +930,16 @@ class SimulationService:
         shuttle_sources = shuttle_servable_slots(runtime.topology)
         if not shuttle_sources:
             return
+        source_cursor = {"value": int(runtime.state.get("shuttleSlotCursor") or 0)}
         new_task = self._build_dock_task(
             runtime.topology,
             dock,
             shuttle_sources,
             created_tick=int(runtime.state["tick"]),
+            source_cursor=source_cursor,
+            existing_tasks=runtime.state.get("tasks", []),
         )
+        runtime.state["shuttleSlotCursor"] = source_cursor["value"]
         runtime.state["tasks"].append(new_task)
 
     def _build_task(
@@ -1423,7 +1457,8 @@ class SimulationService:
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
                 occupied_cells.add(current_cell_id)
                 blocker = next((item for item in movable if item["currentCellId"] == next_cell_id), None)
-                # 连续等待后仍无法前进：CTU 先绕开其它设备重新寻路，绕不开再处理头对头死锁。
+                # 连续等待后仍无法前进：CTU 先绕开其它设备重新寻路，绕不开再处理头对头死锁；
+                # 四向车同样先绕行（带面/巷道有并行道），头对头时退一格再绕。
                 if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_ctu(runtime, robot, occupied_cells):
                         robot["waitTicks"] = 0
@@ -1435,6 +1470,15 @@ class SimulationService:
                         robot["phaseLabel"] = task["phaseLabel"]
                     elif robot["waitTicks"] >= YIELD_AFTER_BLOCK_TICKS:
                         self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
+                elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
+                    if self._reroute_shuttle(runtime, robot, occupied_cells):
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                        robot["phaseLabel"] = task["phaseLabel"]
+                    elif self._clear_shuttle_head_on(runtime, robot, blocker, occupied_cells, reserved_targets):
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                        robot["phaseLabel"] = task["phaseLabel"]
                 continue
 
             robot["status"] = "moving"
@@ -1501,6 +1545,95 @@ class SimulationService:
         robot["pathLayers"] = [1] * len(robot["path"])
         robot["targetCellId"] = target
         return True
+
+    def _reroute_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+        """四向车被堵时绕行：把其它四向车占用的格（含其下一步意图格）视为动态障碍，
+        重新规划到原路径终点（path[-1]，即当前阶段目标）。轨道回放任务不重排。"""
+        task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+        if task and task.get("mode") == "shuttle_transfer":
+            return False
+        path = robot.get("path") or []
+        if len(path) <= 1:
+            return False
+        goal_cell = path[-1]
+        goal_layer = int((robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(path))[-1])
+        current_layer = int(robot.get("currentLayer", 1))
+        others: set[tuple[int, int, int]] = set()
+        for item in runtime.state["robots"]:
+            if item["id"] == robot["id"] or item.get("type") != "shuttle":
+                continue
+            layer = int(item.get("currentLayer", 1))
+            others.add((int(item["currentRow"]), int(item["currentCol"]), layer))
+            blocker_path = item.get("path") or []
+            if len(blocker_path) > 1 and blocker_path[1] != item["currentCellId"]:
+                _floor, nr, nc = parse_cell_id(blocker_path[1])
+                others.add((nr, nc, layer))
+        others.discard((int(robot["currentRow"]), int(robot["currentCol"]), current_layer))
+        path3d = shortest_path_shuttle(
+            runtime.topology,
+            robot["currentCellId"],
+            current_layer,
+            goal_cell,
+            goal_layer,
+            runtime.config["pathPolicy"],
+            extra_blocked=others,
+        )
+        if not path3d or len(path3d) <= 1:
+            return False
+        first = cell_id(path3d[1][0], path3d[1][1], "1F")
+        if first in occupied_cells:
+            return False
+        stage = task.get("phase", "moving") if task else "moving"
+        robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
+        robot["pathLayers"] = [layer for _, _, layer in path3d]
+        robot["pathStages"] = [stage] * len(robot["path"])
+        return True
+
+    def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str], reserved_targets: set[str]) -> bool:
+        """四向车退回上一格（仅地面层；layer>1 的竖井场景不适用），破坏头对头对峙。"""
+        if int(robot.get("currentLayer", 1)) != 1:
+            return False
+        last = robot.get("lastCellId")
+        if not last or last == robot["currentCellId"] or last in occupied_cells or last in reserved_targets:
+            return False
+        old_path = robot.get("path") or [robot["currentCellId"]]
+        old_layers = robot.get("pathLayers") or [int(robot.get("currentLayer", 1))] * len(old_path)
+        floor, row, col = parse_cell_id(last)
+        robot["currentCellId"] = last
+        robot["currentFloor"] = floor
+        robot["currentRow"] = row
+        robot["currentCol"] = col
+        robot["path"] = [last] + list(old_path)
+        robot["pathLayers"] = [int(robot.get("currentLayer", 1))] + [int(layer) for layer in old_layers]
+        task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+        stage = task.get("phase", "moving") if task else "moving"
+        robot["pathStages"] = [stage] * len(robot["path"])
+        return True
+
+    def _clear_shuttle_head_on(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        blocker: dict[str, Any] | None,
+        occupied_cells: set[str],
+        reserved_targets: set[str],
+    ) -> bool:
+        """两台四向车在带面/巷道头对头：确认对向车正要进入本车格后，退一格再绕行；
+        本车退不了则让对向车退。带面与巷道块都是 2 格宽，退让后必有并行道可绕。"""
+        if blocker is None or blocker.get("type") != "shuttle" or blocker.get("status") in {"failed", "idle", "exception"}:
+            return False
+        blocker_path = blocker.get("path") or []
+        if len(blocker_path) <= 1 or blocker_path[1] != robot["currentCellId"]:
+            return False
+        if self._back_off_shuttle(runtime, robot, occupied_cells, reserved_targets):
+            if self._reroute_shuttle(runtime, robot, occupied_cells):
+                return True
+            # 退了但暂时绕不开：至少打破头对头，对向车可以先走
+            robot["status"] = "moving"
+            return True
+        if self._back_off_shuttle(runtime, blocker, occupied_cells, reserved_targets):
+            return self._reroute_shuttle(runtime, blocker, occupied_cells)
+        return False
 
     def _clear_head_on(
         self,
@@ -1622,6 +1755,11 @@ class SimulationService:
                     robot["phaseLabel"] = "返回待命位"
                 elif robot["waitTicks"] >= YIELD_AFTER_BLOCK_TICKS:
                     self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
+            elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
+                if self._reroute_shuttle(runtime, robot, occupied_cells):
+                    robot["waitTicks"] = 0
+                    robot["status"] = "returning"
+                    robot["phaseLabel"] = "返回待命位"
             return
 
         path_layers = robot.get("pathLayers") or [1] * len(path)

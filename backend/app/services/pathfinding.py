@@ -529,13 +529,20 @@ def shortest_path_shuttle(
     goal_cell: str,
     goal_layer: int,
     policy: str = "astar",
+    extra_blocked: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*，结果按 (起点, 终点, 层, 策略) 记忆化。
 
     分配器每 tick 会对同一对「空闲机器人 × 待处理任务」重复规划（机器人待命时
     位置不变），命中缓存后为 O(1)；不可达结果同样被缓存，避免每 tick 全图搜索。
     拓扑更换（新运行/编辑保存）→ 新 topology 对象 → 缓存自动失效。
+    extra_blocked：动态障碍（其它设备占用的 (row,col,layer)），每次都不同，
+    带动态障碍的规划绕过记忆化缓存直接计算。
     """
+    if extra_blocked:
+        return _shortest_path_shuttle_uncached(
+            topology, start_cell, start_layer, goal_cell, goal_layer, policy, extra_blocked
+        )
     bundle = _derived_bundle(topology)
     cache_key = (start_cell, start_layer, goal_cell, goal_layer, policy)
     cached = bundle["shuttle_paths"].get(cache_key)
@@ -556,6 +563,7 @@ def _shortest_path_shuttle_uncached(
     goal_cell: str,
     goal_layer: int,
     policy: str = "astar",
+    extra_blocked: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*：状态为 (row, col, layer)。车库内只在巷道格水平移动、经电梯竖井跨层；
     车库外视为地面层（layer=1）的普通空格。返回 [(row, col, layer), ...]，首元素为起点。"""
@@ -588,6 +596,8 @@ def _shortest_path_shuttle_uncached(
         row, col, layer = state
         if state == start or state == goal:
             return True
+        if extra_blocked and state in extra_blocked:
+            return False
         zone = zone_at.get((row, col))
         if zone is not None:
             # 车库内：巷道格（或电梯竖井格，已在 aisle 里登记）。
