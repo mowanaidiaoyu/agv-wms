@@ -7,29 +7,29 @@ import {
 } from './pickingArmSafety'
 
 const kinematics: PickingArmKinematics = {
-  upperArmLength: 5.3,
-  forearmLength: 5.2,
+  upperArmLength: 4,
+  forearmLength: 3.9,
   shoulderHeight: 4,
-  baseRadius: 0.78,
-  upperArmThickness: 0.52,
-  forearmThickness: 0.48,
-  jointRadius: 0.4,
-  gripperScale: 1.6,
-  safeTravelHeight: 7,
-  linkCollisionRadius: 0.28,
+  baseRadius: 0.68,
+  upperArmThickness: 0.42,
+  forearmThickness: 0.38,
+  jointRadius: 0.32,
+  gripperScale: 1.45,
+  safeTravelHeight: 6.3,
+  linkCollisionRadius: 0.24,
 }
 
 describe('picking arm safety geometry', () => {
   it('solves the enlarged arm IK for both topology-derived endpoints', () => {
-    expect(solvePickingArmJoints([-9, 1.12, -4], kinematics).reachable).toBe(true)
-    expect(solvePickingArmJoints([3, 3.52, 4], kinematics).reachable).toBe(true)
+    expect(solvePickingArmJoints([-6, 1.12, -1], kinematics).reachable).toBe(true)
+    expect(solvePickingArmJoints([-4, 3.52, 5], kinematics).reachable).toBe(true)
   })
 
   it('uses the raised-elbow solution for safe travel', () => {
-    const joints = solvePickingArmJoints([1.65, 7, 2.2], kinematics)
+    const joints = solvePickingArmJoints([-2.2, 6.3, 2.75], kinematics)
     const points = pickingArmJointPoints(joints, kinematics)
     expect(points.elbow[1]).toBeGreaterThan(3)
-    expect(points.wrist[1]).toBeCloseTo(7, 3)
+    expect(points.wrist[1]).toBeCloseTo(6.3, 3)
   })
 
   it('detects a major link crossing an expanded conveyor bounding box', () => {
@@ -47,7 +47,7 @@ describe('picking arm safety geometry', () => {
 
   it('does not report a high safe-travel pose against the low deck', () => {
     const points = pickingArmJointPoints(
-      solvePickingArmJoints([1.65, 7, 2.2], kinematics),
+      solvePickingArmJoints([-2.2, 6.3, 2.75], kinematics),
       kinematics,
     )
     expect(findPickingArmCollisions(points, [{
@@ -59,19 +59,19 @@ describe('picking arm safety geometry', () => {
 
   it('keeps the enlarged high-base arm clear of the critical nearby L2 conveyors', () => {
     const obstacles = [
-      { id: 'cell-r87-c52:L2', min: [-5.48, 2.8, 0.52], max: [-4.52, 3.12, 1.48] },
-      { id: 'cell-r86-c52:L2', min: [-5.48, 2.8, 1.52], max: [-4.52, 3.12, 2.48] },
-      { id: 'cell-r86-c56:L2', min: [-1.48, 2.8, 1.52], max: [-0.52, 3.12, 2.48] },
+      { id: 'cell-r87-c54:L2', min: [-0.48, 2.8, 3.52], max: [0.48, 3.12, 4.48] },
+      { id: 'cell-r91-c60:L2', min: [5.52, 2.8, -0.48], max: [6.48, 3.12, 0.48] },
+      { id: 'cell-r86-c50:L2', min: [-4.48, 2.8, 4.52], max: [-3.52, 3.12, 5.48] },
     ]
     const waypoints: Array<[number, number, number]> = [
-      [1.6, 6.4, 0.25],
-      [-4.95, 7, -2.2],
-      [-9, 1.12, -4],
-      [-4.95, 7, -2.2],
-      [1.65, 7, 2.2],
-      [3, 3.52, 4],
-      [1.65, 7, 2.2],
-      [1.6, 6.4, 0.25],
+      [1.4, 6, 0.25],
+      [-3.3, 6.3, -0.55],
+      [-6, 1.12, -1],
+      [-3.3, 6.3, -0.55],
+      [-2.2, 6.3, 2.75],
+      [-4, 3.52, 5],
+      [-2.2, 6.3, 2.75],
+      [1.4, 6, 0.25],
     ]
     for (let segment = 1; segment < waypoints.length; segment += 1) {
       for (let sample = 0; sample <= 100; sample += 1) {

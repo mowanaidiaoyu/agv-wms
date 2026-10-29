@@ -182,8 +182,9 @@ export interface PickingArmConveyorStep {
   direction: string
   beltHeight: number
   deviceIds: string[]
-  transitionToNext: 'conveyor' | 'device_transfer' | 'endpoint'
+  transitionToNext: 'conveyor' | 'device_transfer' | 'proposed_direction' | 'endpoint'
   transferDeviceId?: string | null
+  directionSource?: 'topology' | 'layout_plan'
 }
 
 export interface PickingArmKinematics {

@@ -1468,6 +1468,112 @@ def _build_picking_arm_transfer_path(
     return [*source, via[0], *target], str(transfer["validationStatus"]), target_stop, evidence
 
 
+def _build_picking_arm_explicit_route(
+    topology: dict[str, Any], start_cell_id: str, level: int, route: dict[str, Any]
+) -> tuple[list[PickingArmConveyorStep], str, str, list[str]]:
+    turn_device_id = str(route["turnDeviceId"])
+    turn_cell_id = str(route["turnCellId"])
+    end_cell_id = str(route["endCellId"])
+    outbound_direction = str(route["topologyDirection"])
+    delta_by_direction = {
+        "right": (0, 1),
+        "left": (0, -1),
+        "up": (-1, 0),
+        "down": (1, 0),
+    }
+    delta = delta_by_direction.get(outbound_direction)
+    source, source_stop = _build_picking_arm_conveyor_path(
+        topology, start_cell_id, level, turn_cell_id
+    )
+    cells_by_id = {
+        str(cell["id"]): cell
+        for cell in topology.get("cells", [])
+        if cell.get("type") == "conveyor"
+    }
+    cells_by_position = {
+        (str(cell.get("floor") or "1F"), int(cell["row"]), int(cell["col"])): cell
+        for cell in cells_by_id.values()
+    }
+    nodes_by_id = {str(node["id"]): node for node in topology.get("nodes", [])}
+    nodes_by_position: dict[tuple[str, int, int], list[str]] = {}
+    for node in topology.get("nodes", []):
+        key = (
+            str(node.get("floor") or "1F"),
+            int(node.get("row", -1)),
+            int(node.get("col", -1)),
+        )
+        nodes_by_position.setdefault(key, []).append(str(node["id"]))
+
+    def belt_height(cell: dict[str, Any]) -> float | None:
+        if bool(cell.get("conveyorGround")):
+            return 0.6 if level == 1 else None
+        if int(cell.get("levels") or 1) < level:
+            return None
+        return 1.5 + (level - 1) * 1.5
+
+    turn_device = nodes_by_id.get(turn_device_id)
+    turn_cell = cells_by_id.get(turn_cell_id)
+    if (
+        not source
+        or source[-1].cellId != turn_cell_id
+        or turn_cell is None
+        or delta is None
+        or turn_device is None
+        or turn_device.get("type") != "turn_transfer"
+        or int(turn_device.get("row", -1)) != int(turn_cell["row"])
+        or int(turn_device.get("col", -1)) != int(turn_cell["col"])
+    ):
+        return source, "BLOCKED", f"invalid turn route: {source_stop}", [str(route.get("note") or "")]
+
+    source[-1] = source[-1].model_copy(
+        update={
+            "direction": outbound_direction,
+            "directionSource": "layout_plan",
+            "transitionToNext": "device_transfer",
+            "transferDeviceId": turn_device_id,
+        }
+    )
+    current = turn_cell
+    visited = {step.cellId for step in source}
+    for _ in range(500):
+        floor = str(current.get("floor") or "1F")
+        next_key = (floor, int(current["row"]) + delta[0], int(current["col"]) + delta[1])
+        next_cell = cells_by_position.get(next_key)
+        if next_cell is None:
+            return source, "BLOCKED", f"missing proposed route cell at r{next_key[1]},c{next_key[2]}", [str(route.get("note") or "")]
+        next_id = str(next_cell["id"])
+        height = belt_height(next_cell)
+        if next_id in visited or height is None:
+            return source, "BLOCKED", f"invalid proposed route cell {next_id}/L{level}", [str(route.get("note") or "")]
+        visited.add(next_id)
+        step = PickingArmConveyorStep(
+            cellId=next_id,
+            position=LayoutPosition(
+                floor=floor,
+                row=int(next_cell["row"]),
+                col=int(next_cell["col"]),
+                level=level,
+            ),
+            direction=outbound_direction,
+            directionSource="layout_plan",
+            beltHeight=height,
+            deviceIds=nodes_by_position.get(next_key, []),
+            transitionToNext="proposed_direction",
+        )
+        source.append(step)
+        if next_id == end_cell_id:
+            source[-1] = step.model_copy(update={"transitionToNext": "endpoint"})
+            evidence = [
+                str(route.get("note") or ""),
+                f"{turn_device_id} is the real turn_transfer at r{turn_cell['row']},c{turn_cell['col']}.",
+                f"Every waypoint through {end_cell_id} is a real L{level} conveyor cell.",
+                "The post-turn row+ direction is a proposed layout override because formal conveyorDirection remains right.",
+            ]
+            return source, str(route["validationStatus"]), f"requested endpoint reached at {end_cell_id}", evidence
+        current = next_cell
+    return source, "BLOCKED", "explicit route guard reached", [str(route.get("note") or "")]
+
+
 def build_transport_layout_plan(
     topology: dict[str, Any], raw: dict[str, Any]
 ) -> TransportLayoutPlanResponse:
@@ -1520,8 +1626,8 @@ def build_transport_layout_plan(
         _issue(
             "PICKING_ARM_HANDOFF_PENDING_G3",
             "The picking arm is a proposed visual handoff. No authoritative picked-goods, output-space or completion event exists yet.",
-            "proposed-picking-arm-r89-c63",
-            "cell-r84-c60",
+            "proposed-picking-arm-r91-c54",
+            "cell-r86-c50",
             evidence=["Animation completion must not mutate inventory, delivered quantity or order status."],
             severity="WARNING",
         ),
@@ -1533,11 +1639,14 @@ def build_transport_layout_plan(
             severity="WARNING",
         ),
         _issue(
-            "PICKING_ARM_TARGET_LINE_TRANSFER_UNAPPROVED",
-            "The preview uses turn_transfer-15 to move down from row84 to the row86 right-running line, but the formal topology has no declared device edge for this handoff.",
+            "PICKING_ARM_POST_TURN_DIRECTION_OVERRIDE",
+            "After turn_transfer-15 the requested route advances row 86 to row 108 at col 60, while formal conveyorDirection remains right.",
             "turn_transfer-15",
-            "cell-r86-c60",
-            evidence=["Preview edge: cell-r84-c60 -> cell-r85-c60 -> cell-r86-c60."],
+            "cell-r108-c60",
+            evidence=[
+                "Preview topology movement: down (row+); user-visible camera direction: right.",
+                "The override remains proposed/PARTIAL and does not modify the formal topology.",
+            ],
             severity="WARNING",
         ),
     ]
@@ -1548,13 +1657,32 @@ def build_transport_layout_plan(
     lift_raw = arm_raw.get("liftClearance") or {}
     downstream_raw = arm_raw.get("downstream") or {}
     transfer_raw = arm_raw.get("previewTransfer") or {}
+    route_raw = arm_raw.get("previewRoute") or {}
     kinematics_raw = arm_raw.get("kinematics") or {}
-    arm_path, arm_path_status, arm_path_stop, arm_transfer_evidence = _build_picking_arm_transfer_path(
-        topology,
-        str(dropoff_raw["topologyCellId"]),
-        int(dropoff_raw["level"]),
-        transfer_raw,
-    )
+    if route_raw:
+        arm_path, arm_path_status, arm_path_stop, arm_transfer_evidence = _build_picking_arm_explicit_route(
+            topology,
+            str(dropoff_raw["topologyCellId"]),
+            int(dropoff_raw["level"]),
+            route_raw,
+        )
+    elif transfer_raw:
+        arm_path, arm_path_status, arm_path_stop, arm_transfer_evidence = _build_picking_arm_transfer_path(
+            topology,
+            str(dropoff_raw["topologyCellId"]),
+            int(dropoff_raw["level"]),
+            transfer_raw,
+        )
+    else:
+        arm_path, arm_path_stop = _build_picking_arm_conveyor_path(
+            topology,
+            str(dropoff_raw["topologyCellId"]),
+            int(dropoff_raw["level"]),
+        )
+        if arm_path:
+            arm_path[-1] = arm_path[-1].model_copy(update={"transitionToNext": "endpoint"})
+        arm_path_status = "PASS" if arm_path else "BLOCKED"
+        arm_transfer_evidence = []
     picking_arm = PickingArmLayout(
         armId=str(arm_raw["armId"]),
         validationStatus=str(arm_raw["validationStatus"]),
@@ -1599,8 +1727,16 @@ def build_transport_layout_plan(
         previewEndpointId=arm_path[-1].cellId if arm_path else str(dropoff_raw["topologyCellId"]),
         previewPathStatus=arm_path_status,
         previewStopReason=arm_path_stop,
-        previewTransferDeviceId=str(transfer_raw["deviceId"]),
-        previewTransferStatus=str(transfer_raw["validationStatus"]),
+        previewTransferDeviceId=(
+            str(route_raw["turnDeviceId"])
+            if route_raw
+            else str(transfer_raw["deviceId"]) if transfer_raw else None
+        ),
+        previewTransferStatus=(
+            str(route_raw["validationStatus"])
+            if route_raw
+            else str(transfer_raw["validationStatus"]) if transfer_raw else None
+        ),
         previewTransferEvidence=arm_transfer_evidence,
         actionSequence=[str(value) for value in arm_raw["actionSequence"]],
         requiredAuthoritativeSignals=[

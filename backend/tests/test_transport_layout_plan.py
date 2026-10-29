@@ -160,18 +160,18 @@ def test_plan_generation_does_not_mutate_formal_topology(topology: dict) -> None
     assert "transportNetwork" not in topology
 
 
-def test_picking_arm_uses_clear_grid_installation_and_real_vertical_line_dropoff(
+def test_picking_arm_uses_user_confirmed_installation_and_row86_dropoff(
     topology: dict, plan
 ) -> None:
     arm = plan.pickingArm
     assert arm is not None
-    assert (arm.installation.row, arm.installation.col, arm.installation.level) == (89, 63, 1)
+    assert (arm.installation.row, arm.installation.col, arm.installation.level) == (91, 54, 1)
     assert not any(
-        int(cell["row"]) == 89 and int(cell["col"]) == 63
+        int(cell["row"]) == 91 and int(cell["col"]) == 54
         for cell in topology["cells"]
     )
     assert not any(
-        int(node["row"]) == 89 and int(node["col"]) == 63
+        int(node["row"]) == 91 and int(node["col"]) == 54
         for node in topology["nodes"]
     )
     drop_cell = next(cell for cell in topology["cells"] if cell["id"] == arm.dropoff.topologyCellId)
@@ -180,7 +180,7 @@ def test_picking_arm_uses_clear_grid_installation_and_real_vertical_line_dropoff
     assert pickup_cell["type"] == "conveyor"
     assert pickup_cell["conveyorGround"] is True
     assert pickup_cell["conveyorDirection"] == "right"
-    assert drop_cell["id"] == "cell-r84-c60"
+    assert drop_cell["id"] == "cell-r86-c50"
     assert drop_cell["type"] == "conveyor"
     assert drop_cell["conveyorDirection"] == "right"
     assert drop_cell["levels"] == 2
@@ -194,21 +194,22 @@ def test_picking_arm_is_preview_only_and_has_real_directed_downstream(
     assert arm.pickup.provenance == "topology"
     assert arm.dropoff.provenance == "topology"
     assert arm.canDeclareDelivery is False
-    assert arm.downstreamCellId == "cell-r85-c60"
-    assert arm.downstreamStatus == "PARTIAL"
+    assert arm.downstreamCellId == "cell-r86-c51"
+    assert arm.downstreamStatus == "PASS"
     downstream = next(cell for cell in topology["cells"] if cell["id"] == arm.downstreamCellId)
     assert downstream["conveyorDirection"] == "right"
     assert arm.liftBId == "shuttle-lift-b"
-    assert arm.liftBClearanceCells == pytest.approx(16.64)
-    assert arm.workRadius == pytest.approx(15.8)
-    assert arm.kinematics.upperArmLength == pytest.approx(8.0)
-    assert arm.kinematics.forearmLength == pytest.approx(7.8)
+    assert arm.liftBClearanceCells == pytest.approx(8.60)
+    assert arm.workRadius == pytest.approx(7.9)
+    assert arm.kinematics.upperArmLength == pytest.approx(4.0)
+    assert arm.kinematics.forearmLength == pytest.approx(3.9)
     assert arm.kinematics.shoulderHeight == pytest.approx(4.0)
-    assert arm.kinematics.safeTravelHeight == pytest.approx(9.5)
+    assert arm.kinematics.safeTravelHeight == pytest.approx(6.3)
     issue_codes = {issue.code for issue in plan.issues}
     assert "PICKING_ARM_HANDOFF_PENDING_G3" in issue_codes
     assert "PICKING_ARM_PICK_SOURCE_UNCONFIRMED" in issue_codes
-    assert "PICKING_ARM_TARGET_LINE_TRANSFER_UNAPPROVED" in issue_codes
+    assert "PICKING_ARM_TARGET_LINE_TRANSFER_UNAPPROVED" not in issue_codes
+    assert "PICKING_ARM_POST_TURN_DIRECTION_OVERRIDE" in issue_codes
 
 
 def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(plan) -> None:
@@ -228,37 +229,46 @@ def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(p
     assert "PICKING_ARM_KINEMATICS_UNDERSIZED" not in issue_codes
 
 
-def test_picking_arm_preview_path_moves_down_then_turns_right_at_real_transfer(plan) -> None:
+def test_picking_arm_preview_path_turns_at_15_and_reaches_r108_c60(plan) -> None:
     arm = plan.pickingArm
     assert arm is not None
     assert [step.cellId for step in arm.previewConveyorPath] == (
-        ["cell-r84-c60", "cell-r85-c60"]
-        + [f"cell-r86-c{col}" for col in range(60, 92)]
+        [f"cell-r86-c{col}" for col in range(50, 61)]
+        + [f"cell-r{row}-c60" for row in range(87, 109)]
     )
     assert all(step.position.level == 2 for step in arm.previewConveyorPath)
-    assert all(step.direction == "right" for step in arm.previewConveyorPath)
     assert all(step.beltHeight == pytest.approx(3.0) for step in arm.previewConveyorPath)
-    assert arm.previewEndpointId == "cell-r86-c91"
+    assert all(step.direction == "right" for step in arm.previewConveyorPath[:10])
+    assert all(step.direction == "down" for step in arm.previewConveyorPath[10:])
+    assert all(step.directionSource == "layout_plan" for step in arm.previewConveyorPath[10:])
+    assert arm.previewEndpointId == "cell-r108-c60"
     assert arm.previewPathStatus == "PARTIAL"
-    assert "r86,c92" in arm.previewStopReason
+    assert "cell-r108-c60" in arm.previewStopReason
     mounted_devices = {
         step.cellId: step.deviceIds
         for step in arm.previewConveyorPath
         if step.deviceIds
     }
     assert mounted_devices == {
+        "cell-r86-c52": ["turn_transfer-18"],
+        "cell-r86-c56": ["turn_transfer-17"],
         "cell-r86-c60": ["turn_transfer-15"],
-        "cell-r86-c66": ["turn_transfer-03"],
-        "cell-r86-c74": ["turn_transfer-07"],
-        "cell-r86-c82": ["turn_transfer-05"],
-        "cell-r86-c90": ["turn_transfer-02"],
+        "cell-r108-c60": ["turn_transfer-13"],
     }
     transfer_steps = [
         step for step in arm.previewConveyorPath
         if step.transitionToNext == "device_transfer"
     ]
-    assert [step.cellId for step in transfer_steps] == ["cell-r84-c60", "cell-r85-c60"]
-    assert all(step.transferDeviceId == "turn_transfer-15" for step in transfer_steps)
+    assert [step.cellId for step in transfer_steps] == ["cell-r86-c60"]
+    assert transfer_steps[0].transferDeviceId == "turn_transfer-15"
+    proposed_steps = [
+        step for step in arm.previewConveyorPath
+        if step.transitionToNext == "proposed_direction"
+    ]
+    assert [step.cellId for step in proposed_steps] == [
+        f"cell-r{row}-c60" for row in range(87, 108)
+    ]
+    assert arm.previewTransferDeviceId == "turn_transfer-15"
     assert arm.previewTransferStatus == "PARTIAL"
 
 

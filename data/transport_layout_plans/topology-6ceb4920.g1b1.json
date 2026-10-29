@@ -6,26 +6,26 @@
   "overallStatus": "PARTIAL",
   "recommendedOptionId": "scheme-a-height-transfer",
   "pickingArmPreview": {
-    "armId": "proposed-picking-arm-r89-c63",
+    "armId": "proposed-picking-arm-r91-c54",
     "validationStatus": "PARTIAL",
     "installation": {
-      "row": 89,
-      "col": 63,
+      "row": 91,
+      "col": 54,
       "level": 1,
       "mountHeight": 0.0,
-      "workRadius": 15.8
+      "workRadius": 7.9
     },
     "kinematics": {
-        "upperArmLength": 8.0,
-        "forearmLength": 7.8,
+        "upperArmLength": 4.0,
+        "forearmLength": 3.9,
         "shoulderHeight": 4.0,
-        "baseRadius": 0.82,
-        "upperArmThickness": 0.62,
-        "forearmThickness": 0.58,
-        "jointRadius": 0.48,
-        "gripperScale": 1.7,
-        "safeTravelHeight": 9.5,
-        "linkCollisionRadius": 0.32
+        "baseRadius": 0.68,
+        "upperArmThickness": 0.42,
+        "forearmThickness": 0.38,
+        "jointRadius": 0.32,
+        "gripperScale": 1.45,
+        "safeTravelHeight": 6.3,
+        "linkCollisionRadius": 0.24
     },
     "pickup": {
       "nodeId": "existing-ground-conveyor-cell-r92-c48",
@@ -41,38 +41,38 @@
       "note": "This is the real right-running ground conveyor terminal adjacent to the unchanged arm position; c49 is absent."
     },
     "dropoff": {
-      "nodeId": "existing-conveyor-cell-r84-c60",
-      "topologyCellId": "cell-r84-c60",
-      "row": 84,
-      "col": 60,
+      "nodeId": "existing-conveyor-cell-r86-c50",
+      "topologyCellId": "cell-r86-c50",
+      "row": 86,
+      "col": 50,
       "level": 2,
       "deckIndex": 2,
       "beltHeight": 3.0,
       "direction": "right",
       "provenance": "topology",
       "validationStatus": "PASS",
-      "note": "The enlarged arm releases onto the upper end of the physical c60 vertical conveyor. The preview transfer then moves down to turn_transfer-15 before turning right."
+      "note": "User-confirmed L2 dropoff. Cargo moves directly right along row86 from c50."
     },
     "liftClearance": {
       "liftId": "shuttle-lift-b",
       "row": 98,
       "col": 49,
-      "minimumPlanarDistanceCells": 16.64
+      "minimumPlanarDistanceCells": 8.60
     },
     "downstream": {
-      "nextRequiredCellId": "cell-r85-c60",
-      "validationStatus": "PARTIAL",
-      "reason": "The cell exists at L2, but its formal direction is right while the requested physical preview movement is down through the turn-transfer envelope."
+      "nextRequiredCellId": "cell-r86-c51",
+      "validationStatus": "PASS",
+      "reason": "The adjacent L2 conveyor cell exists and both cells formally run right."
     },
-    "previewTransfer": {
-      "deviceId": "turn_transfer-15",
-      "entryCellId": "cell-r84-c60",
-      "viaCellId": "cell-r85-c60",
-      "exitCellId": "cell-r86-c60",
-      "direction": "down",
+    "previewTransfer": null,
+    "previewRoute": {
+      "turnDeviceId": "turn_transfer-15",
+      "turnCellId": "cell-r86-c60",
+      "endCellId": "cell-r108-c60",
+      "topologyDirection": "down",
+      "screenDirection": "right",
       "validationStatus": "PARTIAL",
-      "targetLineEndCellId": "cell-r86-c91",
-      "note": "Preview-only downward device transfer to turn_transfer-15 followed by the red-arrow row86 right-running line. All cells exist at L2, but r84/r85 formally say right and the topology has no explicit r84→r86 device edge."
+      "note": "User-confirmed route: c50..c60 on row86, then turn at turn_transfer-15 and advance row+ along col60 to r108. Formal post-turn cell directions still say right."
     },
     "actionSequence": [
       "idle",
@@ -91,7 +91,7 @@
       "handoffCompleted"
     ],
     "evidence": [
-      "r89,c63 is the center-left of the clear r88..r93/c62..c65 bay and has at least two cell centers of clearance to the nearest conveyor.",
+      "The user fixed the arm installation at r91,c54 and the dropoff at cell-r86-c50.",
       "The base, pickup and dropoff coordinates are topology-grid coordinates, never screen pixels.",
       "Animation completion is visual only and cannot mutate inventory, delivered quantity or order status."
     ]

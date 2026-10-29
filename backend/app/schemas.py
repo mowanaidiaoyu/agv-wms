@@ -393,8 +393,11 @@ class PickingArmConveyorStep(BaseModel):
     direction: str
     beltHeight: float = Field(ge=0)
     deviceIds: list[str] = Field(default_factory=list)
-    transitionToNext: Literal["conveyor", "device_transfer", "endpoint"] = "conveyor"
+    transitionToNext: Literal[
+        "conveyor", "device_transfer", "proposed_direction", "endpoint"
+    ] = "conveyor"
     transferDeviceId: str | None = None
+    directionSource: Literal["topology", "layout_plan"] = "topology"
 
 
 class PickingArmKinematics(BaseModel):

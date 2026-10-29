@@ -1,4 +1,4 @@
-import { Html, Line } from '@react-three/drei'
+import { Html } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Group, Mesh } from 'three'
@@ -106,7 +106,7 @@ export function PickingArmHandoff({
     worldZ(layout.dropoff.position.row, rows) - base[2],
   ], [base, cols, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
   const points = useMemo(() => ({
-    home: [2.0, 8.0, 0.3] as [number, number, number],
+    home: [1.4, 6.0, 0.25] as [number, number, number],
     pickup,
     pickupLift: [pickup[0] * 0.55, layout.kinematics.safeTravelHeight, pickup[2] * 0.55] as [number, number, number],
     dropLift: [dropoff[0] * 0.55, layout.kinematics.safeTravelHeight, dropoff[2] * 0.55] as [number, number, number],
@@ -270,14 +270,6 @@ export function PickingArmHandoff({
 
   return (
     <group position={base}>
-      <Line points={[pickup, dropoff]} color="#facc15" lineWidth={1.5} dashed dashSize={0.12} gapSize={0.08} />
-      {conveyorRoute.routePoints.length > 1 ? (
-        <Line points={conveyorRoute.routePoints} color="#22c55e" lineWidth={2} transparent opacity={0.72} />
-      ) : null}
-      <mesh position={[dropoff[0], layout.dropoff.beltHeight + 0.08, dropoff[2]]}>
-        <boxGeometry args={[0.96, 0.16, 0.96]} />
-        <meshBasicMaterial color="#ef4444" wireframe transparent opacity={0.9} />
-      </mesh>
       <mesh position={[0, 0.035, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <circleGeometry args={[layout.workRadius, 48]} />
         <meshBasicMaterial color="#f59e0b" transparent opacity={0.055} depthWrite={false} />

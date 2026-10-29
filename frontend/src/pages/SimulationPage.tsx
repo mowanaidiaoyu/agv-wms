@@ -694,7 +694,7 @@ export function SimulationPage() {
                   <div><dt>安装</dt><dd>r{transportLayoutQuery.data.pickingArm.installation.row},c{transportLayoutQuery.data.pickingArm.installation.col},L{transportLayoutQuery.data.pickingArm.installation.level}</dd></div>
                   <div><dt>取货</dt><dd>{transportLayoutQuery.data.pickingArm.pickup.topologyCellId} · ground</dd></div>
                   <div><dt>放货</dt><dd>{transportLayoutQuery.data.pickingArm.dropoff.topologyCellId} · L{transportLayoutQuery.data.pickingArm.dropoff.position.level}</dd></div>
-                  <div><dt>转向</dt><dd>{transportLayoutQuery.data.pickingArm.previewTransferDeviceId} · r86,c60 · PARTIAL</dd></div>
+                  <div><dt>方向</dt><dd>r86,c50…c60 → turn_transfer-15 → r108,c60 · 画面向右</dd></div>
                   <div><dt>终点</dt><dd>{transportLayoutQuery.data.pickingArm.previewEndpointId} · 预览路径终点</dd></div>
                   <div><dt>路径</dt><dd>{transportLayoutQuery.data.pickingArm.previewConveyorPath.length} 个真实 Conveyor 节点</dd></div>
                 </dl>

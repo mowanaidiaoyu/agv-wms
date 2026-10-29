@@ -99,7 +99,7 @@ describe('strict picking-arm conveyor path', () => {
 
   it('accepts an orthogonal preview transfer to the target line only with a real turn device', () => {
     const cells = [
-      conveyor(6, 5), conveyor(6, 6), conveyor(5, 6), conveyor(4, 6), conveyor(4, 7),
+      conveyor(6, 5), conveyor(6, 6), conveyor(5, 6), conveyor(4, 6),
     ]
     const turn: TopologyNode = {
       id: 'turn-1', type: 'turn_transfer', floor: '1F', row: 6, col: 6,
@@ -108,70 +108,73 @@ describe('strict picking-arm conveyor path', () => {
     const steps = cells.map((cell, index) => ({
       cellId: cell.id,
       position: { floor: '1F', row: cell.row, col: cell.col, level: 2 },
-      direction: cell.conveyorDirection ?? 'right',
+      direction: index >= 1 ? 'up' as const : cell.conveyorDirection ?? 'right',
       beltHeight: 3,
       deviceIds: cell.id === 'cell-r6-c6' ? ['turn-1'] : [],
-      transitionToNext: index === 1 || index === 2
+      transitionToNext: index === 1
         ? 'device_transfer' as const
         : index === cells.length - 1
           ? 'endpoint' as const
-          : 'conveyor' as const,
-      transferDeviceId: index === 1 || index === 2 ? 'turn-1' : null,
+          : index > 1 ? 'proposed_direction' as const : 'conveyor' as const,
+      transferDeviceId: index === 1 ? 'turn-1' : null,
+      directionSource: index >= 1 ? 'layout_plan' as const : 'topology' as const,
     }))
     const result = validateServerPickingArmPath(topology(cells, [turn]), 'cell-r6-c5', 2, steps)
     expect(result.status).toBe('PASS')
     expect(result.steps.map((step) => step.cellId)).toEqual([
-      'cell-r6-c5', 'cell-r6-c6', 'cell-r5-c6', 'cell-r4-c6', 'cell-r4-c7',
+      'cell-r6-c5', 'cell-r6-c6', 'cell-r5-c6', 'cell-r4-c6',
     ])
   })
 
-  it('follows the ARM-3 preview down to turn_transfer-15 then right without a diagonal', () => {
+  it('moves right to turn_transfer-15 then follows the proposed row-plus route', () => {
     const cells = [
-      conveyor(4, 6), conveyor(5, 6), conveyor(6, 6),
-      conveyor(6, 7), conveyor(6, 8),
+      conveyor(4, 4), conveyor(4, 5), conveyor(4, 6),
+      conveyor(5, 6), conveyor(6, 6),
     ]
     const turn: TopologyNode = {
-      id: 'turn_transfer-15', type: 'turn_transfer', floor: '1F', row: 6, col: 6,
+      id: 'turn_transfer-15', type: 'turn_transfer', floor: '1F', row: 4, col: 6,
       capacity: 1, label: 'turn',
     }
     const steps = cells.map((cell, index) => ({
       cellId: cell.id,
       position: { floor: '1F', row: cell.row, col: cell.col, level: 2 },
-      direction: cell.conveyorDirection ?? 'right',
+      direction: index >= 2 ? 'down' as const : cell.conveyorDirection ?? 'right',
       beltHeight: 3,
-      deviceIds: cell.row === 6 && cell.col === 6 ? ['turn_transfer-15'] : [],
-      transitionToNext: index < 2
+      deviceIds: cell.row === 4 && cell.col === 6 ? ['turn_transfer-15'] : [],
+      transitionToNext: index === 2
         ? 'device_transfer' as const
         : index === cells.length - 1
           ? 'endpoint' as const
-          : 'conveyor' as const,
-      transferDeviceId: index < 2 ? 'turn_transfer-15' : null,
+          : index > 2 ? 'proposed_direction' as const : 'conveyor' as const,
+      transferDeviceId: index === 2 ? 'turn_transfer-15' : null,
+      directionSource: index >= 2 ? 'layout_plan' as const : 'topology' as const,
     }))
     const result = validateServerPickingArmPath(
       topology(cells, [turn]),
-      'cell-r4-c6',
+      'cell-r4-c4',
       2,
       steps,
     )
     expect(result.status).toBe('PASS')
     expect(result.steps.map((step) => [step.position.row, step.position.col])).toEqual([
-      [4, 6], [5, 6], [6, 6], [6, 7], [6, 8],
+      [4, 4], [4, 5], [4, 6], [5, 6], [6, 6],
     ])
   })
 
   it('refuses the vertical-to-horizontal preview when the transfer device is absent', () => {
-    const cells = [conveyor(4, 6), conveyor(5, 6), conveyor(6, 6), conveyor(6, 7)]
+    const cells = [conveyor(4, 4), conveyor(4, 5), conveyor(4, 6), conveyor(5, 6)]
     const steps = cells.map((cell, index) => ({
       cellId: cell.id,
       position: { floor: '1F', row: cell.row, col: cell.col, level: 2 },
-      direction: 'right' as const,
+      direction: index >= 2 ? 'down' as const : 'right' as const,
       beltHeight: 3,
       deviceIds: [],
-      transitionToNext: index < 2 ? 'device_transfer' as const : 'conveyor' as const,
-      transferDeviceId: index < 2 ? 'turn_transfer-15' : null,
+      transitionToNext: index === 2 ? 'device_transfer' as const : 'conveyor' as const,
+      transferDeviceId: index === 2 ? 'turn_transfer-15' : null,
+      directionSource: index >= 2 ? 'layout_plan' as const : 'topology' as const,
     }))
     expect(validateServerPickingArmPath(
-      topology(cells), 'cell-r4-c6', 2, steps,
+      topology(cells), 'cell-r4-c4', 2, steps,
     ).stopCode).toBe('TURN_DEVICE_MISSING')
   })
 })

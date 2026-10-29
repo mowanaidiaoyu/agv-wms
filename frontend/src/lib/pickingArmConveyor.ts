@@ -10,6 +10,7 @@ export type ConveyorPreviewStopCode =
   | 'MISSING_NEXT_CELL'
   | 'LEVEL_MISMATCH'
   | 'TURN_DEVICE_MISSING'
+  | 'PROPOSED_DIRECTION_INVALID'
   | 'CYCLE_DETECTED'
   | 'UNSUPPORTED_DIRECTION'
   | 'PATH_GUARD_REACHED'
@@ -180,10 +181,31 @@ export function validateServerPickingArmPath(
     }
     if (step.transitionToNext === 'device_transfer') {
       const device = step.transferDeviceId ? nodes.get(step.transferDeviceId) : undefined
-      if (!device || device.type !== 'turn_transfer') {
+      if (
+        !device
+        || device.type !== 'turn_transfer'
+        || device.row !== step.position.row
+        || device.col !== step.position.col
+      ) {
         return {
           status: 'BLOCKED', steps: serverSteps.slice(0, index + 1), endpointId: step.cellId,
           stopCode: 'TURN_DEVICE_MISSING', stopReason: `Missing transfer device for ${step.cellId}→${next.cellId}`,
+        }
+      }
+      continue
+    }
+    if (step.transitionToNext === 'proposed_direction') {
+      const delta = DELTA[step.direction as ConveyorDirection]
+      if (
+        step.directionSource !== 'layout_plan'
+        || !delta
+        || cell.row + delta[0] !== next.position.row
+        || cell.col + delta[1] !== next.position.col
+      ) {
+        return {
+          status: 'BLOCKED', steps: serverSteps.slice(0, index + 1), endpointId: step.cellId,
+          stopCode: 'PROPOSED_DIRECTION_INVALID',
+          stopReason: `Invalid proposed direction override at ${step.cellId}`,
         }
       }
       continue
