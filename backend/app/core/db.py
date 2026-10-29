@@ -33,19 +33,10 @@ def init_db() -> None:
               updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS scenarios (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
-              payload TEXT NOT NULL,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS simulation_runs (
               id TEXT PRIMARY KEY,
               status TEXT NOT NULL,
               topology_id TEXT NOT NULL,
-              scenario_id TEXT NOT NULL,
               payload TEXT NOT NULL,
               metrics TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -62,6 +53,27 @@ def init_db() -> None:
             );
             """
         )
+        run_columns = {row[1] for row in conn.execute("PRAGMA table_info(simulation_runs)")}
+        if "scenario_id" in run_columns:
+            conn.executescript(
+                """
+                ALTER TABLE simulation_runs RENAME TO simulation_runs_legacy;
+                CREATE TABLE simulation_runs (
+                  id TEXT PRIMARY KEY,
+                  status TEXT NOT NULL,
+                  topology_id TEXT NOT NULL,
+                  payload TEXT NOT NULL,
+                  metrics TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO simulation_runs (id, status, topology_id, payload, metrics, created_at, updated_at)
+                SELECT id, status, topology_id, payload, metrics, created_at, updated_at
+                FROM simulation_runs_legacy;
+                DROP TABLE simulation_runs_legacy;
+                """
+            )
+        conn.execute("DROP TABLE IF EXISTS scenarios")
 
 
 @contextmanager

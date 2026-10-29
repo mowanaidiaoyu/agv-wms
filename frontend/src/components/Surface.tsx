@@ -7,7 +7,7 @@ export function Surface({
   className,
   action,
 }: {
-  title: string
+  title?: string
   subtitle?: string
   children: React.ReactNode
   className?: string
@@ -15,13 +15,15 @@ export function Surface({
 }) {
   return (
     <section className={clsx('surface-card', className)}>
-      <div className="surface-header">
-        <div>
-          <p className="surface-title">{title}</p>
-          {subtitle ? <p className="surface-subtitle">{subtitle}</p> : null}
+      {title || subtitle || action ? (
+        <div className="surface-header">
+          <div>
+            {title ? <p className="surface-title">{title}</p> : null}
+            {subtitle ? <p className="surface-subtitle">{subtitle}</p> : null}
+          </div>
+          {action}
         </div>
-        {action}
-      </div>
+      ) : null}
       {children}
     </section>
   )

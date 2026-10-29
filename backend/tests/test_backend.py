@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
@@ -6,7 +7,13 @@ from app.main import app
 from app.services.assignment import assign_tasks
 from app.services.pathfinding import node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle
 from app.services.runtime import repo
-from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, SimulationService
+from app.services.simulation import (
+    CTU_RACK_LAYERS,
+    DEADLOCK_CONFIRM_TICKS,
+    ROBOT_CARRY_CAPACITY,
+    RunRuntime,
+    SimulationService,
+)
 
 
 client = TestClient(app)
@@ -41,9 +48,8 @@ TOPOLOGY = {
     ],
 }
 
-SCENARIO = {
-    "id": "test-scenario",
-    "name": "Test Scenario",
+CONFIG = {
+    "id": "test-config",
     "topologyId": "test-topology",
     "robots": [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True}],
     "orderGenerator": {"ratePerMinute": 2, "maxOrders": 4, "linesPerOrderMin": 1, "linesPerOrderMax": 2, "urgentInsertionTick": 4},
@@ -237,38 +243,7 @@ def test_topology_delete():
     assert missing_response.status_code == 404
 
 
-def test_topology_delete_blocked_when_referenced():
-    topology = {**TOPOLOGY, "id": "blocked-topology", "name": "Blocked Grid Topology"}
-    scenario = {**SCENARIO, "id": "blocked-scenario", "topologyId": "blocked-topology"}
-    client.post("/api/v1/topologies", json=topology)
-    scenario_response = client.post("/api/v1/scenarios", json=scenario)
-    assert scenario_response.status_code == 200
-
-    delete_response = client.delete("/api/v1/topologies/blocked-topology")
-    assert delete_response.status_code == 409
-
-
-def test_get_scenario_auto_syncs_stale_robot_start_node():
-    topology = {**TOPOLOGY, "id": "sync-topology", "name": "Sync Topology"}
-    client.post("/api/v1/topologies", json=topology)
-
-    stale_scenario = {
-        **SCENARIO,
-        "id": "sync-scenario",
-        "name": "Sync Scenario",
-        "topologyId": topology["id"],
-        "robots": [{"id": "r1", "type": "ctu", "startNode": "legacy-start-node", "speed": 1.8, "battery": 88, "enabled": False}],
-    }
-    repo.upsert_scenario(stale_scenario["id"], stale_scenario["name"], stale_scenario)
-
-    response = client.get("/api/v1/scenarios/sync-scenario")
-    assert response.status_code == 200
-
-    robots = response.json()["payload"]["robots"]
-    assert robots == [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.8, "battery": 88, "enabled": False}]
-
-
-def test_start_simulation_auto_syncs_missing_topology_devices():
+def test_start_simulation_builds_devices_from_topology():
     topology = deepcopy(TOPOLOGY)
     topology["id"] = "auto-sync-topology"
     topology["name"] = "Auto Sync Topology"
@@ -285,39 +260,16 @@ def test_start_simulation_auto_syncs_missing_topology_devices():
     )
     client.post("/api/v1/topologies", json=topology)
 
-    stale_scenario = {
-        **SCENARIO,
-        "id": "auto-sync-scenario",
-        "name": "Auto Sync Scenario",
-        "topologyId": topology["id"],
-        "robots": [{"id": "r1", "type": "ctu", "startNode": "legacy-r1", "speed": 1.6, "battery": 77, "enabled": True}],
-    }
-    repo.upsert_scenario(stale_scenario["id"], stale_scenario["name"], stale_scenario)
-
     response = client.post(
         "/api/v1/simulations/start",
-        json={"topologyId": topology["id"], "scenarioId": stale_scenario["id"]},
+        json={"topologyId": topology["id"]},
     )
     assert response.status_code == 200
-
-    persisted = repo.get_scenario(stale_scenario["id"])
-    assert persisted is not None
-    robots = persisted["payload"]["robots"]
-    assert robots == [
-        {"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.6, "battery": 77, "enabled": True},
-        {"id": "shuttle-01", "type": "shuttle", "startNode": "shuttle-01", "speed": 1.1, "battery": 100, "enabled": True},
-    ]
-
-
-def test_algorithm_evaluation():
-    client.post("/api/v1/topologies", json=TOPOLOGY)
-    scenario_response = client.post("/api/v1/scenarios", json=SCENARIO)
-    assert scenario_response.status_code == 200
-    response = client.post("/api/v1/algorithms/evaluate", json={"topologyId": TOPOLOGY["id"], "scenarioId": SCENARIO["id"]})
-    assert response.status_code == 200
-    results = response.json()["results"]
-    assert len(results) == 6
-    assert {item["category"] for item in results} == {"dispatch", "path", "conveyor"}
+    state = client.get(f"/api/v1/simulations/{response.json()['runId']}/state").json()
+    assert {(robot["id"], robot["type"]) for robot in state["robots"]} == {
+        ("r1", "ctu"),
+        ("shuttle-01", "shuttle"),
+    }
 
 
 def _service() -> SimulationService:
@@ -326,13 +278,13 @@ def _service() -> SimulationService:
 
 def test_seed_tasks_multiline_orders():
     service = _service()
-    tasks = service._seed_tasks(TOPOLOGY, SCENARIO)
+    tasks = service._seed_tasks(TOPOLOGY, CONFIG)
     ctu_tasks = [task for task in tasks if task["robotType"] == "ctu"]
-    assert len(ctu_tasks) == SCENARIO["orderGenerator"]["maxOrders"]
+    assert len(ctu_tasks) == CONFIG["orderGenerator"]["maxOrders"]
 
     for task in ctu_tasks:
         lines = task["lines"]
-        assert SCENARIO["orderGenerator"]["linesPerOrderMin"] <= len(lines) <= SCENARIO["orderGenerator"]["linesPerOrderMax"]
+        assert CONFIG["orderGenerator"]["linesPerOrderMin"] <= len(lines) <= CONFIG["orderGenerator"]["linesPerOrderMax"]
         assert task["sourceCellId"] == lines[0]["cellId"]
         assert task["deliveryCellId"]
         assert all(1 <= line["layer"] <= CTU_RACK_LAYERS for line in lines)
@@ -343,15 +295,532 @@ def test_seed_tasks_multiline_orders():
 def test_seed_tasks_never_share_one_storage_slot():
     # 同一库位槽（nodeId + layer）只能派一单，否则两台车会抢同一格形成对头死锁。
     service = _service()
-    tasks = service._seed_tasks(TOPOLOGY, SCENARIO)
+    tasks = service._seed_tasks(TOPOLOGY, CONFIG)
     keys = [(line["nodeId"], line["layer"]) for task in tasks for line in task["lines"]]
     assert keys
     assert len(keys) == len(set(keys))
 
 
+def test_split_ports_by_conveyor_kind():
+    # port 归属由入口格最近的输送块决定：地面输送块（conveyorGround）→ 地面线 port，
+    # 其余 → 架空线 port；附近没有输送块时按架空处理。
+    service = _service()
+    topology = {
+        "zones": [
+            {"id": "p-elevated", "label": "Port E", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
+            {"id": "p-ground", "label": "Port G", "type": "port", "x": 0, "y": 6, "width": 3, "height": 2},
+        ],
+        "cells": [
+            # p-elevated 入口格 cell-r5-c6 紧邻架空输送块
+            {"id": "cell-r5-c6", "floor": "1F", "row": 5, "col": 6, "type": "conveyor"},
+            # p-ground 入口格 cell-r7-c1 紧邻地面输送块
+            {"id": "cell-r7-c1", "floor": "1F", "row": 7, "col": 1, "type": "conveyor", "conveyorGround": True},
+        ],
+    }
+    ground_ports, elevated_ports = service._split_ports_by_conveyor_kind(topology)
+    assert ground_ports == ["cell-r7-c1"]
+    assert elevated_ports == ["cell-r5-c6"]
+
+
+def test_seed_tasks_routes_shuttle_to_ground_conveyor_anchor():
+    # 四向车（整箱）直接驶上地面输送线交付：目标取地面线 2×2 块锚点，
+    # 不需要 port 定位（port 是 CTU 概念）；CTU（零散件）仍走架空线 port。
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+            {"id": "zone-port", "label": "Port", "type": "port", "x": 5, "y": 4, "width": 3, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            # 地面输送线块（2×2，锚点 (9,8)）：无任何 port 靠近它
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            # shuttle 区 4 格故意不建格 → 非 road → 该 2×2 槽为四向车取货位
+        ],
+    }
+    tasks = service._seed_tasks(topology, CONFIG)
+    ctu_tasks = [task for task in tasks if task["robotType"] == "ctu"]
+    shuttle_tasks = [task for task in tasks if task["robotType"] == "shuttle"]
+    assert ctu_tasks and shuttle_tasks
+    # 四向车交付到地面线锚点（cell-r9-c8），CTU 走架空 port（cell-r5-c6）
+    assert all(task["deliveryCellId"] == "cell-r9-c8" for task in shuttle_tasks)
+    assert all(task["deliveryCellId"] == "cell-r5-c6" for task in ctu_tasks)
+
+
+def test_seed_shuttle_dock_tasks():
+    # 四向车出货位（shuttle_dock）：设置取什么货物（skuId）与取多少（quantity），
+    # 生成对应数量的搬运任务（每箱一趟），交付到出货位所在地面输送线格；无需 port。
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {
+                "id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+                "zoneId": None, "capacity": 1, "label": "出货位 1",
+                "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "largeCategory": "建筑配件", "quantity": 3,
+            },
+        ],
+    }
+    tasks = service._seed_shuttle_tasks(topology)
+    assert [task["id"] for task in tasks] == [
+        "task-dock-dock-01-1",
+        "task-dock-dock-01-2",
+        "task-dock-dock-01-3",
+    ]
+    assert all(task["robotType"] == "shuttle" and task["mode"] == "cross_zone" for task in tasks)
+    assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
+    assert all(task["lines"][0]["skuId"] == "SKU-DOCK" for task in tasks)
+    assert all(task["lines"][0]["skuName"] == "脚手架 1.7米" for task in tasks)
+    assert all(task["sourceCellId"] == "cell-r8-c0" for task in tasks)  # 单槽位车库：源格唯一
+
+
+def test_shuttle_dock_sources_exclude_unreachable_rack_slots(monkeypatch):
+    """回归：出货位不能从与车辆/交付点断开的货位生成任务。"""
+    service = _service()
+    topology = {
+        **TOPOLOGY,
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {
+                "id": "shuttle-01",
+                "type": "shuttle_robot",
+                "floor": "1F",
+                "row": 0,
+                "col": 0,
+                "zoneId": None,
+                "capacity": 1,
+                "label": "四向车-01",
+            },
+        ],
+    }
+    unreachable = "cell-r8-c2"
+
+    def fake_path(_topology, start_cell, _start_layer, goal_cell, _goal_layer, _policy):
+        if unreachable in {start_cell, goal_cell}:
+            return []
+        return [(0, 0, 1), (0, 1, 1)]
+
+    monkeypatch.setattr("app.services.simulation.shortest_path_shuttle", fake_path)
+
+    sources = [(unreachable, 2), ("cell-r8-c0", 1)]
+    assert service._reachable_shuttle_sources(
+        topology,
+        sources,
+        "cell-r9-c8",
+    ) == [("cell-r8-c0", 1)]
+
+
+def test_update_shuttle_dock_runtime_settings():
+    # 四向车搬运工作台运行时改出货位设置：只重排「未分配」任务，执行中/已完成不受影响。
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-update-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {
+                "id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+                "zoneId": None, "capacity": 1, "label": "出货位 1",
+                "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "quantity": 1,
+            },
+        ],
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-update-topology"}).json()
+    run_id = run["runId"]
+    try:
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert len(state["shuttleDocks"]) == 1
+        assert state["shuttleDocks"][0]["dockId"] == "dock-01"
+
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-01",
+            json={"skuId": "SKU-X", "skuName": "测试箱", "quantity": 2, "priority": "urgent", "loop": True},
+        )
+        assert resp.status_code == 200
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        dock = state["shuttleDocks"][0]
+        assert dock["quantity"] == 2 and dock["priority"] == "urgent" and dock["loop"] is True
+        pending = [
+            task for task in state["tasks"]
+            if task.get("dockId") == "dock-01" and task["status"] == "pending"
+        ]
+        assert len(pending) == 2
+        assert all(task["lines"][0]["skuId"] == "SKU-X" for task in pending)
+        assert all(task["priority"] == 1 for task in pending)
+        assert all(task.get("requestedVehicleId") is None for task in pending)
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+def test_update_shuttle_dock_rejects_unknown_vehicle():
+    # 指定车辆必须是存在的四向车；否则 409。
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-vehicle-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {"id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+             "zoneId": None, "capacity": 1, "label": "出货位 1", "quantity": 1},
+        ],
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-vehicle-topology"}).json()
+    run_id = run["runId"]
+    try:
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-01",
+            json={"vehicleId": "SHUTTLE-NOT-EXIST"},
+        )
+        assert resp.status_code == 409
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+def test_update_shuttle_dock_autoprovisions_from_latest_topology():
+    # Run 启动后才保存进拓扑的出货位：工作台保存设置时自动补建（无需重启仿真），并立即派任务。
+    base_nodes = [node for node in TOPOLOGY["nodes"]]
+    topology = {
+        **TOPOLOGY,
+        "id": "dock-late-topology",
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 2, "height": 2},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": base_nodes,  # 启动时拓扑里还没有出货位
+    }
+    assert client.post("/api/v1/topologies", json=topology).status_code == 200
+    run = client.post("/api/v1/simulations/start", json={"topologyId": "dock-late-topology"}).json()
+    run_id = run["runId"]
+    try:
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert state["shuttleDocks"] == []
+
+        # 模拟用户随后在编辑器把出货位存进同一拓扑，再在工作台保存设置。
+        topology["nodes"] = [
+            *base_nodes,
+            {"id": "dock-late", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+             "zoneId": None, "capacity": 1, "label": "后加出货位", "skuId": "SKU-LATE", "quantity": 2},
+        ]
+        assert client.post("/api/v1/topologies", json=topology).status_code == 200
+
+        resp = client.put(
+            f"/api/v1/simulations/{run_id}/shuttle-docks/dock-late",
+            json={"quantity": 2},
+        )
+        assert resp.status_code == 200
+        state = client.get(f"/api/v1/simulations/{run_id}/state").json()
+        assert [dock["dockId"] for dock in state["shuttleDocks"]] == ["dock-late"]
+        pending = [
+            task for task in state["tasks"]
+            if task.get("dockId") == "dock-late" and task["status"] == "pending"
+        ]
+        assert len(pending) == 2
+        assert all(task["lines"][0]["skuId"] == "SKU-LATE" for task in pending)
+
+        # 拓扑里根本不存在的出货位仍然 404。
+        resp = client.put(f"/api/v1/simulations/{run_id}/shuttle-docks/dock-ghost", json={})
+        assert resp.status_code == 404
+    finally:
+        client.post(f"/api/v1/simulations/{run_id}/stop")
+
+
+TWO_ROBOT_TOPOLOGY = {
+    "id": "two-robot-topology",
+    "name": "Two Robot Topology",
+    "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+    "grid": {"rows": 3, "cols": 3, "cellSize": 32, "originX": 0, "originY": 0},
+    "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 3}],
+    "cells": [],
+    "nodes": [
+        {"id": "r1", "type": "ctu_robot", "row": 1, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01"},
+        {"id": "r2", "type": "ctu_robot", "row": 1, "col": 1, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-02"},
+    ],
+}
+
+TWO_ROBOT_CONFIG = {
+    "id": "two-robot-config",
+    "topologyId": "two-robot-topology",
+    "robots": [
+        {"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True},
+        {"id": "r2", "type": "ctu", "startNode": "r2", "speed": 1.0, "battery": 100, "enabled": True},
+    ],
+    "orderGenerator": {"ratePerMinute": 1, "maxOrders": 0, "linesPerOrderMin": 1, "linesPerOrderMax": 1},
+    "dispatchPolicy": "greedy",
+    "pathPolicy": "astar",
+    "conveyorPolicy": {"releaseThreshold": 0.8, "fifo": True},
+    "faultInjection": {"robotFailureTick": None, "robotFailureId": None, "conveyorJammedTick": None, "conveyorCellId": None},
+    "seed": 1,
+    "durationTicks": 10,
+}
+
+
+def test_failed_robot_cell_is_treated_as_obstacle():
+    # 故障设备停在原地后，占的格不能出现在其它设备的路径里。
+    service = _service()
+    runtime = service._create_runtime("test-failed", TWO_ROBOT_TOPOLOGY, TWO_ROBOT_CONFIG)
+    r1, r2 = runtime.state["robots"]
+    r2["failed"] = True
+    r2["status"] = "failed"
+    r2["currentCellId"] = "cell-r1-c1"
+    r1["currentCellId"] = "cell-r1-c0"
+
+    assert service._robot_path_to(runtime, r1, "cell-r1-c2", 1)
+    assert "cell-r1-c1" not in r1["path"]
+    assert r1["path"][-1] == "cell-r1-c2"
+
+
+def test_head_on_deadlock_lets_one_robot_yield():
+    # 两台车互相把对方当前格当作下一格时，其中一台应后退一格并重新规划。
+    service = _service()
+    runtime = service._create_runtime("test-head-on", TWO_ROBOT_TOPOLOGY, TWO_ROBOT_CONFIG)
+    r1, r2 = runtime.state["robots"]
+    r1.update(
+        currentCellId="cell-r1-c1",
+        lastCellId="cell-r1-c0",
+        targetCellId="cell-r1-c2",
+        path=["cell-r1-c1", "cell-r1-c2"],
+        status="blocked",
+    )
+    r2.update(
+        currentCellId="cell-r1-c2",
+        lastCellId="cell-r1-c2",
+        targetCellId="cell-r1-c0",
+        path=["cell-r1-c2", "cell-r1-c1"],
+        status="blocked",
+    )
+    occupied = {"cell-r1-c1", "cell-r1-c2"}
+
+    assert service._clear_head_on(runtime, r1, r2, occupied) is True
+    assert r1["currentCellId"] == "cell-r1-c0"
+    assert r1["lastCellId"] == "cell-r1-c1"
+    assert r1["path"][0] == "cell-r1-c0"
+    assert r1["path"][-1] == "cell-r1-c2"
+
+
+def test_three_robot_wait_cycle_is_confirmed_and_recovery_is_started(monkeypatch):
+    service = _service()
+    robots = []
+    tasks = []
+    cells = ["cell-r1-c0", "cell-r1-c1", "cell-r1-c2"]
+    for index, robot_id in enumerate(("r1", "r2", "r3")):
+        next_cell = cells[(index + 1) % len(cells)]
+        task_id = f"task-{robot_id}"
+        robots.append({
+            "id": robot_id,
+            "type": "ctu",
+            "currentCellId": cells[index],
+            "currentTaskId": task_id,
+            "path": [cells[index], next_cell],
+            "targetCellId": next_cell,
+            "status": "blocked",
+            "returningToStandby": False,
+            "waitTicks": 5,
+            "load": 0,
+            "replanTicks": [],
+            "yieldHistoryTicks": [],
+        })
+        tasks.append({
+            "id": task_id,
+            "assignedRobotId": robot_id,
+            "robotType": "ctu",
+            "status": "assigned",
+            "phase": "pickup_from_ctu",
+            "lastProgressTick": 0,
+            "createdTick": 0,
+        })
+    runtime = RunRuntime(
+        run_id="three-cycle",
+        topology={},
+        config={"pathPolicy": "astar"},
+        state={"tick": 0, "robots": robots, "tasks": tasks, "alerts": [], "eventCount": 0},
+        metrics={"deadlocksDetected": 0},
+    )
+    recoveries: list[dict] = []
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_recover_deadlock", lambda _runtime, record: recoveries.append(dict(record)))
+
+    for tick in range(1, DEADLOCK_CONFIRM_TICKS + 1):
+        runtime.state["tick"] = tick
+        service._detect_contention(runtime)
+
+    detected = runtime.state["trafficMonitor"]["suspectedDeadlocks"]
+    assert detected and detected[0]["type"] == "cyclic_wait"
+    assert detected[0]["level"] == "confirmed"
+    assert detected[0]["robotIds"] == ["r1", "r2", "r3"]
+    assert runtime.metrics["deadlocksDetected"] == 1
+    assert len(recoveries) == 1
+
+
+def test_repeated_replanning_without_progress_is_livelock(monkeypatch):
+    service = _service()
+    robot = {
+        "id": "r1",
+        "type": "ctu",
+        "currentCellId": "cell-r1-c1",
+        "currentTaskId": "task-r1",
+        "path": ["cell-r1-c1", "cell-r1-c2"],
+        "targetCellId": "cell-r1-c3",
+        "status": "moving",
+        "returningToStandby": False,
+        "waitTicks": 0,
+        "load": 0,
+        "replanTicks": [8, 12, 16],
+        "yieldHistoryTicks": [18],
+    }
+    task = {
+        "id": "task-r1",
+        "assignedRobotId": "r1",
+        "robotType": "ctu",
+        "status": "assigned",
+        "phase": "pickup_from_ctu",
+        "lastProgressTick": 0,
+        "createdTick": 0,
+    }
+    signature = (("r1", "cell-r1-c1", "cell-r1-c2", "cell-r1-c3", "task-r1"),)
+    runtime = RunRuntime(
+        run_id="livelock",
+        topology={},
+        config={"pathPolicy": "astar"},
+        state={"tick": 25, "robots": [robot], "tasks": [task], "alerts": [], "eventCount": 0},
+        metrics={"deadlocksDetected": 0},
+        traffic_history=[(10, signature), (18, signature), (25, signature)],
+    )
+    recoveries: list[dict] = []
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_recover_deadlock", lambda _runtime, record: recoveries.append(dict(record)))
+
+    service._detect_contention(runtime)
+
+    detected = runtime.state["trafficMonitor"]["suspectedDeadlocks"]
+    assert detected and detected[0]["type"] == "livelock"
+    assert detected[0]["level"] == "confirmed"
+    assert len(recoveries) == 1
+
+
+def test_busy_fleet_is_normal_queue_not_task_starvation(monkeypatch):
+    service = _service()
+    runtime = service._create_runtime("test-busy-queue", TWO_ROBOT_TOPOLOGY, TWO_ROBOT_CONFIG)
+    runtime.state["tick"] = 100
+    for robot in runtime.state["robots"]:
+        robot["status"] = "moving"
+        robot["currentTaskId"] = f"busy-{robot['id']}"
+
+    waiting_task = {
+        "id": "task-waiting",
+        "orderId": "order-waiting",
+        "robotType": "ctu",
+        "mode": "direct",
+        "status": "pending",
+        "phase": "pending",
+        "priority": 2,
+        "sourceCellId": "cell-r1-c2",
+        "sourceLayer": 1,
+        "requestedVehicleId": None,
+        "assignedRobotId": None,
+        "createdTick": 0,
+        "lastProgressTick": 0,
+        "dispatchSkipTicks": 0,
+        "starvationAlerted": False,
+        "history": [],
+    }
+    runtime.state["tasks"] = [waiting_task]
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+
+    service._assign_tasks(runtime)
+    service._detect_contention(runtime)
+
+    assert waiting_task["status"] == "pending"
+    assert waiting_task["dispatchSkipTicks"] == 0
+    assert waiting_task["starvationAlerted"] is False
+    assert runtime.state["alerts"] == []
+
+
+def test_idle_fleet_dispatch_starvation_is_reported_once(monkeypatch):
+    service = _service()
+    runtime = RunRuntime(
+        run_id="test-starvation",
+        topology={},
+        config={"pathPolicy": "astar"},
+        state={
+            "tick": 100,
+            "robots": [],
+            "tasks": [{
+                "id": "task-starved",
+                "robotType": "ctu",
+                "status": "pending",
+                "phase": "pending",
+                "createdTick": 0,
+                "lastProgressTick": 0,
+                "dispatchSkipTicks": 20,
+                "starvationAlerted": False,
+            }],
+            "alerts": [],
+            "eventCount": 0,
+        },
+        metrics={"deadlocksDetected": 0},
+    )
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+
+    service._detect_contention(runtime)
+    service._detect_contention(runtime)
+
+    assert runtime.state["tasks"][0]["starvationAlerted"] is True
+    assert len(runtime.state["alerts"]) == 1
+    assert runtime.state["alerts"][0]["category"] == "task_starvation:task-starved"
+
+
 def test_step_off_port_moves_finished_robot_off_entry():
     service = _service()
-    runtime = service._create_runtime("test-step-off", TOPOLOGY, SCENARIO, record_events=False)
+    runtime = service._create_runtime("test-step-off", TOPOLOGY, CONFIG)
     robot = runtime.state["robots"][0]
     robot["currentCellId"] = "cell-r5-c6"
     robot["lastCellId"] = "cell-r4-c6"
@@ -362,16 +831,31 @@ def test_step_off_port_moves_finished_robot_off_entry():
 
 def test_robot_carry_capacity():
     service = _service()
-    runtime = service._create_runtime("test-capacity", TOPOLOGY, SCENARIO, record_events=False)
+    runtime = service._create_runtime("test-capacity", TOPOLOGY, CONFIG)
     robot = runtime.state["robots"][0]
     assert robot["type"] == "ctu"
     assert robot["load"] == 0
     assert robot["capacity"] == ROBOT_CARRY_CAPACITY["ctu"]
 
 
+def test_ctu_pickup_path_stops_in_adjacent_aisle_cell():
+    service = _service()
+    runtime = service._create_runtime("test-pickup-approach", TOPOLOGY, CONFIG)
+    robot = runtime.state["robots"][0]
+    target = node_to_cell_id(TOPOLOGY, "node-storage")
+
+    assert service._robot_path_to(runtime, robot, target, 17, stop_adjacent=True) is True
+    assert robot["path"][-1] != target
+    _, end_row, end_col = parse_cell_id(robot["path"][-1])
+    _, target_row, target_col = parse_cell_id(target)
+    assert abs(end_row - target_row) + abs(end_col - target_col) == 1
+    assert robot["targetCellId"] == target
+    assert robot["targetLayer"] == 17
+
+
 def test_ctu_pickup_increments_load_and_advances_to_next_line():
     service = _service()
-    runtime = service._create_runtime("test-pickup", TOPOLOGY, SCENARIO, record_events=False)
+    runtime = service._create_runtime("test-pickup", TOPOLOGY, CONFIG)
     robot = runtime.state["robots"][0]
     task = service._build_task(
         TOPOLOGY,
@@ -393,8 +877,17 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
     runtime.state["tasks"] = [task]
 
     service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "lifting"
+    assert robot["handlingAction"]["targetLayer"] == 3
+    assert robot["load"] == 0
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "extending"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "stowing"
+    service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["currentLineIndex"] == 1
     assert robot["targetCellId"] == node_to_cell_id(TOPOLOGY, "node-storage-2")
@@ -403,7 +896,7 @@ def test_ctu_pickup_increments_load_and_advances_to_next_line():
 
 def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
     service = _service()
-    runtime = service._create_runtime("test-delivery", TOPOLOGY, SCENARIO, record_events=False)
+    runtime = service._create_runtime("test-delivery", TOPOLOGY, CONFIG)
     robot = runtime.state["robots"][0]
     task = service._build_task(
         TOPOLOGY,
@@ -424,9 +917,11 @@ def test_ctu_pickup_switches_to_delivery_when_all_lines_picked():
     robot["currentCellId"] = node_to_cell_id(TOPOLOGY, "node-storage")
     runtime.state["tasks"] = [task]
 
-    service._advance_robot_phase(runtime, robot, task)
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
 
     assert robot["load"] == 1
+    assert robot["handlingAction"] is None
     assert task["picked"] == 1
     assert task["phase"] == "delivery_to_port"
     assert robot["targetCellId"] == "cell-r5-c6"
@@ -453,9 +948,8 @@ def test_reroute_ctu_avoids_occupied_cell_and_keeps_target():
             {"id": "r1", "type": "ctu_robot", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU-01"},
         ],
     }
-    scenario = {
-        "id": "reroute-scenario",
-        "name": "Reroute Scenario",
+    config = {
+        "id": "reroute-config",
         "topologyId": topology["id"],
         "robots": [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True}],
         "orderGenerator": {"ratePerMinute": 1, "maxOrders": 0, "linesPerOrderMin": 1, "linesPerOrderMax": 1},
@@ -467,7 +961,7 @@ def test_reroute_ctu_avoids_occupied_cell_and_keeps_target():
         "durationTicks": 10,
     }
     service = _service()
-    runtime = service._create_runtime("test-reroute", topology, scenario, record_events=False)
+    runtime = service._create_runtime("test-reroute", topology, config)
     robot = runtime.state["robots"][0]
     robot["currentCellId"] = "cell-r0-c0"
     robot["targetCellId"] = "cell-r0-c2"
@@ -477,3 +971,530 @@ def test_reroute_ctu_avoids_occupied_cell_and_keeps_target():
     assert robot["path"][-1] == "cell-r0-c2"
     assert "cell-r0-c1" not in robot["path"]
     assert robot["targetCellId"] == "cell-r0-c2"
+
+
+def test_ctu_yields_to_adjacent_free_cell_when_no_reroute_is_available():
+    topology = {
+        "id": "yield-topology",
+        "name": "Yield",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": 2, "cols": 3, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [{"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 3, "height": 2}],
+        "cells": [],
+        "nodes": [{"id": "r1", "type": "ctu_robot", "row": 0, "col": 0, "zoneId": "zone-ctu", "capacity": 1, "label": "CTU"}],
+    }
+    config = deepcopy(CONFIG)
+    config["topologyId"] = topology["id"]
+    config["robots"] = [{"id": "r1", "type": "ctu", "startNode": "r1", "speed": 1.0, "battery": 100, "enabled": True}]
+    service = _service()
+    runtime = service._create_runtime("yield-test", topology, config)
+    robot = runtime.state["robots"][0]
+    robot["targetCellId"] = "cell-r0-c2"
+
+    occupied = {"cell-r0-c0", "cell-r0-c1"}
+    reserved = set()
+    assert service._yield_ctu(runtime, robot, occupied, reserved) is True
+    assert robot["currentCellId"] == "cell-r1-c0"
+    assert robot["targetCellId"] == "cell-r0-c2"
+    assert robot["yieldTicks"] == 2
+    assert "cell-r1-c0" in occupied
+    assert "cell-r0-c0" not in occupied
+
+
+def test_completed_robot_returns_to_standby_while_other_tasks_are_unfinished(monkeypatch):
+    service = _service()
+    runtime = service._create_runtime("standby-return", TOPOLOGY, deepcopy(CONFIG))
+    robot = runtime.state["robots"][0]
+    task = runtime.state["tasks"][0]
+    task.update({"status": "assigned", "phase": "delivery_to_port", "assignedRobotId": robot["id"]})
+    runtime.state["tasks"].append({"id": "other-task", "status": "assigned"})
+    robot.update(
+        {
+            "currentCellId": "cell-r1-c5",
+            "currentNode": "cell-r1-c5",
+            "currentRow": 1,
+            "currentCol": 5,
+            "currentTaskId": task["id"],
+        }
+    )
+    monkeypatch.setattr(service, "_record_event", lambda *_args, **_kwargs: None)
+
+    # 交付动作链：升降对位 → 伸叉送箱 → 箱入输送线 → 完成
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
+
+    assert task["status"] == "completed"
+    assert robot["returningToStandby"] is True
+    assert robot["status"] == "returning"
+    assert robot["targetCellId"] == robot["homeCellId"]
+    assert len(robot["path"]) > 1
+
+
+def test_tick_payload_sends_inventory_delta_only_when_inventory_changes():
+    service = _service()
+    runtime = RunRuntime(
+        run_id="payload-test",
+        topology={},
+        config={},
+        state={"tick": 1, "status": "running", "inventory": [{"nodeId": "slot-a"}, {"nodeId": "slot-b"}]},
+        metrics={},
+    )
+
+    # 常规 tick 不携带全量库存（库存可能有数万条，避免重复编码），也没有增量。
+    first = service._tick_payload(runtime)
+    assert "inventory" not in first
+    assert "inventoryDelta" not in first
+
+    runtime.state["tick"] = 2
+    runtime.inventory_delta.append({"op": "remove", "nodeId": "slot-a", "layer": 1})
+    second = service._tick_payload(runtime)
+    assert second["tick"] == 2
+    assert "inventory" not in second
+    assert second["inventoryDelta"] == [{"op": "remove", "nodeId": "slot-a", "layer": 1}]
+
+    # 增量被消费（广播后清空）后，下一个 tick 不再携带。
+    runtime.inventory_delta.clear()
+    runtime.state["tick"] = 3
+    third = service._tick_payload(runtime)
+    assert "inventoryDelta" not in third
+
+
+def test_runtime_continues_past_nominal_duration_until_tasks_finish(monkeypatch):
+    service = _service()
+    runtime = RunRuntime(
+        run_id="duration-test",
+        topology={},
+        config={"durationTicks": 1, "maxDurationTicks": 10},
+        state={
+            "tick": 0,
+            "status": "running",
+            "stopReason": None,
+            "tasks": [{"id": "task-long", "status": "assigned"}],
+        },
+        metrics={},
+    )
+
+    def step(current, *, persist):
+        current.state["tick"] += 1
+        if current.state["tick"] == 3:
+            current.state["tasks"][0]["status"] = "completed"
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(service, "_step_runtime", step)
+    monkeypatch.setattr(service, "_persist", lambda _runtime: None)
+    monkeypatch.setattr("app.services.simulation.asyncio.sleep", no_wait)
+
+    asyncio.run(service._loop(runtime))
+
+    assert runtime.state["tick"] == 3
+    assert runtime.state["status"] == "completed"
+    assert runtime.state["stopReason"] is None
+
+
+def test_order_driven_runtime_skips_automatic_faults_and_urgent_insertion():
+    service = _service()
+    config = deepcopy(CONFIG)
+    config["orderGenerator"]["urgentInsertionTick"] = 1
+    config["faultInjection"]["robotFailureTick"] = 1
+    config["faultInjection"]["robotFailureId"] = "r1"
+    runtime = service._create_runtime("order-no-injection", TOPOLOGY, config)
+    runtime.state["orderDriven"] = True
+    initial_task_ids = [task["id"] for task in runtime.state["tasks"]]
+
+    service._inject_urgent_order(runtime, 1)
+    service._inject_faults(runtime, 1)
+
+    assert [task["id"] for task in runtime.state["tasks"]] == initial_task_ids
+    assert runtime.state["robots"][0]["failed"] is False
+    assert runtime.state["robots"][0]["status"] == "idle"
+
+
+def test_order_driven_tasks_keep_order_identity_and_inventory_allocation():
+    service = _service()
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": "cell-r1-c2",
+            "layer": 3,
+            "skuId": "sku-order-1",
+            "skuName": "六角螺栓 M8",
+            "spec": "M8",
+            "qty": 3,
+        },
+        {
+            "nodeId": "node-storage-2",
+            "cellId": "cell-r2-c2",
+            "layer": 5,
+            "skuId": "sku-order-1",
+            "skuName": "六角螺栓 M8",
+            "spec": "M8",
+            "qty": 2,
+        },
+    ]
+    orders = [
+        {
+            "id": "ORD-TEST-001",
+            "priority": "urgent",
+            "targetStation": "出库口 01",
+            "createdAt": "2026-10-21T00:00:00Z",
+            "lines": [
+                {
+                    "id": "line-1",
+                    "skuId": "sku-order-1",
+                    "skuName": "六角螺栓 M8",
+                    "spec": "M8",
+                    "quantity": 2,
+                }
+            ],
+        }
+    ]
+
+    tasks, order_states = service._seed_order_tasks(TOPOLOGY, orders, inventory)
+
+    assert len(tasks) == 1
+    assert tasks[0]["orderId"] == "ORD-TEST-001"
+    assert tasks[0]["urgent"] is True
+    assert len(tasks[0]["lines"]) == 2
+    assert order_states[0]["taskIds"] == [tasks[0]["id"]]
+    assert order_states[0]["status"] == "waiting_dispatch"
+    assert order_states[0]["lines"][0]["allocated"] == 2
+
+
+def test_ctu_order_over_five_boxes_is_split_by_vehicle_capacity():
+    service = _service()
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": "cell-r1-c1",
+            "layer": layer,
+            "skuId": "sku-capacity",
+            "skuName": "容量测试料箱",
+            "qty": 1,
+        }
+        for layer in range(1, 7)
+    ]
+    orders = [
+        {
+            "id": "ORD-CAPACITY",
+            "priority": "normal",
+            "dispatchMode": "compact",
+            "targetStation": "出库口",
+            "createdAt": "2026-10-22T00:00:00Z",
+            "lines": [
+                {
+                    "id": "line-capacity",
+                    "skuId": "sku-capacity",
+                    "skuName": "容量测试料箱",
+                    "quantity": 6,
+                }
+            ],
+        }
+    ]
+
+    tasks, order_states = service._seed_order_tasks(TOPOLOGY, orders, inventory)
+
+    assert [len(task["lines"]) for task in tasks] == [5, 1]
+    assert all(len(task["lines"]) <= ROBOT_CARRY_CAPACITY["ctu"] for task in tasks)
+    assert order_states[0]["totalTasks"] == 2
+
+
+def test_parallel_order_is_decomposed_into_seven_ctu_tasks():
+    service = _service()
+    topology = deepcopy(TOPOLOGY)
+    topology["nodes"].extend(
+        {
+            "id": f"ctu-extra-{index}",
+            "type": "ctu_robot",
+            "row": 1,
+            "col": 2,
+            "zoneId": "zone-ctu",
+            "capacity": 5,
+            "label": f"CTU-{index + 1:02d}",
+        }
+        for index in range(1, 7)
+    )
+    inventory = [
+        {
+            "nodeId": "node-storage",
+            "cellId": f"cell-r{1 + index // 7}-c{1 + index % 7}",
+            "layer": 1,
+            "skuId": "sku-parallel",
+            "skuName": "多车协同料箱",
+            "qty": 1,
+        }
+        for index in range(14)
+    ]
+    orders = [{
+        "id": "ORD-PARALLEL",
+        "priority": "normal",
+        "dispatchMode": "parallel",
+        "maxParallelCtu": 7,
+        "targetStation": "出库口",
+        "createdAt": "2026-10-28T00:00:00Z",
+        "lines": [{
+            "id": "line-parallel",
+            "skuId": "sku-parallel",
+            "skuName": "多车协同料箱",
+            "quantity": 14,
+        }],
+    }]
+
+    tasks, order_states = service._seed_order_tasks(topology, orders, inventory)
+
+    assert len(tasks) == 7
+    assert [len(task["lines"]) for task in tasks] == [2] * 7
+    assert [task["taskIndex"] for task in tasks] == list(range(1, 8))
+    assert all(task["splitStrategy"] == "parallel" for task in tasks)
+    assert order_states[0]["decomposition"]["taskCount"] == 7
+    assert order_states[0]["decomposition"]["allocatedQuantity"] == 14
+
+
+PICK_STATION_TOPOLOGY = {
+    **TOPOLOGY,
+    "id": "pick-station-topology",
+    "name": "Pick Station Topology",
+    "zones": [
+        *TOPOLOGY["zones"],
+        {"id": "zone-pick", "label": "人工拣货位", "type": "pick_station", "x": 5, "y": 1, "width": 3, "height": 2},
+        {"id": "zone-drop", "label": "放置区", "type": "drop_zone", "x": 0, "y": 3, "width": 2, "height": 2},
+    ],
+}
+
+PICK_STATION_CONFIG = deepcopy(CONFIG)
+PICK_STATION_CONFIG.update(
+    {
+        "topologyId": PICK_STATION_TOPOLOGY["id"],
+        "pickTicks": 2,
+        "conveyorTransferTicks": 2,
+        "liftTicks": 2,
+        "placeTicks": 2,
+    }
+)
+PICK_STATION_CONFIG["orderGenerator"]["maxOrders"] = 0
+
+
+# 只有拣货位、没有放置区的拓扑：picking 结束后应直接进入 conveyor_return。
+PICK_STATION_NO_DROP_TOPOLOGY = {
+    **PICK_STATION_TOPOLOGY,
+    "id": "pick-station-no-drop-topology",
+    "name": "Pick Station No Drop Topology",
+    "zones": [
+        *TOPOLOGY["zones"],
+        {"id": "zone-pick", "label": "人工拣货位", "type": "pick_station", "x": 5, "y": 1, "width": 3, "height": 2},
+    ],
+}
+
+
+def _picking_task(service: SimulationService, runtime: RunRuntime, *, phase: str = "delivery_to_port") -> tuple[dict, dict, dict]:
+    """构造一个已完成 CTU 取货、正准备交付的单箱任务，并放在人工拣货位拓扑里。"""
+    slot = {
+        "nodeId": "node-storage",
+        "cellId": "cell-r1-c1",
+        "layer": 3,
+        "skuId": "sku-pick-cycle",
+        "skuName": "人工拣货测试料箱",
+        "qty": 4,
+    }
+    task = service._build_task(
+        PICK_STATION_TOPOLOGY,
+        "task-pick-cycle",
+        "ctu",
+        "direct",
+        [dict(slot)],
+        "cell-r5-c6",
+        False,
+        2,
+    )
+    task.update(
+        {
+            "status": "assigned",
+            "phase": phase,
+            "assignedRobotId": "r1",
+            "picked": 1,
+            "currentLineIndex": 1,
+        }
+    )
+    robot = runtime.state["robots"][0]
+    robot.update(
+        {
+            "currentTaskId": task["id"],
+            "currentCellId": "cell-r5-c6",
+            "currentNode": "cell-r5-c6",
+            "currentRow": 5,
+            "currentCol": 6,
+            "lastCellId": "cell-r4-c6",
+            "path": ["cell-r5-c6"],
+            "pathLayers": [1],
+            "load": 1,
+            "carrying": [dict(slot)],
+            "status": "moving",
+        }
+    )
+    runtime.state["tasks"] = [task]
+    runtime.state["inventory"] = []
+    return task, robot, slot
+
+
+def test_delivery_without_pick_station_still_completes_immediately():
+    # 回归：拓扑没有 pick_station 时，交付动作结束后任务直接完成（保持原行为）。
+    service = _service()
+    runtime = service._create_runtime("test-no-pick-station", TOPOLOGY, deepcopy(CONFIG))
+    task, robot, _ = _picking_task(service, runtime)
+    task["deliveryCellId"] = "cell-r5-c6"
+
+    # 交付动作链：升降对位 → 伸叉送箱 → 箱入输送线 → 完成
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
+
+    assert task["status"] == "completed"
+    assert task["phase"] == "completed"
+    assert robot["currentTaskId"] is None
+    assert robot["load"] == 0
+    assert robot["carrying"] == []
+
+
+def test_pick_station_cycle_returns_goods_to_original_slot_and_layer():
+    service = _service()
+    runtime = service._create_runtime("test-pick-cycle", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
+    task, robot, slot = _picking_task(service, runtime)
+
+    # 1) CTU 到达出入口：播放与取货对称的交付动作（升降对位 → 伸叉送箱 → 箱入输送线）
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "delivery_to_port"
+    assert robot["handlingAction"]["stage"] == "lifting"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "extending"
+    service._advance_robot_phase(runtime, robot, task)
+    assert robot["handlingAction"]["stage"] == "stowing"
+
+    # 2) 交付动作完成：进入下层输送转运（尚未完成）
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_to_lift"
+    assert task["status"] != "completed"
+    assert task["pickStationCellId"] == "cell-r2-c6"
+    assert task["pickStationZoneId"] == "zone-pick"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+    assert robot["load"] == 0
+    assert robot["carrying"] == []
+    assert len(task["transitGoods"]) == 1
+
+    # 3) 下层输送计时结束进入升降移栽，升降结束进入上层输送
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "lift_to_upper"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["liftTicks"]
+    for _ in range(PICK_STATION_CONFIG["liftTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_to_pick"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+
+    # 4) 上层输送计时结束进入人工拣货
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "picking"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["pickTicks"]
+
+    # 5) 拣货计时结束：拣出的货物进入放置阶段
+    for _ in range(PICK_STATION_CONFIG["pickTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "place_goods"
+    assert task["dropZoneZoneId"] == "zone-drop"
+    assert task["dropZoneCellId"] == "cell-r4-c1"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["placeTicks"]
+    assert robot["status"] == "waiting"
+
+    # 6) 放置计时结束：记录放置货物快照，空货箱进入上层输送回程
+    for _ in range(PICK_STATION_CONFIG["placeTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_return"
+    assert task["placedGoods"] == task["lines"]
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["conveyorTransferTicks"]
+
+    # 7) 回程计时结束：CTU 到出入口取回货箱
+    for _ in range(PICK_STATION_CONFIG["conveyorTransferTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "pickup_from_port"
+    assert robot["targetCellId"] == task["deliveryCellId"]
+
+    # 8) CTU 到达出入口取回货箱，前往原库位回库
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "return_to_storage"
+    assert robot["targetCellId"] == slot["cellId"]
+    assert robot["targetLayer"] == slot["layer"]
+    assert len(robot["carrying"]) == 1
+
+    # 9) 回到原库位原层后完成，货箱放回原 nodeId + layer
+    service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "completed"
+    assert task["status"] == "completed"
+    assert task["completedTick"] is not None
+    assert robot["carrying"] == []
+    assert robot["load"] == 0
+    restored = runtime.state["inventory"]
+    assert len(restored) == 1
+    assert restored[0]["nodeId"] == slot["nodeId"]
+    assert restored[0]["layer"] == slot["layer"]
+    assert restored[0]["qty"] == slot["qty"]
+    assert runtime.metrics["completedTasks"] == 1
+
+    phases = [entry["phase"] for entry in task["history"]]
+    for phase in (
+        "conveyor_to_lift",
+        "lift_to_upper",
+        "conveyor_to_pick",
+        "picking",
+        "place_goods",
+        "conveyor_return",
+        "pickup_from_port",
+        "return_to_storage",
+        "completed",
+    ):
+        assert phase in phases
+
+
+def test_pick_station_without_drop_zone_skips_place_goods():
+    # 有拣货位、无放置区：picking 结束后直接进入 conveyor_return，不产生放置数据。
+    service = _service()
+    runtime = service._create_runtime(
+        "test-pick-no-drop", PICK_STATION_NO_DROP_TOPOLOGY, deepcopy(PICK_STATION_CONFIG)
+    )
+    task, robot, _ = _picking_task(service, runtime)
+    # 交付动作 3 tick + 进入下层输送
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, task)
+    # 下层输送 → 升降 → 上层输送 → 拣货
+    for _ in range(
+        PICK_STATION_CONFIG["conveyorTransferTicks"]
+        + PICK_STATION_CONFIG["liftTicks"]
+        + PICK_STATION_CONFIG["conveyorTransferTicks"]
+    ):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "picking"
+    # 拣货计时结束：没有放置区，直接回程
+    for _ in range(PICK_STATION_CONFIG["pickTicks"]):
+        service._advance_robot_phase(runtime, robot, task)
+    assert task["phase"] == "conveyor_return"
+    assert task["dropZoneZoneId"] is None
+    assert task["dropZoneCellId"] is None
+    assert task["placedGoods"] == []
+
+
+def test_complete_picking_finishes_picking_immediately():
+    service = _service()
+    runtime = service._create_runtime("test-complete-picking", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
+    task, robot, _ = _picking_task(service, runtime, phase="picking")
+    task["pickStationZoneId"] = "zone-pick"
+    task["pickStationCellId"] = "cell-r2-c6"
+    task["remainingStageTicks"] = 6
+    service.runtimes[runtime.run_id] = runtime
+
+    asyncio.run(service.complete_picking(runtime.run_id, task["id"]))
+
+    # 拓扑有放置区：跳过拣货后进入拣货放置阶段
+    assert task["phase"] == "place_goods"
+    assert task["remainingStageTicks"] == PICK_STATION_CONFIG["placeTicks"]
+    assert task["dropZoneZoneId"] == "zone-drop"
+    assert task["dropZoneCellId"] == "cell-r4-c1"
+    assert robot["status"] == "waiting"

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, Plus, Trash2 } from 'lucide-react'
+import { Loader2, PanelRightOpen, Plus, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { Surface } from '../components/Surface'
 import { ObjectPalette } from '../components/topology/ObjectPalette'
 import { TopologyEditorToolbar } from '../components/topology/TopologyEditorToolbar'
@@ -13,7 +13,15 @@ import type { EditorObjectType } from '../types'
 
 const Topology3DScene = lazy(() => import('../components/topology/Topology3DScene'))
 
-function EditorContextBar() {
+function EditorContextBar({
+  showGoods,
+  goodsLoading,
+  onToggleGoods,
+}: {
+  showGoods: boolean
+  goodsLoading: boolean
+  onToggleGoods: () => void
+}) {
   const draft = useTopologyEditorStore((state) => state.draft)
   const activeFloor = useTopologyEditorStore((state) => state.activeFloor)
   const setActiveFloor = useTopologyEditorStore((state) => state.setActiveFloor)
@@ -130,6 +138,15 @@ function EditorContextBar() {
           <span>列</span>
           <input type="number" min={1} value={cols} onChange={(event) => setCols(Math.max(1, Math.floor(Number(event.target.value) || 1)))} onBlur={() => applyGridSize(draft.grid.rows, cols)} />
         </label>
+        <button
+          type="button"
+          className={`topology-floor-chip ${showGoods ? 'topology-floor-chip-active' : ''}`}
+          aria-pressed={showGoods}
+          title={showGoods ? '隐藏商品箱以提升编辑性能' : '按需加载并显示商品箱'}
+          onClick={onToggleGoods}
+        >
+          {goodsLoading ? '商品加载中…' : showGoods ? '商品：显示' : '商品：隐藏'}
+        </button>
       </div>
 
       <div className="topo-context-hints">
@@ -156,6 +173,16 @@ export function TopologyPage() {
   const setLoaded = useTopologyEditorStore((state) => state.setLoaded)
   const setSelectedTopologyId = usePlatformStore((state) => state.setSelectedTopologyId)
   const selectedTopologyId = usePlatformStore((state) => state.selectedTopologyId)
+  const [showGoods, setShowGoods] = useState(false)
+  const [toolsCollapsed, setToolsCollapsed] = useState(true)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const compassRef = useRef<HTMLDivElement>(null)
+  const updateCompassAngle = useCallback((angle: number) => {
+    const compass = compassRef.current
+    if (!compass) return
+    compass.style.setProperty('--compass-angle', `${angle}rad`)
+    compass.style.setProperty('--compass-counter-angle', `${-angle}rad`)
+  }, [])
 
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const records = useMemo(() => topologiesQuery.data ?? [], [topologiesQuery.data])
@@ -165,9 +192,9 @@ export function TopologyPage() {
   const goodsQuery = useQuery({
     queryKey: ['goods', 'inventory', draft.id],
     queryFn: () => api.getGoodsInventory(draft.id),
-    enabled: Boolean(draft.id),
+    enabled: showGoods && Boolean(draft.id),
   })
-  const goods = useMemo(() => goodsQuery.data?.slots ?? [], [goodsQuery.data])
+  const goods = useMemo(() => (showGoods ? goodsQuery.data?.slots ?? [] : []), [goodsQuery.data, showGoods])
 
   useEffect(() => {
     if (topologiesQuery.isLoading || initializedRef.current) return
@@ -205,17 +232,22 @@ export function TopologyPage() {
     }
   }, [])
 
+  useEffect(() => {
+    if (selection) setInspectorOpen(true)
+  }, [selection])
+
   return (
     <div className="page-grid topology-editor-page">
-      <Surface
-        title="拓扑编辑器"
-        subtitle="v1 模型 · 3D 编辑器 · 与场景/仿真闭环。在 3D 中直接增删改查道路、输送带、区域与节点，保存后即可在场景页派生设备。"
-      >
+      <Surface>
         <TopologyEditorToolbar />
         <div className="topo-workspace">
-          <ObjectPalette />
+          <ObjectPalette collapsed={toolsCollapsed} onToggle={() => setToolsCollapsed((collapsed) => !collapsed)} />
           <div className="topo-center-column">
-            <EditorContextBar />
+            <EditorContextBar
+              showGoods={showGoods}
+              goodsLoading={showGoods && goodsQuery.isLoading}
+              onToggleGoods={() => setShowGoods((visible) => !visible)}
+            />
             <div className="topo-canvas-panel topology-editor-canvas">
               {loading ? (
                 <div className="topo-canvas-loading">
@@ -243,17 +275,46 @@ export function TopologyPage() {
                     onCellEnter={pointerEnterAt}
                     onEntityDown={entityPointerDown}
                     onMoveCell={moveCell}
+                    onCompassAngleChange={updateCompassAngle}
                   />
                 </Suspense>
               )}
+              <div ref={compassRef} className="topo-direction-compass" aria-label="仓库方向罗盘">
+                <div className="topo-direction-compass-rose">
+                  <span className="topo-direction-compass-point north"><span><b>北</b><small>N</small></span></span>
+                  <span className="topo-direction-compass-point east"><span><b>东</b><small>E</small></span></span>
+                  <span className="topo-direction-compass-point south"><span><b>南</b><small>S</small></span></span>
+                  <span className="topo-direction-compass-point west"><span><b>西</b><small>W</small></span></span>
+                  <i aria-hidden="true">◆</i>
+                </div>
+                <em>仓库方向</em>
+              </div>
+              <button
+                type="button"
+                className={`topo-inspector-trigger ${selection ? 'topo-inspector-trigger-active' : ''}`}
+                onClick={() => setInspectorOpen((open) => !open)}
+                aria-expanded={inspectorOpen}
+                title={inspectorOpen ? '收起属性面板' : '打开属性面板'}
+              >
+                {inspectorOpen ? <SlidersHorizontal size={17} /> : <PanelRightOpen size={17} />}
+                <span>{selection ? '编辑属性' : '属性'}</span>
+              </button>
+              <aside className={`topo-inspector topo-inspector-drawer ${inspectorOpen ? 'topo-inspector-drawer-open' : ''}`}>
+                <div className="topo-inspector-header">
+                  <div>
+                    <strong>对象属性</strong>
+                    <span>{selection ? '编辑当前选中对象' : '选择对象后显示可编辑内容'}</span>
+                  </div>
+                  <button type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭属性面板" title="关闭属性面板">
+                    <X size={17} />
+                  </button>
+                </div>
+                <div className="topo-inspector-body">
+                  <TopologyPropertyPanel />
+                </div>
+              </aside>
             </div>
           </div>
-
-          <aside className="topo-inspector">
-            <div className="topo-inspector-body">
-              <TopologyPropertyPanel />
-            </div>
-          </aside>
         </div>
       </Surface>
     </div>

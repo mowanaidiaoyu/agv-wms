@@ -1,6 +1,11 @@
 import type {
   CellType,
+  ConveyorDeckConfig,
+  ConveyorDeckKey,
+  ConveyorDecks,
   ConveyorDirection,
+  ConveyorRunMode,
+  ConveyorSide,
   EditorObjectType,
   NodeType,
   TopologyCell,
@@ -20,10 +25,12 @@ export const OBJECT_LABELS: Record<EditorObjectType, string> = {
   road: '通行路',
   blocked: '障碍物',
   conveyor: '输送带',
+  ground_conveyor: '地面输送线',
   ctu_robot: 'CTU',
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
+  shuttle_dock: '四向车出货位',
 }
 
 export const CELL_LABELS: Record<CellType, string> = {
@@ -38,12 +45,15 @@ export const NODE_LABELS: Record<NodeType, string> = {
   shuttle_robot: '四向车',
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
+  shuttle_dock: '四向车出货位',
 }
 
 export const ZONE_LABELS: Record<ZoneType, string> = {
   ctu: 'CTU 高架库',
   shuttle: '四向车平库',
   port: '输送线出入口',
+  pick_station: '人工拣货位',
+  drop_zone: '放置区',
 }
 
 export const DIRECTION_LABELS: Record<ConveyorDirection, string> = {
@@ -53,12 +63,58 @@ export const DIRECTION_LABELS: Record<ConveyorDirection, string> = {
   down: '向下',
 }
 
+export const CONVEYOR_SIDE_LABELS: Record<ConveyorSide, string> = {
+  north: '北侧',
+  east: '东侧',
+  south: '南侧',
+  west: '西侧',
+}
+
+export const CONVEYOR_DECK_LABELS: Record<ConveyorDeckKey, string> = {
+  lower: '下层',
+  upper: '上层',
+}
+
+const DIRECTION_TO_SIDE: Record<ConveyorDirection, ConveyorSide> = {
+  right: 'east',
+  left: 'west',
+  up: 'north',
+  down: 'south',
+}
+
+const SIDE_TO_DIRECTION: Record<ConveyorSide, ConveyorDirection> = {
+  north: 'up',
+  east: 'right',
+  south: 'down',
+  west: 'left',
+}
+
+const SIDE_STEP: Record<ConveyorSide, readonly [number, number]> = {
+  north: [-2, 0],
+  east: [0, 2],
+  south: [2, 0],
+  west: [0, -2],
+}
+
+export function oppositeConveyorSide(side: ConveyorSide): ConveyorSide {
+  return side === 'north' ? 'south' : side === 'south' ? 'north' : side === 'east' ? 'west' : 'east'
+}
+
+export function conveyorSideFromDirection(direction: ConveyorDirection): ConveyorSide {
+  return DIRECTION_TO_SIDE[direction]
+}
+
+export function conveyorDirectionFromSide(side: ConveyorSide): ConveyorDirection {
+  return SIDE_TO_DIRECTION[side]
+}
+
 export const NODE_PREFIX: Record<NodeType, string> = {
   storage: 'storage',
   ctu_robot: 'ctu',
   shuttle_robot: 'shuttle',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
+  shuttle_dock: 'dock',
 }
 
 /** 只读展示型（节点需要“贴地”，通常在通行路格上承载）。 */
@@ -67,7 +123,7 @@ export const BUSINESS_NODE_TYPES: ReadonlySet<NodeType> = new Set(['storage'])
 export const DEVICE_NODE_TYPES: ReadonlySet<NodeType> = new Set(['ctu_robot', 'shuttle_robot'])
 
 /** 可落在输送带格上的节点（升降移载机 / 转向移载机）。 */
-export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer'])
+export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer', 'shuttle_dock'])
 
 export const NODE_TOOL: Partial<Record<NodeType, EditorObjectType>> = {
   ctu_robot: 'ctu_robot',
@@ -80,15 +136,22 @@ export function isNodeTool(tool: EditorObjectType): boolean {
   return (NODE_TOOL as Record<string, EditorObjectType>)[tool] === tool && (NODE_PREFIX as Record<string, NodeType>)[tool] !== undefined
 }
 
-export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port']
+export const ZONE_TYPE_ORDER: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
 
-export const CELL_BRUSH_TOOLS: ReadonlySet<CellType> = new Set(['road', 'blocked', 'conveyor'])
+/** 画刷工具（铺格）；ground_conveyor 是伪工具：铺 conveyor 格并带地面标记。 */
+export const CELL_BRUSH_TOOLS: ReadonlySet<EditorObjectType> = new Set([
+  'road',
+  'blocked',
+  'conveyor',
+  'ground_conveyor',
+])
 
 /** 「批量选择」工具在「批量放置」动作下可选放置的对象类型（铺格 + 节点）。 */
 export const BATCH_PLACE_TYPES: EditorObjectType[] = [
   'road',
   'blocked',
   'conveyor',
+  'ground_conveyor',
   'ctu_robot',
   'shuttle_robot',
   'lift_transfer',
@@ -225,8 +288,8 @@ export function nodeFootprint(
   node: Pick<TopologyNode, 'type' | 'zoneId'>,
 ): number {
   const zoneType = findZoneById(topology, node.zoneId ?? '')?.type
-  // 输送带上的设备（升降移载机 / 转向移载机）固定 2×2，与输送带块同口径
-  if (node.type === 'lift_transfer' || node.type === 'turn_transfer') {
+  // 输送带上的设备（升降移载机 / 转向移载机 / 四向车出货位）固定 2×2，与输送带块同口径
+  if (node.type === 'lift_transfer' || node.type === 'turn_transfer' || node.type === 'shuttle_dock') {
     return 2
   }
   // 库位 / 四向车：四向车库位(托盘) 2×2，CTU 料箱位 1×1
@@ -272,6 +335,419 @@ export function conveyorBlockCellIds(
   return ids.filter((id) => topology.cells.some((item) => item.id === id))
 }
 
+export interface ConveyorBlock {
+  key: string
+  floor: string
+  row: number
+  col: number
+  anchorCell: TopologyCell
+  cellIds: string[]
+  lineId: string | null
+}
+
+export interface ConveyorValidationIssue {
+  severity: 'error' | 'warning'
+  blockKey: string
+  deck: ConveyorDeckKey
+  message: string
+}
+
+function defaultDeck(inputSide: ConveyorSide, outputSide: ConveyorSide, role: ConveyorDeckConfig['role']): ConveyorDeckConfig {
+  return { enabled: true, inputSide, outputSide, role, speed: 1, capacity: 1 }
+}
+
+/** 旧 conveyorDirection 自动映射为下层去程；双层旧线的上层默认反向回程。 */
+export function legacyConveyorDecks(cell: TopologyCell): ConveyorDecks {
+  const outputSide = conveyorSideFromDirection(cell.conveyorDirection ?? 'right')
+  const inputSide = oppositeConveyorSide(outputSide)
+  const lower = defaultDeck(inputSide, outputSide, 'outbound')
+  if (cell.conveyorGround || (cell.levels ?? 1) < 2) return { lower }
+  return {
+    lower,
+    upper: defaultDeck(outputSide, inputSide, 'return'),
+  }
+}
+
+export function conveyorAnchorCell(
+  topology: Pick<TopologyPayload, 'cells'>,
+  cell: TopologyCell,
+): TopologyCell {
+  const anchor = conveyorAnchorOf(cell)
+  const floor = floorOf(cell)
+  return topology.cells.find(
+    (item) => item.type === 'conveyor' && floorOf(item) === floor && item.row === anchor.row && item.col === anchor.col,
+  ) ?? cell
+}
+
+export function conveyorDecksOf(
+  topology: Pick<TopologyPayload, 'cells'>,
+  cell: TopologyCell,
+): ConveyorDecks {
+  const anchorCell = conveyorAnchorCell(topology, cell)
+  return anchorCell.conveyorDecks ?? legacyConveyorDecks(anchorCell)
+}
+
+export function conveyorModeOf(
+  topology: Pick<TopologyPayload, 'cells'>,
+  cell: TopologyCell,
+): ConveyorRunMode {
+  const anchorCell = conveyorAnchorCell(topology, cell)
+  if (anchorCell.conveyorMode) return anchorCell.conveyorMode
+  if (anchorCell.conveyorGround || (anchorCell.levels ?? 1) < 2) return 'single'
+  return 'round_trip'
+}
+
+export function conveyorBlocks(
+  topology: Pick<TopologyPayload, 'cells'>,
+  ids?: Iterable<string>,
+): ConveyorBlock[] {
+  const allowed = ids ? new Set(ids) : null
+  const byKey = new Map<string, ConveyorBlock>()
+  for (const cell of topology.cells) {
+    if (cell.type !== 'conveyor' || (allowed && !allowed.has(cell.id))) continue
+    const anchor = conveyorAnchorOf(cell)
+    const floor = floorOf(cell)
+    const key = `${floor}:${anchor.row}:${anchor.col}`
+    const current = byKey.get(key)
+    if (current) {
+      current.cellIds.push(cell.id)
+      if (cell.row === anchor.row && cell.col === anchor.col) {
+        current.anchorCell = cell
+        current.lineId = cell.conveyorLineId ?? null
+      }
+      continue
+    }
+    byKey.set(key, {
+      key,
+      floor,
+      row: anchor.row,
+      col: anchor.col,
+      anchorCell: cell,
+      cellIds: [cell.id],
+      lineId: cell.conveyorLineId ?? null,
+    })
+  }
+  return [...byKey.values()].sort((left, right) =>
+    left.floor.localeCompare(right.floor) || left.row - right.row || left.col - right.col,
+  )
+}
+
+function neighboringBlock(blocks: ConveyorBlock[], block: ConveyorBlock, side: ConveyorSide): ConveyorBlock | undefined {
+  const [dr, dc] = SIDE_STEP[side]
+  return blocks.find(
+    (candidate) => candidate.floor === block.floor
+      && candidate.row === block.row + dr
+      && candidate.col === block.col + dc
+      && (!block.lineId && !candidate.lineId || block.lineId === candidate.lineId),
+  )
+}
+
+function sideBetweenBlocks(from: ConveyorBlock, to: ConveyorBlock): ConveyorSide | null {
+  const dr = to.row - from.row
+  const dc = to.col - from.col
+  if (dr === -2 && dc === 0) return 'north'
+  if (dr === 2 && dc === 0) return 'south'
+  if (dr === 0 && dc === 2) return 'east'
+  if (dr === 0 && dc === -2) return 'west'
+  return null
+}
+
+/** 按块级邻接排序，避免 2×2 块内部四个格子被误当成四段输送线。 */
+export function orderConveyorBlocks(blocks: ConveyorBlock[]): ConveyorBlock[] {
+  if (blocks.length <= 1) return blocks.slice()
+  const neighbors = (block: ConveyorBlock) => blocks.filter((candidate) =>
+    candidate.key !== block.key && sideBetweenBlocks(block, candidate) !== null,
+  )
+  const head = blocks.find((block) => neighbors(block).length <= 1) ?? blocks[0]
+  const ordered: ConveyorBlock[] = []
+  const seen = new Set<string>()
+  let current: ConveyorBlock | undefined = head
+  while (current && !seen.has(current.key)) {
+    seen.add(current.key)
+    ordered.push(current)
+    current = neighbors(current).find((candidate) => !seen.has(candidate.key))
+  }
+  for (const block of blocks) if (!seen.has(block.key)) ordered.push(block)
+  return ordered
+}
+
+/** 自动为简单连通线生成逐块入口/出口；双层往返时上层严格反向。 */
+export function configureConveyorRun(
+  topology: TopologyPayload,
+  ids: string[],
+  mode: ConveyorRunMode,
+): TopologyPayload {
+  const next = cloneTopology(topology)
+  const selected = new Set(ids)
+  const blocks = orderConveyorBlocks(conveyorBlocks(next, selected))
+  if (!blocks.length) return topology
+  const byId = new Map(next.cells.map((cell) => [cell.id, cell]))
+  const first = blocks[0]
+  const lineId = first.lineId ?? `cv-${first.floor}-${first.row}-${first.col}`
+
+  blocks.forEach((block, index) => {
+    const previous = blocks[index - 1]
+    const following = blocks[index + 1]
+    const existing = conveyorDecksOf(next, block.anchorCell)
+    const output = following
+      ? sideBetweenBlocks(block, following)!
+      : previous
+        ? sideBetweenBlocks(previous, block)!
+        : existing.lower.outputSide
+    const input = previous
+      ? oppositeConveyorSide(sideBetweenBlocks(previous, block)!)
+      : oppositeConveyorSide(output)
+    const lower = mode === 'independent'
+      ? existing.lower
+      : defaultDeck(input, output, 'outbound')
+    const upper = mode === 'single'
+      ? undefined
+      : mode === 'independent'
+        ? (existing.upper ?? defaultDeck(output, input, 'return'))
+        : defaultDeck(output, input, 'return')
+    const direction = conveyorDirectionFromSide(lower.outputSide)
+    for (const id of block.cellIds) {
+      const cell = byId.get(id)
+      if (!cell) continue
+      cell.levels = mode === 'single' ? 1 : 2
+      cell.conveyorGround = mode === 'single' ? cell.conveyorGround : false
+      cell.conveyorDirection = direction
+      cell.conveyorLineId = lineId
+      if (cell.id === block.anchorCell.id) {
+        cell.conveyorMode = mode
+        cell.conveyorDecks = { lower, ...(upper ? { upper } : {}) }
+      } else {
+        delete cell.conveyorMode
+        delete cell.conveyorDecks
+      }
+    }
+  })
+  return next
+}
+
+export function updateConveyorBlockDeck(
+  topology: TopologyPayload,
+  cellId: string,
+  deck: ConveyorDeckKey,
+  patch: Partial<ConveyorDeckConfig>,
+): TopologyPayload {
+  const source = topology.cells.find((cell) => cell.id === cellId && cell.type === 'conveyor')
+  if (!source) return topology
+  const next = cloneTopology(topology)
+  const nextSource = next.cells.find((cell) => cell.id === cellId)!
+  const anchorCell = conveyorAnchorCell(next, nextSource)
+  const decks = conveyorDecksOf(next, anchorCell)
+  const base = deck === 'lower'
+    ? decks.lower
+    : decks.upper ?? defaultDeck('west', 'east', 'return')
+  const updated = { ...base, ...patch, enabled: true }
+  anchorCell.conveyorDecks = deck === 'lower'
+    ? { ...decks, lower: updated }
+    : { ...decks, upper: updated }
+  anchorCell.conveyorMode = 'independent'
+  anchorCell.levels = anchorCell.conveyorDecks.upper?.enabled ? 2 : 1
+  if (deck === 'lower') {
+    const direction = conveyorDirectionFromSide(updated.outputSide)
+    for (const id of conveyorBlockCellIds(next, anchorCell.id)) {
+      const cell = next.cells.find((item) => item.id === id)
+      if (cell) cell.conveyorDirection = direction
+    }
+  }
+  return next
+}
+
+export function reverseConveyorDeck(
+  topology: TopologyPayload,
+  ids: string[],
+  deck: ConveyorDeckKey,
+): TopologyPayload {
+  let next = topology
+  for (const block of conveyorBlocks(topology, ids)) {
+    const config = conveyorDecksOf(next, block.anchorCell)[deck]
+    if (!config) continue
+    next = updateConveyorBlockDeck(next, block.anchorCell.id, deck, {
+      inputSide: config.outputSide,
+      outputSide: config.inputSide,
+    })
+  }
+  return next
+}
+
+/** 交换双层线的物理用途和走向；旧下层配置移到上层，旧上层配置移到下层。 */
+export function swapConveyorDecks(
+  topology: TopologyPayload,
+  ids: string[],
+): TopologyPayload {
+  const next = cloneTopology(topology)
+  for (const block of conveyorBlocks(next, ids)) {
+    const anchor = conveyorAnchorCell(next, block.anchorCell)
+    const decks = conveyorDecksOf(next, anchor)
+    if (!decks.upper?.enabled) continue
+    anchor.conveyorDecks = {
+      lower: { ...decks.upper },
+      upper: { ...decks.lower },
+    }
+    anchor.conveyorMode = 'independent'
+    anchor.levels = 2
+    const direction = conveyorDirectionFromSide(anchor.conveyorDecks.lower.outputSide)
+    for (const id of conveyorBlockCellIds(next, anchor.id)) {
+      const cell = next.cells.find((item) => item.id === id)
+      if (cell) cell.conveyorDirection = direction
+    }
+  }
+  return next
+}
+
+/** 从指定块沿某层的出口逐块前进，供 3D 动画和仿真使用。 */
+export function conveyorDeckRoute(
+  topology: Pick<TopologyPayload, 'cells'>,
+  startCell: TopologyCell,
+  deck: ConveyorDeckKey,
+): ConveyorBlock[] {
+  const blocks = conveyorBlocks(topology)
+  const anchor = conveyorAnchorOf(startCell)
+  let current = blocks.find(
+    (block) => block.floor === floorOf(startCell) && block.row === anchor.row && block.col === anchor.col,
+  )
+  const route: ConveyorBlock[] = []
+  const seen = new Set<string>()
+  while (current && !seen.has(current.key)) {
+    const config = conveyorDecksOf(topology, current.anchorCell)[deck]
+    if (!config?.enabled) break
+    route.push(current)
+    seen.add(current.key)
+    current = neighboringBlock(blocks, current, config.outputSide)
+  }
+  return route
+}
+
+export function validateConveyorTopology(topology: Pick<TopologyPayload, 'cells' | 'nodes' | 'zones'>): ConveyorValidationIssue[] {
+  const blocks = conveyorBlocks(topology)
+  const issues: ConveyorValidationIssue[] = []
+  for (const block of blocks) {
+    const severity: ConveyorValidationIssue['severity'] = block.anchorCell.conveyorDecks ? 'error' : 'warning'
+    const decks = conveyorDecksOf(topology, block.anchorCell)
+    const configs: [ConveyorDeckKey, ConveyorDeckConfig | undefined][] = [
+      ['lower', decks.lower],
+      ['upper', decks.upper],
+    ]
+    for (const [deck, config] of configs) {
+      if (!config?.enabled) continue
+      if (block.anchorCell.conveyorGround && deck === 'upper') {
+        issues.push({ severity, blockKey: block.key, deck, message: '地面输送线只能使用下层。' })
+      }
+      if (config.inputSide === config.outputSide) {
+        issues.push({ severity, blockKey: block.key, deck, message: '入口侧和出口侧不能相同。' })
+        continue
+      }
+      const previous = neighboringBlock(blocks, block, config.inputSide)
+      if (previous?.anchorCell.conveyorDecks) {
+        const previousConfig = conveyorDecksOf(topology, previous.anchorCell)[deck]
+        const expectedOutput = oppositeConveyorSide(config.inputSide)
+        if (!previousConfig?.enabled || previousConfig.outputSide !== expectedOutput) {
+          issues.push({
+            severity,
+            blockKey: block.key,
+            deck,
+            message: `${CONVEYOR_SIDE_LABELS[config.inputSide]}入口与上一块${CONVEYOR_SIDE_LABELS[expectedOutput]}出口不匹配。`,
+          })
+        }
+      }
+      const next = neighboringBlock(blocks, block, config.outputSide)
+      if (next?.anchorCell.conveyorDecks) {
+        const nextConfig = conveyorDecksOf(topology, next.anchorCell)[deck]
+        const expectedInput = oppositeConveyorSide(config.outputSide)
+        if (!nextConfig?.enabled || nextConfig.inputSide !== expectedInput) {
+          issues.push({
+            severity,
+            blockKey: block.key,
+            deck,
+            message: `${CONVEYOR_SIDE_LABELS[config.outputSide]}出口与下一块${CONVEYOR_SIDE_LABELS[expectedInput]}入口不匹配。`,
+          })
+        }
+      }
+    }
+  }
+  for (const node of topology.nodes) {
+    if (node.type !== 'turn_transfer') continue
+    const floor = node.floor ?? GROUND_FLOOR
+    const block = blocks.find((item) =>
+      item.floor === floor && item.row === node.row && item.col === node.col,
+    )
+    const blockKey = block?.key ?? `${floor}:${node.row}:${node.col}`
+    const deck: ConveyorDeckKey = node.transferDeck
+      ?? (block && !block.anchorCell.conveyorGround && (block.anchorCell.levels ?? 1) > 1 ? 'upper' : 'lower')
+    if (!block) {
+      issues.push({
+        severity: 'error',
+        blockKey,
+        deck,
+        message: `${node.label}必须安装在输送模块上。`,
+      })
+      continue
+    }
+    if (deck === 'upper' && (block.anchorCell.conveyorGround || (block.anchorCell.levels ?? 1) < 2)) {
+      issues.push({
+        severity: 'error',
+        blockKey,
+        deck,
+        message: `${node.label}选择了上层，但当前输送模块没有可用上层。`,
+      })
+    }
+    if (node.transferInputSide && node.transferInputSide === node.transferOutputSide) {
+      issues.push({
+        severity: 'error',
+        blockKey,
+        deck,
+        message: `${node.label}的入口方向和出口方向不能相同。`,
+      })
+    }
+  }
+  for (const zone of topology.zones) {
+    const binding = zone.conveyorBinding
+    if (!binding || (zone.type !== 'port' && zone.type !== 'pick_station')) continue
+    const block = blocks.find((item) => item.key === binding.blockId)
+    if (!block) {
+      issues.push({
+        severity: 'error',
+        blockKey: binding.blockId,
+        deck: 'lower',
+        message: `${zone.label}绑定的输送块不存在。`,
+      })
+      continue
+    }
+    const decks = conveyorDecksOf(topology, block.anchorCell)
+    if (zone.type === 'port') {
+      if (decks.lower.inputSide !== binding.side) {
+        issues.push({
+          severity: 'error', blockKey: block.key, deck: 'lower',
+          message: `${zone.label}连接侧与下层入口侧不一致。`,
+        })
+      }
+      if (decks.upper?.enabled && decks.upper.outputSide !== binding.side) {
+        issues.push({
+          severity: 'error', blockKey: block.key, deck: 'upper',
+          message: `${zone.label}连接侧与上层回程出口侧不一致。`,
+        })
+      }
+    } else {
+      if (decks.lower.outputSide !== binding.side) {
+        issues.push({
+          severity: 'error', blockKey: block.key, deck: 'lower',
+          message: `${zone.label}连接侧与下层去程出口侧不一致。`,
+        })
+      }
+      if (decks.upper?.enabled && decks.upper.inputSide !== binding.side) {
+        issues.push({
+          severity: 'error', blockKey: block.key, deck: 'upper',
+          message: `${zone.label}连接侧与上层回程入口侧不一致。`,
+        })
+      }
+    }
+  }
+  return issues
+}
+
 /** 库位槽位编号（派生，不入库）：`{区域字母}-{槽行}-{槽列}`。shuttle 按 2×2 槽计，ctu 按 1×1 计。 */
 export function slotNumberFor(
   topology: Pick<TopologyPayload, 'zones'>,
@@ -310,6 +786,7 @@ const NODE_ZONE_AFFINITY: Record<NodeType, ReadonlySet<ZoneType>> = {
   shuttle_robot: new Set(['shuttle']),
   lift_transfer: new Set<ZoneType>(),
   turn_transfer: new Set<ZoneType>(),
+  shuttle_dock: new Set<ZoneType>(),
 }
 
 export function zoneRefForNodeType(
@@ -358,6 +835,11 @@ export function makeNode(type: NodeType, row: number, col: number, floor = GROUN
     zoneId: null,
     capacity: 1,
     label: defaultNodeLabel(type, id),
+    ...(type === 'turn_transfer' ? {
+      transferDeck: 'lower' as ConveyorDeckKey,
+      transferInputSide: 'west' as ConveyorSide,
+      transferOutputSide: 'north' as ConveyorSide,
+    } : {}),
   }
 }
 
@@ -427,7 +909,11 @@ export function conveyorRunFromCell(
 
   const at = new Map<string, TopologyCell>()
   for (const cell of topology.cells) {
-    if (cell.type === 'conveyor' && floorOf(cell) === floor) at.set(`${cell.row}:${cell.col}`, cell)
+    if (
+      cell.type === 'conveyor'
+      && floorOf(cell) === floor
+      && (!start.conveyorLineId || cell.conveyorLineId === start.conveyorLineId)
+    ) at.set(`${cell.row}:${cell.col}`, cell)
   }
   const neighbor = (cell: TopologyCell, dr: number, dc: number) => at.get(`${cell.row + dr}:${cell.col + dc}`)
 
@@ -484,6 +970,7 @@ function cloneTopology(topology: TopologyPayload): TopologyPayload {
     grid: { ...topology.grid },
     zones: topology.zones.map((zone) => ({
       ...zone,
+      ...(zone.conveyorBinding ? { conveyorBinding: { ...zone.conveyorBinding } } : {}),
       ...(zone.slotAisles ? { slotAisles: { ...zone.slotAisles } } : {}),
       ...(zone.removedSlots ? { removedSlots: [...zone.removedSlots] } : {}),
       ...(zone.slotLifts ? { slotLifts: [...zone.slotLifts] } : {}),
@@ -512,7 +999,7 @@ export function paintCell(
   col: number,
   floor = GROUND_FLOOR,
   directionFrom?: GridPoint | null,
-  options?: { skipOccupied?: boolean },
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   if (type === 'conveyor') {
     return paintConveyorBlock(topology, row, col, floor, directionFrom, options)
@@ -528,7 +1015,7 @@ function paintSingleCell(
   floor: string,
   direction: ConveyorDirection | null,
   anchor: GridPoint | null = null,
-  options?: { skipOccupied?: boolean },
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) return { topology, painted: false }
   const node = findNodeAt(topology, row, col, floor)
@@ -559,7 +1046,8 @@ function paintSingleCell(
       walkable: walkableForType(type),
       conveyorDirection: type === 'conveyor' ? (direction ?? existing.conveyorDirection ?? 'right') : null,
       conveyorAnchor: type === 'conveyor' ? (anchor ?? { row, col }) : null,
-      ...(type === 'conveyor' ? { levels: existing.levels ?? 1 } : {}),
+      // 重铺时显式写标记：普通输送带工具会把地面线刷回架空线
+      ...(type === 'conveyor' ? { levels: existing.levels ?? 1, conveyorGround: Boolean(options?.ground) } : {}),
     }
   } else {
     const cell = makeCell(row, col, type, floor)
@@ -567,6 +1055,7 @@ function paintSingleCell(
     if (type === 'conveyor') {
       cell.conveyorDirection = direction ?? 'right'
       cell.conveyorAnchor = anchor ?? { row, col }
+      cell.conveyorGround = Boolean(options?.ground)
     }
     next.cells.push(cell)
   }
@@ -579,8 +1068,8 @@ function paintConveyorBlock(
   row: number,
   col: number,
   floor: string,
-  directionFrom: GridPoint | null | undefined,
-  options?: { skipOccupied?: boolean },
+  _directionFrom: GridPoint | null | undefined,
+  options?: { skipOccupied?: boolean; ground?: boolean },
 ): { topology: TopologyPayload; painted: boolean } {
   const anchor = { row, col }
   if (anchor.row < 0 || anchor.row + 1 >= topology.grid.rows || anchor.col < 0 || anchor.col + 1 >= topology.grid.cols) {
@@ -594,7 +1083,8 @@ function paintConveyorBlock(
       if (a.row !== anchor.row || a.col !== anchor.col) return { topology, painted: false }
     }
   }
-  const direction = directionFrom ? directionFromCells(directionFrom, anchor) ?? 'right' : 'right'
+  // 方向不再根据绘制手势推断；每个 2×2 模块在属性面板中独立手动设置。
+  const direction: ConveyorDirection = 'right'
   let next = topology
   let painted = false
   for (const point of conveyorBlockCellsAt(anchor)) {
@@ -611,13 +1101,14 @@ export function paintStroke(
   type: CellType,
   cells: GridPoint[],
   floor = GROUND_FLOOR,
+  options?: { ground?: boolean },
 ): TopologyPayload {
   const ordered = type === 'conveyor' ? snapConveyorAnchors(uniqueOrderedCells(cells)) : uniqueOrderedCells(cells)
   let current = topology
   let previous: GridPoint | null = null
   for (const point of ordered) {
     if (previous && previous.row === point.row && previous.col === point.col) continue
-    const result = paintCell(current, type, point.row, point.col, floor, previous)
+    const result = paintCell(current, type, point.row, point.col, floor, previous, options)
     current = result.topology
     previous = point
   }
@@ -650,6 +1141,13 @@ export function placeNode(
 ): { topology: TopologyPayload; message?: string } | null {
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
+  }
+  // 出货位只能放在地面输送线上：四向车仅沿车库巷道、升降通道和地面输送线移动。
+  if (type === 'shuttle_dock') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
+    }
   }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(type)) {
@@ -706,6 +1204,17 @@ export function placeNode(
     capacity: 1,
     label: defaultNodeLabel(type, id),
   }
+  if (type === 'turn_transfer') {
+    const mount = nodeCell?.type === 'conveyor' ? nodeCell : null
+    const transferDeck: ConveyorDeckKey = mount && !mount.conveyorGround && (mount.levels ?? 1) > 1
+      ? 'upper'
+      : 'lower'
+    const decks = mount ? conveyorDecksOf(next, mount) : null
+    const config = decks?.[transferDeck] ?? decks?.lower
+    node.transferDeck = transferDeck
+    node.transferInputSide = config?.inputSide ?? 'west'
+    node.transferOutputSide = config?.outputSide ?? 'north'
+  }
   next.nodes.push(node)
   return { topology: finalizeTopology(next) }
 }
@@ -719,9 +1228,10 @@ export function fillNodes(
   type: NodeType,
   box: CellBox,
   floor = GROUND_FLOOR,
-): { topology: TopologyPayload; placed: number } {
+): { topology: TopologyPayload; placed: number; message?: string } {
   let current = topology
   let placed = 0
+  let lastMessage: string | undefined
   for (let row = box.row0; row <= box.row1; row += 1) {
     for (let col = box.col0; col <= box.col1; col += 1) {
       if (findNodeAt(current, row, col, floor)) continue
@@ -729,10 +1239,12 @@ export function fillNodes(
       if (result && !result.message) {
         current = result.topology
         placed += 1
+      } else if (result?.message) {
+        lastMessage = result.message
       }
     }
   }
-  return { topology: current, placed }
+  return { topology: current, placed, message: placed ? undefined : lastMessage }
 }
 
 /**
@@ -750,6 +1262,13 @@ export function moveNode(
   if (!node) return { topology, message: '找不到该节点。' }
   if (row < 0 || row >= topology.grid.rows || col < 0 || col >= topology.grid.cols) {
     return { topology, message: '目标超出网格范围。' }
+  }
+  // 出货位只能放在地面输送线上：四向车仅沿车库巷道、升降通道和地面输送线移动。
+  if (node.type === 'shuttle_dock') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
+    }
   }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(node.type)) {

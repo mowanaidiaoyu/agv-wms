@@ -1,13 +1,11 @@
 import { create } from 'zustand'
-import { emptyTopology } from '../data/defaults'
+import { emptyTopology } from '../data/topologyDefaults'
 import {
   CELL_BRUSH_TOOLS,
   CELL_LABELS,
   cellsInBox,
   conveyorBlockCellIds,
-  conveyorRunFromCell,
   createZone,
-  deepEqual,
   eraseAt,
   fillNodes,
   findCell,
@@ -16,7 +14,6 @@ import {
   GROUND_FLOOR,
   isPointInBox,
   interpolateGridCells,
-  moveConveyorRun,
   moveNode as moveNodeInTopology,
   moveZone as moveZoneInTopology,
   NODE_LABELS,
@@ -32,11 +29,14 @@ import {
   shuttleSlotsInBox,
   syncZoneMembership,
   updateZoneGeometry,
+  updateConveyorBlockDeck,
   type CellBox,
   type GridPoint,
 } from '../lib/topology'
 import type {
   CellType,
+  ConveyorDeckConfig,
+  ConveyorDeckKey,
   ConveyorDirection,
   EditorObjectType,
   NodeType,
@@ -53,7 +53,6 @@ export type TopologySelection =
   | { kind: 'zone'; id: string }
   | { kind: 'storage-batch'; ids: string[]; box: CellBox }
   | { kind: 'conveyor-batch'; ids: string[]; box: CellBox }
-  | { kind: 'conveyor-run'; cellId: string; ids: string[]; floor: string }
   | { kind: 'shuttle-batch'; slots: { row: number; col: number }[]; box: CellBox }
   | { kind: 'shuttle-slot'; zoneId: string; row: number; col: number; floor: string }
   | null
@@ -74,6 +73,7 @@ const NODE_TOOL_OF: Partial<Record<EditorObjectType, NodeType>> = {
   shuttle_robot: 'shuttle_robot',
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
+  shuttle_dock: 'shuttle_dock',
 }
 
 interface DragState {
@@ -81,15 +81,11 @@ interface DragState {
   origin: GridPoint | null
   current: GridPoint | null
   moved: boolean
-  entity?: { kind: 'node' | 'zone' | 'conveyor-run'; id: string; floor: string } | null
+  entity?: { kind: 'node' | 'zone'; id: string; floor: string } | null
 }
 
 function cloneGridPoint(point: GridPoint): GridPoint {
   return { row: point.row, col: point.col }
-}
-
-function composeDirty(saved: TopologyPayload | null, draft: TopologyPayload): boolean {
-  return saved ? !deepEqual(saved, draft) : false
 }
 
 function isValidSelectionForTopology(selection: TopologySelection, topology: TopologyPayload): TopologySelection {
@@ -103,12 +99,6 @@ function isValidSelectionForTopology(selection: TopologySelection, topology: Top
   }
   if (selection.kind === 'conveyor-batch') {
     const ids = selection.ids.filter((id) => topology.cells.some((cell) => cell.id === id && cell.type === 'conveyor'))
-    return ids.length ? { ...selection, ids } : null
-  }
-  if (selection.kind === 'conveyor-run') {
-    const start = topology.cells.find((cell) => cell.id === selection.cellId && cell.type === 'conveyor')
-    if (!start) return null
-    const ids = conveyorRunFromCell(topology, selection.cellId, selection.floor).map((cell) => cell.id)
     return ids.length ? { ...selection, ids } : null
   }
   return selection
@@ -185,6 +175,8 @@ interface TopologyEditorStore {
   resyncZone: (id: string) => void
   batchAssignZone: (nodeIds: string[], zoneId: string | null) => void
   updateConveyorLevels: (ids: string[], levels: number) => void
+  updateConveyorGround: (ids: string[], ground: boolean) => void
+  updateConveyorBlockDeck: (cellId: string, deck: ConveyorDeckKey, patch: Partial<ConveyorDeckConfig>) => void
   applyShuttleAisle: (slots: { row: number; col: number }[], aisle: boolean, floor?: string) => void
   applyShuttleSlotRemove: (slots: { row: number; col: number }[], removed: boolean, floor?: string) => void
   applyShuttleLift: (slots: { row: number; col: number }[], lift: boolean, floor?: string) => void
@@ -198,9 +190,9 @@ interface TopologyEditorStore {
 
 export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => {
   function nextState(update: (draft: TopologyPayload) => TopologyPayload): Partial<TopologyEditorStore> {
-    const { draft, savedSnapshot } = get()
+    const { draft, dirty } = get()
     const next = update(draft)
-    return { draft: next, dirty: composeDirty(savedSnapshot, next) }
+    return { draft: next, dirty: dirty || next !== draft }
   }
 
   function commitSelectionChange(topology: TopologyPayload): Pick<TopologyEditorStore, 'selection'> | Record<string, never> {
@@ -255,11 +247,12 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       return
     }
     const placeType = state.batchPlaceType
-    if (CELL_BRUSH_TOOLS.has(placeType as CellType)) {
-      const brush = placeType as CellType
-      const next = paintStroke(state.draft, brush, cellsInBox(box), state.activeFloor)
+    if (CELL_BRUSH_TOOLS.has(placeType)) {
+      const isGround = placeType === 'ground_conveyor'
+      const brush = (isGround ? 'conveyor' : placeType) as CellType
+      const next = paintStroke(state.draft, brush, cellsInBox(box), state.activeFloor, { ground: isGround })
       withSelection(() => next)
-      set({ notice: { kind: 'info', text: `已批量铺设 ${CELL_LABELS[brush]}。` } })
+      set({ notice: { kind: 'info', text: `已批量铺设 ${isGround ? '地面输送线' : CELL_LABELS[brush]}。` } })
       return
     }
     const nodeType = NODE_TOOL_OF[placeType]
@@ -269,7 +262,7 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       set({
         notice: result.placed
           ? { kind: 'info', text: `已批量放置 ${result.placed} 个${NODE_LABELS[nodeType]}。` }
-          : { kind: 'warn', text: '该区域没有可放置的格子。' },
+          : { kind: 'warn', text: result.message || '该区域没有可放置的格子。' },
       })
     }
   }
@@ -470,9 +463,10 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         set({ pointerDown: true, lastPaint: { row, col }, drag: { mode: 'paint', origin: { row, col }, current: { row, col }, moved: false } })
         return
       }
-      if (CELL_BRUSH_TOOLS.has(state.activeTool as CellType)) {
-        const brushType = state.activeTool as CellType
-        const painted = paintCell(state.draft, brushType, row, col, state.activeFloor, null)
+      if (CELL_BRUSH_TOOLS.has(state.activeTool)) {
+        const isGround = state.activeTool === 'ground_conveyor'
+        const brushType = (isGround ? 'conveyor' : state.activeTool) as CellType
+        const painted = paintCell(state.draft, brushType, row, col, state.activeFloor, null, { ground: isGround })
         withSelection(() => painted.topology)
         set({ pointerDown: true, lastPaint: { row, col }, drag: { mode: 'paint', origin: { row, col }, current: { row, col }, moved: false } })
         return
@@ -542,8 +536,10 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         set({ lastPaint: { row, col } })
         return
       }
-      if (CELL_BRUSH_TOOLS.has(tool as CellType)) {
-        const next = paintStroke(state.draft, tool as CellType, [state.lastPaint, { row, col }], state.activeFloor)
+      if (CELL_BRUSH_TOOLS.has(tool)) {
+        const isGround = tool === 'ground_conveyor'
+        const brush = (isGround ? 'conveyor' : tool) as CellType
+        const next = paintStroke(state.draft, brush, [state.lastPaint, { row, col }], state.activeFloor, { ground: isGround })
         withSelection(() => next)
         set({ lastPaint: { row, col } })
       }
@@ -593,13 +589,13 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         const nodeType = NODE_TOOL_OF[state.activeTool]
         if (nodeType && drag.origin) {
           const box = normalizeSelectionBox(drag.origin, drag.current ?? drag.origin)
-          const { topology, placed } = fillNodes(state.draft, nodeType, box, state.activeFloor)
+          const { topology, placed, message } = fillNodes(state.draft, nodeType, box, state.activeFloor)
           withSelection(() => topology)
           set({
             marquee: null,
             notice: placed
               ? { kind: 'info', text: `已放置 ${placed} 个${NODE_LABELS[nodeType]}。` }
-              : { kind: 'warn', text: '该区域没有可放置的格子。' },
+              : { kind: 'warn', text: message || '该区域没有可放置的格子。' },
           })
         }
         set({ marquee: null, drag: { mode: 'none', origin: null, current: null, moved: false } })
@@ -615,12 +611,6 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
               if (result.message) set({ notice: { kind: 'warn', text: result.message } })
               else withSelection(() => result.topology)
             }
-          } else if (entity.kind === 'conveyor-run') {
-            const dr = Math.round(drag.current.row - drag.origin.row)
-            const dc = Math.round(drag.current.col - drag.origin.col)
-            const result = moveConveyorRun(state.draft, entity.id, dr, dc, entity.floor)
-            if (result.message) set({ notice: { kind: 'warn', text: result.message } })
-            else withSelection(() => result.topology)
           } else {
             const zone = state.draft.zones.find((item) => item.id === entity.id)
             if (zone) {
@@ -653,20 +643,28 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       if (state.activeTool !== 'select') return
       if (kind === 'cell') {
         const cell = state.draft.cells.find((item) => item.id === id)
+        // 输送线出入口区域常与输送带格重叠：点击落在带面/滚筒上时优先选中出入口区域，
+        // 否则事件会被输送带格拦截，导致出入口怎么点都选不中。
+        const portZone = cell
+          ? state.draft.zones.find(
+              (zone) =>
+                zone.type === 'port' &&
+                cell.row >= zone.y &&
+                cell.row < zone.y + zone.height &&
+                cell.col >= zone.x &&
+                cell.col < zone.x + zone.width,
+            )
+          : undefined
+        if (portZone) {
+          set({ selection: { kind: 'zone', id: portZone.id }, notice: null, marquee: null })
+          return
+        }
         if (cell?.type === 'conveyor') {
-          const runFloor = cell.floor ?? GROUND_FLOOR
-          const run = conveyorRunFromCell(state.draft, id, runFloor)
           set({
-            selection: { kind: 'conveyor-run', cellId: id, ids: run.map((item) => item.id), floor: runFloor },
+            selection: { kind: 'cell', id },
             notice: null,
             marquee: null,
-            drag: {
-              mode: 'move',
-              origin: { row: cell.row, col: cell.col },
-              current: { row: cell.row, col: cell.col },
-              moved: false,
-              entity: { kind: 'conveyor-run', id, floor: runFloor },
-            },
+            drag: { mode: 'none', origin: null, current: null, moved: false },
           })
         } else {
           get().selectCellById(id)
@@ -712,20 +710,6 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       let marquee: CellBox | null = null
       if (entity.kind === 'node') {
         marquee = { row0: row, col0: col, row1: row, col1: col }
-      } else if (entity.kind === 'conveyor-run') {
-        const run = conveyorRunFromCell(state.draft, entity.id, entity.floor)
-        if (run.length) {
-          const dr = Math.round(row - drag.origin.row)
-          const dc = Math.round(col - drag.origin.col)
-          const rows = run.map((item) => item.row)
-          const cols = run.map((item) => item.col)
-          marquee = {
-            row0: Math.min(...rows) + dr,
-            col0: Math.min(...cols) + dc,
-            row1: Math.max(...rows) + dr,
-            col1: Math.max(...cols) + dc,
-          }
-        }
       } else {
         const zone = state.draft.zones.find((item) => item.id === entity.id)
         if (zone) {
@@ -754,10 +738,13 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       withSelection((draft) => {
         const cell = draft.cells.find((item) => item.id === id)
         if (!cell) return draft
-        // 输送带按 2×2 块联动：方向/层数/介质类型变更同步到整块 4 格
+        // 输送带按 2×2 块联动：方向/层数/地面标记/介质类型变更同步到整块 4 格
         const touchesConveyorField =
           cell.type === 'conveyor' &&
-          (patch.conveyorDirection !== undefined || patch.levels !== undefined || patch.type !== undefined)
+          (patch.conveyorDirection !== undefined ||
+            patch.levels !== undefined ||
+            patch.conveyorGround !== undefined ||
+            patch.type !== undefined)
         const ids = touchesConveyorField ? new Set(conveyorBlockCellIds(draft, id)) : new Set([id])
         const cells = draft.cells.map((item) => (ids.has(item.id) ? ({ ...item, ...patch } as TopologyCell) : item))
         return { ...draft, cells }
@@ -769,8 +756,30 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
         if (!node) return draft
         const index = draft.nodes.findIndex((item) => item.id === id)
         const nodes = draft.nodes.slice()
-        nodes[index] = { ...node, ...patch } as TopologyNode
-        return { ...draft, nodes }
+        const updated = { ...node, ...patch } as TopologyNode
+        nodes[index] = updated
+        let next = { ...draft, nodes }
+        const changesTurnDirection = node.type === 'turn_transfer' && (
+          patch.transferDeck !== undefined
+          || patch.transferInputSide !== undefined
+          || patch.transferOutputSide !== undefined
+        )
+        if (changesTurnDirection) {
+          const mount = next.cells.find((cell) =>
+            cell.type === 'conveyor'
+            && (cell.floor ?? GROUND_FLOOR) === (updated.floor ?? GROUND_FLOOR)
+            && cell.row === updated.row
+            && cell.col === updated.col,
+          )
+          const deck = updated.transferDeck ?? 'lower'
+          if (mount && updated.transferInputSide && updated.transferOutputSide) {
+            next = updateConveyorBlockDeck(next, mount.id, deck, {
+              inputSide: updated.transferInputSide,
+              outputSide: updated.transferOutputSide,
+            })
+          }
+        }
+        return next
       }),
 
     patchZone: (id, patch) =>
@@ -808,11 +817,34 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
     updateConveyorLevels: (ids, levels) =>
       withSelection((draft) => {
         const setIds = new Set(ids)
+        const cells = draft.cells.map((cell) => {
+          if (!setIds.has(cell.id) || cell.type !== 'conveyor') return cell
+          const isAnchor = cell.conveyorAnchor
+            ? cell.row === cell.conveyorAnchor.row && cell.col === cell.conveyorAnchor.col
+            : cell.row % 2 === 0 && cell.col % 2 === 0
+          const decks = levels === 1 && isAnchor && cell.conveyorDecks
+            ? { lower: cell.conveyorDecks.lower }
+            : cell.conveyorDecks
+          return {
+            ...cell,
+            levels,
+            ...(isAnchor ? { conveyorDecks: decks } : {}),
+          }
+        })
+        return { ...draft, cells }
+      }),
+
+    updateConveyorGround: (ids, ground) =>
+      withSelection((draft) => {
+        const setIds = new Set(ids)
         const cells = draft.cells.map((cell) =>
-          setIds.has(cell.id) && cell.type === 'conveyor' ? { ...cell, levels } : cell,
+          setIds.has(cell.id) && cell.type === 'conveyor' ? { ...cell, conveyorGround: ground } : cell,
         )
         return { ...draft, cells }
       }),
+
+    updateConveyorBlockDeck: (cellId, deck, patch) =>
+      withSelection((draft) => updateConveyorBlockDeck(draft, cellId, deck, patch)),
 
     applyShuttleAisle: (slots, aisle, floor) =>
       withSelection((draft) =>
@@ -867,7 +899,7 @@ export const useTopologyEditorStore = create<TopologyEditorStore>((set, get) => 
       const next = removeFloor(state.draft, removed)
       const floors = floorsOf(next)
       const activeFloor = floors.includes(state.activeFloor) ? state.activeFloor : floors[0] ?? GROUND_FLOOR
-      set({ draft: next, dirty: composeDirty(state.savedSnapshot, next), activeFloor, notice: { kind: 'info', text: `已删除楼层 ${removed} 及其上的格子与节点。` } })
+      set({ draft: next, dirty: state.dirty || next !== state.draft, activeFloor, notice: { kind: 'info', text: `已删除楼层 ${removed} 及其上的格子与节点。` } })
     },
 
   }
