@@ -1,0 +1,314 @@
+{
+  "planId": "g1b1-topology-6ceb4920-handoff-layout-v1",
+  "schemaVersion": "1.0.0",
+  "topologyId": "topology-6ceb4920",
+  "topologyRevision": "2.0.0:fe9fd41bf5cec86b",
+  "overallStatus": "PARTIAL",
+  "recommendedOptionId": "scheme-a-height-transfer",
+  "pickingArmPreview": {
+    "armId": "proposed-picking-arm-r91-c54",
+    "validationStatus": "PARTIAL",
+    "installation": {
+      "row": 91,
+      "col": 54,
+      "level": 1,
+      "mountHeight": 0.0,
+      "workRadius": 7.9
+    },
+    "kinematics": {
+        "upperArmLength": 4.0,
+        "forearmLength": 3.9,
+        "shoulderHeight": 4.0,
+        "baseRadius": 0.68,
+        "upperArmThickness": 0.42,
+        "forearmThickness": 0.38,
+        "jointRadius": 0.32,
+        "gripperScale": 1.45,
+        "safeTravelHeight": 6.3,
+        "linkCollisionRadius": 0.24
+    },
+    "pickup": {
+      "nodeId": "existing-ground-conveyor-cell-r92-c48",
+      "topologyCellId": "cell-r92-c48",
+      "row": 92,
+      "col": 48,
+      "level": 1,
+      "deckIndex": 1,
+      "beltHeight": 0.6,
+      "direction": "right",
+      "provenance": "topology",
+      "validationStatus": "PASS",
+      "note": "This is the real right-running ground conveyor terminal adjacent to the unchanged arm position; c49 is absent."
+    },
+    "dropoff": {
+      "nodeId": "existing-conveyor-cell-r86-c50",
+      "topologyCellId": "cell-r86-c50",
+      "row": 86,
+      "col": 50,
+      "level": 2,
+      "deckIndex": 2,
+      "beltHeight": 3.0,
+      "direction": "right",
+      "provenance": "topology",
+      "validationStatus": "PASS",
+      "note": "User-confirmed L2 dropoff. Cargo moves directly right along row86 from c50."
+    },
+    "liftClearance": {
+      "liftId": "shuttle-lift-b",
+      "row": 98,
+      "col": 49,
+      "minimumPlanarDistanceCells": 8.60
+    },
+    "downstream": {
+      "nextRequiredCellId": "cell-r86-c51",
+      "validationStatus": "PASS",
+      "reason": "The adjacent L2 conveyor cell exists and both cells formally run right."
+    },
+    "previewTransfer": null,
+    "previewRoute": {
+      "turnDeviceId": "turn_transfer-15",
+      "turnCellId": "cell-r86-c60",
+      "endCellId": "cell-r108-c60",
+      "topologyDirection": "down",
+      "screenDirection": "right",
+      "validationStatus": "PARTIAL",
+      "note": "User-confirmed route: c50..c60 on row86, then turn at turn_transfer-15 and advance row+ along col60 to r108. Formal post-turn cell directions still say right."
+    },
+    "actionSequence": [
+      "idle",
+      "approach",
+      "grip",
+      "lift",
+      "rotate",
+      "place",
+      "release",
+      "return_home"
+    ],
+    "requiredAuthoritativeSignals": [
+      "pickedGoodsReady",
+      "outputPositionAvailable",
+      "handoffAccepted",
+      "handoffCompleted"
+    ],
+    "evidence": [
+      "The user fixed the arm installation at r91,c54 and the dropoff at cell-r86-c50.",
+      "The base, pickup and dropoff coordinates are topology-grid coordinates, never screen pixels.",
+      "Animation completion is visual only and cannot mutate inventory, delivered quantity or order status."
+    ]
+  },
+  "leftLayout": {
+    "roadCorridor": {
+      "row": 67,
+      "colStart": 67,
+      "colEnd": 91,
+      "level": 1,
+      "direction": "bidirectional",
+      "note": "The area is geometrically empty but contains no formal road cells. Connection from CTU storage aisles remains subject to survey."
+    },
+    "workcells": [
+      {
+        "portId": "zone-port",
+        "entryCellId": "cell-r73-c91",
+        "conveyorCellId": "cell-r74-c91",
+        "col": 91,
+        "roadJunctionRow": 67,
+        "ctuStopRow": 69,
+        "inputBufferRow": 70,
+        "pickStationRow": 71,
+        "outputBufferRow": 72,
+        "verticalTransferRow": 73
+      },
+      {
+        "portId": "zone-port-2",
+        "entryCellId": "cell-r73-c83",
+        "conveyorCellId": "cell-r74-c83",
+        "col": 83,
+        "roadJunctionRow": 67,
+        "ctuStopRow": 69,
+        "inputBufferRow": 70,
+        "pickStationRow": 71,
+        "outputBufferRow": 72,
+        "verticalTransferRow": 73
+      },
+      {
+        "portId": "zone-port-3",
+        "entryCellId": "cell-r73-c75",
+        "conveyorCellId": "cell-r74-c75",
+        "col": 75,
+        "roadJunctionRow": 67,
+        "ctuStopRow": 69,
+        "inputBufferRow": 70,
+        "pickStationRow": 71,
+        "outputBufferRow": 72,
+        "verticalTransferRow": 73
+      },
+      {
+        "portId": "zone-port-4",
+        "entryCellId": "cell-r73-c67",
+        "conveyorCellId": "cell-r74-c67",
+        "col": 67,
+        "roadJunctionRow": 67,
+        "ctuStopRow": 69,
+        "inputBufferRow": 70,
+        "pickStationRow": 71,
+        "outputBufferRow": 72,
+        "verticalTransferRow": 73
+      }
+    ]
+  },
+  "rightLayout": {
+    "dockId": "dock-01",
+    "dockCellId": "cell-r74-c17",
+    "sourceRepairs": [
+      {
+        "sourceCellId": "cell-r96-c27",
+        "sourceLevel": 2,
+        "pickupTrackNodeId": "proposed-L2-r96-c25",
+        "pickupRow": 96,
+        "pickupCol": 25,
+        "connectsToTrackNodeId": "L2-r96-c23",
+        "forkDirection": "east",
+        "basis": "96,25 is an existing removed shuttle slot with no topology cell or node; it can host a short L2 stop without filtering the source."
+      },
+      {
+        "sourceCellId": "cell-r96-c29",
+        "sourceLevel": 2,
+        "pickupTrackNodeId": "L2-r96-c31",
+        "pickupRow": 96,
+        "pickupCol": 31,
+        "connectsToTrackNodeId": "L2-r96-c31",
+        "forkDirection": "west",
+        "basis": "L2-r96-c31 is a real ShuttleGraph node adjacent to the east side of the source slot."
+      }
+    ],
+    "overheadApproach": {
+      "fromTrackNodeId": "L2-r96-c19",
+      "points": [
+        { "row": 96, "col": 19, "level": 2 },
+        { "row": 94, "col": 19, "level": 2 },
+        { "row": 92, "col": 19, "level": 2 },
+        { "row": 90, "col": 19, "level": 2 },
+        { "row": 88, "col": 19, "level": 2 },
+        { "row": 86, "col": 19, "level": 2 },
+        { "row": 84, "col": 19, "level": 2 },
+        { "row": 82, "col": 19, "level": 2 },
+        { "row": 80, "col": 19, "level": 2 },
+        { "row": 78, "col": 19, "level": 2 },
+        { "row": 76, "col": 19, "level": 2 },
+        { "row": 76, "col": 17, "level": 2 }
+      ],
+      "clearanceConflictCells": [
+        "cell-r92-c19"
+      ],
+      "note": "Dedicated L2 guideway avoids vehicle travel on conveyors. Structural clearance above the ground conveyor at r92,c19 requires human confirmation."
+    },
+    "dockTransfer": {
+      "approachRow": 76,
+      "approachCol": 17,
+      "approachLevel": 2,
+      "dockRow": 74,
+      "dockCol": 17,
+      "dockLevel": 1,
+      "method": "enclosed vertical case transfer; Shuttle remains on the L2 approach and never enters the conveyor",
+      "capacity": 1
+    },
+    "verifiedLifts": [
+      { "liftId": "shuttle-lift-a", "row": 98, "col": 21, "levels": [1, 2, 3, 4] },
+      { "liftId": "shuttle-lift-b", "row": 98, "col": 49, "levels": [1, 2, 3, 4] }
+    ]
+  },
+  "connectionOptions": [
+    {
+      "optionId": "scheme-a-height-transfer",
+      "label": "方案 A：补线与专用高度转换",
+      "status": "PARTIAL",
+      "heightTransfer": {
+        "deviceId": "proposed-height-transfer-a-r74-c49-c51",
+        "inputCellId": "cell-r74-c48",
+        "outputCellId": "cell-r74-c52",
+        "points": [
+          { "row": 74, "col": 48, "level": 1 },
+          { "row": 74, "col": 49, "level": 1 },
+          { "row": 74, "col": 50, "level": 1 },
+          { "row": 74, "col": 51, "level": 2 },
+          { "row": 74, "col": 52, "level": 2 }
+        ],
+        "method": "guarded incline or lift-transfer with positive discharge confirmation",
+        "capacity": 1
+      },
+      "missingConveyorRanges": [
+        { "row": 74, "colStart": 54, "colEnd": 55, "level": 2 },
+        { "row": 74, "colStart": 58, "colEnd": 59, "level": 2 },
+        { "row": 74, "colStart": 62, "colEnd": 65, "level": 2 },
+        { "row": 74, "colStart": 68, "colEnd": 73, "level": 2 },
+        { "row": 74, "colStart": 76, "colEnd": 81, "level": 2 },
+        { "row": 74, "colStart": 84, "colEnd": 89, "level": 2 },
+        { "row": 74, "colStart": 92, "colEnd": 96, "level": 2 }
+      ],
+      "merge": {
+        "facilityId": "proposed-merge-a-r74-c67",
+        "row": 74,
+        "col": 67,
+        "level": 2,
+        "capacity": 1,
+        "inputBufferCapacity": 2,
+        "rightInputFrom": "cell-r74-c66",
+        "leftInputFrom": "proposed-port-lift-zone-port-4",
+        "outputTo": "cell-r74-c68"
+      },
+      "outbound": {
+        "facilityId": "proposed-outbound-a-r74-c96",
+        "row": 74,
+        "col": 96,
+        "level": 2,
+        "capacity": 2,
+        "inputFrom": "cell-r74-c95",
+        "direction": "right"
+      },
+      "assumptions": [
+        "The L1-to-L2 converter can be physically installed inside r74,c49..c51.",
+        "The missing r74 elevated cells are structurally clear after field survey.",
+        "Outbound equipment can be installed at r74,c96 with safe discharge beyond the modeled grid route."
+      ]
+    },
+    {
+      "optionId": "scheme-b-existing-transfer-reroute",
+      "label": "方案 B：复用 turn_transfer-14 重规划",
+      "status": "BLOCKED",
+      "merge": {
+        "facilityId": "proposed-merge-b-turn-transfer-14",
+        "row": 74,
+        "col": 43,
+        "level": 1,
+        "capacity": 1,
+        "existingDeviceId": "turn_transfer-14"
+      },
+      "outbound": {
+        "facilityId": "proposed-outbound-b-r74-c48",
+        "row": 74,
+        "col": 48,
+        "level": 1,
+        "capacity": 1
+      },
+      "blockedLeftInput": {
+        "fromCellId": "cell-r74-c67",
+        "toCellId": "cell-r74-c43",
+        "requiredDirection": "left",
+        "currentDirection": "right",
+        "fromLevel": 2,
+        "toLevel": 1
+      },
+      "blockingReasons": [
+        "No westbound elevated path exists from the Port conveyors to turn_transfer-14.",
+        "No declared L2-to-L1 transfer exists at r74,c43.",
+        "The proposed outbound at c48 has no legal downstream discharge because c49..c51 remain missing."
+      ]
+    }
+  ],
+  "assumptions": [
+    "Every generated facility and connection is proposed and must not be written into topology_666.json or SQLite by this Gate.",
+    "Empty geometry is not a road or track until G1-B2 explicitly adds it.",
+    "Preview lines communicate design intent only and do not change G1-A connectivity status.",
+    "All capacities are preliminary engineering recommendations, not runtime resource implementations."
+  ]
+}

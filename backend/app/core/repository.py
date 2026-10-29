@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .db import decode_json, encode_json, get_conn, row_to_dict, utc_now
+from .db import decode_json, encode_json, get_conn, get_read_conn, row_to_dict, utc_now
 
 
 class Repository:
@@ -30,6 +30,11 @@ class Repository:
 
     def get_topology(self, topology_id: str) -> dict[str, Any] | None:
         with get_conn() as conn:
+            row = conn.execute("SELECT * FROM topologies WHERE id = ?", (topology_id,)).fetchone()
+        return self._decode_payload(row_to_dict(row)) if row else None
+
+    def get_topology_read_only(self, topology_id: str) -> dict[str, Any] | None:
+        with get_read_conn() as conn:
             row = conn.execute("SELECT * FROM topologies WHERE id = ?", (topology_id,)).fetchone()
         return self._decode_payload(row_to_dict(row)) if row else None
 

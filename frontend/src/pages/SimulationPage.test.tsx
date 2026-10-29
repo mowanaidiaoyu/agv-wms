@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { TopologyPayload } from '../types'
+import type { TopologyPayload, TransportLayoutPlan } from '../types'
 import { SimulationPage } from './SimulationPage'
 
 const sceneMock = vi.hoisted(() => ({
@@ -22,10 +22,111 @@ const topology: TopologyPayload = {
   nodes: [],
 }
 
+const layoutPlan: TransportLayoutPlan = {
+  planId: 'layout-test',
+  schemaVersion: '1',
+  topologyId: topology.id,
+  topologyRevision: '2.0.0:test',
+  overallStatus: 'PARTIAL',
+  recommendedOptionId: 'scheme-a',
+  pickingArm: {
+    armId: 'proposed-picking-arm-test',
+    status: 'proposed',
+    validationStatus: 'PARTIAL',
+    installation: { floor: '1F', row: 3, col: 8, level: 1 },
+    mountHeight: 0,
+    workRadius: 3.45,
+    kinematics: {
+      upperArmLength: 4,
+      forearmLength: 3.9,
+      shoulderHeight: 4,
+      baseRadius: 0.68,
+      upperArmThickness: 0.42,
+      forearmThickness: 0.38,
+      jointRadius: 0.32,
+      gripperScale: 1.45,
+      safeTravelHeight: 6.3,
+      linkCollisionRadius: 0.24,
+    },
+    pickup: {
+      nodeId: 'proposed-pick-output',
+      position: { floor: '1F', row: 2, col: 7, level: 2 },
+      beltHeight: 3,
+      provenance: 'proposed',
+      validationStatus: 'PARTIAL',
+      evidence: [],
+    },
+    dropoff: {
+      nodeId: 'existing-conveyor',
+      topologyCellId: 'cell-r4-c7',
+      position: { floor: '1F', row: 4, col: 7, level: 1 },
+      beltHeight: 1.5,
+      deckIndex: 1,
+      direction: 'right',
+      provenance: 'topology',
+      validationStatus: 'PASS',
+      evidence: [],
+    },
+    liftBId: 'shuttle-lift-b',
+    liftBPosition: { floor: '1F', row: 10, col: 1, level: 1 },
+    liftBClearanceCells: 10,
+    downstreamCellId: 'cell-r4-c8',
+    downstreamStatus: 'BLOCKED',
+    previewConveyorPath: [
+      {
+        cellId: 'cell-r4-c7',
+        position: { floor: '1F', row: 4, col: 7, level: 1 },
+        direction: 'right',
+        beltHeight: 1.5,
+        deviceIds: [],
+        transitionToNext: 'conveyor',
+        transferDeviceId: null,
+      },
+      {
+        cellId: 'cell-r4-c8',
+        position: { floor: '1F', row: 4, col: 8, level: 1 },
+        direction: 'right',
+        beltHeight: 1.5,
+        deviceIds: [],
+        transitionToNext: 'endpoint',
+        transferDeviceId: null,
+      },
+    ],
+    previewEndpointId: 'cell-r4-c8',
+    previewPathStatus: 'PASS',
+    previewStopReason: 'test endpoint',
+    previewTransferDeviceId: null,
+    previewTransferStatus: null,
+    previewTransferEvidence: [],
+    actionSequence: ['idle', 'approach', 'grip', 'lift', 'rotate', 'place', 'release', 'return_home'],
+    requiredAuthoritativeSignals: ['pickedGoodsReady', 'outputPositionAvailable', 'handoffCompleted'],
+    canDeclareDelivery: false,
+    evidence: [],
+  },
+  references: [],
+  facilities: [],
+  connections: [],
+  routes: [],
+  options: [{
+    optionId: 'scheme-a',
+    label: '方案 A',
+    status: 'PARTIAL',
+    description: 'Preview test',
+    facilityIds: [],
+    connectionIds: [],
+    assumptions: [],
+    blockingReasons: [],
+  }],
+  issues: [],
+  summary: {},
+  assumptions: [],
+}
+
 vi.mock('../lib/api', () => ({
   api: {
     listTopologies: vi.fn(async () => [{ id: topology.id, name: topology.name, payload: topology }]),
     getTopology: vi.fn(async () => ({ id: topology.id, name: topology.name, payload: topology })),
+    getTransportLayoutPlan: vi.fn(async () => layoutPlan),
     getSimulationState: vi.fn(),
     getSimulationMetrics: vi.fn(),
     getGoodsCatalog: vi.fn(async () => ({
@@ -91,8 +192,10 @@ describe('SimulationPage', () => {
       liveEvents: [],
     })
     vi.mocked(api.startSimulation).mockReset()
+    vi.mocked(api.resetSimulation).mockReset()
     vi.mocked(api.getSimulationState).mockReset()
     vi.mocked(api.getTopology).mockResolvedValue({ id: topology.id, name: topology.name, payload: topology })
+    vi.mocked(api.getTransportLayoutPlan).mockResolvedValue(layoutPlan)
     vi.mocked(api.getSimulationMetrics).mockResolvedValue({
       throughput: 0,
       completedTasks: 0,
@@ -174,6 +277,72 @@ describe('SimulationPage', () => {
     expect(screen.getByText(/此处不生成或猜测 WMS 库存/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '规划路径' })).not.toBeInTheDocument()
     expect(screen.getByTestId('simulation-3d')).toBe(scene)
+  })
+
+  it('toggles the isolated handoff layout preview without changing topology or simulation state', async () => {
+    const topologySnapshot = structuredClone(topology)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation/orders?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    const scene = await screen.findByTestId('simulation-3d')
+    const toggle = await screen.findByRole('button', { name: '接驳布局预览' })
+    expect(sceneMock.lastProps).toMatchObject({ layoutPreviewVisible: false })
+
+    fireEvent.click(toggle)
+    expect(await screen.findByLabelText('接驳布局预览面板')).toBeInTheDocument()
+    expect(sceneMock.lastProps).toMatchObject({
+      layoutPreviewVisible: true,
+      layoutOptionId: 'scheme-a',
+      layoutPlan,
+    })
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+    expect(topology).toEqual(topologySnapshot)
+    expect(usePlatformStore.getState().selectedRunId).toBe('')
+
+    fireEvent.click(toggle)
+    await waitFor(() => expect(screen.queryByLabelText('接驳布局预览面板')).not.toBeInTheDocument())
+    expect(sceneMock.lastProps).toMatchObject({ layoutPreviewVisible: false })
+    expect(topology).toEqual(topologySnapshot)
+  })
+
+  it('toggles and resets the picking-arm preview without creating a run or mutating topology', async () => {
+    const topologySnapshot = structuredClone(topology)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation/orders?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    const scene = await screen.findByTestId('simulation-3d')
+    const toggle = await screen.findByRole('button', { name: '人工拣选出口机械臂预览' })
+    expect(sceneMock.lastProps).toMatchObject({ pickingArmPreviewVisible: false })
+
+    fireEvent.click(toggle)
+    expect(await screen.findByLabelText('人工拣选出口机械臂预览面板')).toBeInTheDocument()
+    expect(sceneMock.lastProps).toMatchObject({
+      pickingArmPreviewVisible: true,
+      pickingArmPreviewCycleToken: 'arm-preview-1',
+    })
+    fireEvent.click(screen.getByRole('button', { name: '重新装载预览周转箱' }))
+    expect(sceneMock.lastProps).toMatchObject({ pickingArmPreviewCycleToken: 'arm-preview-2' })
+
+    const reset = screen.getByRole('button', { name: '重置' })
+    expect(reset).toBeEnabled()
+    fireEvent.click(reset)
+    await waitFor(() => expect(sceneMock.lastProps).toMatchObject({ pickingArmResetRequest: 1 }))
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+    expect(topology).toEqual(topologySnapshot)
+    expect(usePlatformStore.getState().selectedRunId).toBe('')
+    expect(api.resetSimulation).not.toHaveBeenCalled()
   })
 
   it('shows a retryable error without removing orders or controls when topology loading fails', async () => {
