@@ -8,8 +8,34 @@ from pydantic import BaseModel, Field, model_validator
 ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
 CellType = Literal["road", "blocked", "conveyor"]
 ConveyorDirection = Literal["right", "left", "up", "down"]
+ConveyorSide = Literal["north", "east", "south", "west"]
 NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer", "shuttle_dock"]
 SimulationStatus = Literal["idle", "running", "paused", "stopped", "completed"]
+
+
+class ConveyorDeckConfig(BaseModel):
+    """输送线单层甲板的显式配置：进出侧、用途、速度与容量。"""
+
+    enabled: bool = True
+    inputSide: ConveyorSide
+    outputSide: ConveyorSide
+    role: Literal["outbound", "return", "custom"] = "custom"
+    speed: float = Field(default=1.0, gt=0)
+    capacity: int = Field(default=1, ge=1)
+
+
+class ConveyorDecks(BaseModel):
+    """一块 2×2 输送格的分层甲板配置：下层去程（去升降机），上层回程。"""
+
+    lower: ConveyorDeckConfig
+    upper: ConveyorDeckConfig | None = None
+
+
+class ConveyorBinding(BaseModel):
+    """把一个业务区（出货位/拣选工位）绑定到它实际使用的输送块。"""
+
+    blockId: str
+    side: ConveyorSide
 
 
 class Zone(BaseModel):
@@ -23,6 +49,8 @@ class Zone(BaseModel):
     slotAisles: dict[str, int] | None = None
     removedSlots: list[str] | None = None
     slotLifts: list[str] | None = None
+    # 显式输送绑定：声明该区通过哪一块输送线的哪一侧进出（无声明时回退按方向推导）
+    conveyorBinding: ConveyorBinding | None = None
 
 
 class GridConfig(BaseModel):
@@ -47,6 +75,11 @@ class TopologyCell(BaseModel):
     conveyorAnchor: dict[str, int] | None = None
     # 地面输送线（整箱，四向车出货用）：贴地单层带面；架空输送线（零散件，CTU 用）保持默认 False
     conveyorGround: bool = False
+    # 显式分层甲板配置（pyc-new 输送模型）：声明后由 compile_conveyor_graph 编译路由；
+    # 未声明时回退按 conveyorDirection 推导的固定 tick 行为
+    conveyorDecks: ConveyorDecks | None = None
+    # 该格上把货物在层间转运（下→上）的换层甲板位置，仅显式模型使用
+    transferDeck: Literal["lower", "upper"] | None = None
 
 
 class TopologyNode(BaseModel):
