@@ -243,9 +243,9 @@ def resume_simulation(run_id: str):
 
 
 @router.post("/simulations/{run_id}/stop", response_model=SimulationControlResponse)
-async def stop_simulation(run_id: str):
+def stop_simulation(run_id: str):
     try:
-        return await simulation_service.stop(run_id)
+        return simulation_service.stop(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
 

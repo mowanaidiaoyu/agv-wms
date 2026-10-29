@@ -85,6 +85,7 @@ def _derived_bundle(topology: dict[str, Any]) -> dict[str, Any]:
         "storage_entry_dirs": None,
         "walkable_no_storage": None,
         "shuttle_cells": None,
+        "shuttle_servable": None,
     }
     _derived_cache[id(topology)] = (topology, bundle)
     return bundle
@@ -477,6 +478,50 @@ def shuttle_rack_slots(topology: dict[str, Any]) -> list[tuple[str, int]]:
     return result
 
 
+def _shuttle_outzone_sets(topology: dict[str, Any]) -> tuple[set[tuple[int, int]], set[tuple[int, int]], set[tuple[int, int]] | None]:
+    """四向车车库外通行集合：(架空带(障碍), 地面线, 出货位闸口块(无出货位时 None))。"""
+    elevated: set[tuple[int, int]] = set()
+    ground: set[tuple[int, int]] = set()
+    for cell in topology.get("cells", []):
+        if cell.get("type") != "conveyor":
+            continue
+        if cell.get("conveyorGround"):
+            ground.add((int(cell["row"]), int(cell["col"])))
+        else:
+            elevated.add((int(cell["row"]), int(cell["col"])))
+    gates: set[tuple[int, int]] | None = None
+    for node in topology.get("nodes", []):
+        if node.get("type") != "shuttle_dock":
+            continue
+        if gates is None:
+            gates = set()
+        anchor_row, anchor_col = int(node["row"]), int(node["col"])
+        for d_row in range(2):
+            for d_col in range(2):
+                gates.add((anchor_row + d_row, anchor_col + d_col))
+    return elevated, ground, gates
+
+
+def shuttle_servable_slots(topology: dict[str, Any]) -> list[tuple[str, int]]:
+    """四向车「可服务」货位：shuttle_rack_slots 中，锚点在同层邻接巷道的槽位。
+
+    四向车不上货架：取货位的最后一步是从邻接巷道格驶上货位面，因此深藏在
+    货架内部、四邻都不是巷道的货位物理上无法服务，派单必须跳过，否则任务
+    必然 source_unreachable。结果按拓扑对象缓存。
+    """
+    bundle = _derived_bundle(topology)
+    if bundle["shuttle_servable"] is None:
+        slots = shuttle_rack_slots(topology)
+        _, aisle, _lift = build_shuttle_lookup(topology)
+        servable: list[tuple[str, int]] = []
+        for cid, layer in slots:
+            _floor, row, col = parse_cell_id(cid)
+            if any((nr, nc, layer) in aisle for nr, nc in ((row + 1, col), (row - 1, col), (row, col + 1), (row, col - 1))):
+                servable.append((cid, layer))
+        bundle["shuttle_servable"] = servable
+    return list(bundle["shuttle_servable"])
+
+
 def shortest_path_shuttle(
     topology: dict[str, Any],
     start_cell: str,
@@ -484,13 +529,20 @@ def shortest_path_shuttle(
     goal_cell: str,
     goal_layer: int,
     policy: str = "astar",
+    extra_blocked: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*，结果按 (起点, 终点, 层, 策略) 记忆化。
 
     分配器每 tick 会对同一对「空闲机器人 × 待处理任务」重复规划（机器人待命时
     位置不变），命中缓存后为 O(1)；不可达结果同样被缓存，避免每 tick 全图搜索。
     拓扑更换（新运行/编辑保存）→ 新 topology 对象 → 缓存自动失效。
+    extra_blocked：动态障碍（其它设备占用的 (row,col,layer)），每次都不同，
+    带动态障碍的规划绕过记忆化缓存直接计算。
     """
+    if extra_blocked:
+        return _shortest_path_shuttle_uncached(
+            topology, start_cell, start_layer, goal_cell, goal_layer, policy, extra_blocked
+        )
     bundle = _derived_bundle(topology)
     cache_key = (start_cell, start_layer, goal_cell, goal_layer, policy)
     cached = bundle["shuttle_paths"].get(cache_key)
@@ -511,6 +563,7 @@ def _shortest_path_shuttle_uncached(
     goal_cell: str,
     goal_layer: int,
     policy: str = "astar",
+    extra_blocked: set[tuple[int, int, int]] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*：状态为 (row, col, layer)。车库内只在巷道格水平移动、经电梯竖井跨层；
     车库外视为地面层（layer=1）的普通空格。返回 [(row, col, layer), ...]，首元素为起点。"""
@@ -524,17 +577,13 @@ def _shortest_path_shuttle_uncached(
 
     bundle = _derived_bundle(topology)
     if bundle["shuttle_cells"] is None:
+        elevated, ground, gates = _shuttle_outzone_sets(topology)
         blocked: set[tuple[int, int]] = set()
-        conveyor: set[tuple[int, int]] = set()
         for cell in topology.get("cells", []):
             if cell.get("type") == "blocked" or not cell.get("walkable", True):
                 blocked.add((int(cell["row"]), int(cell["col"])))
-            elif cell.get("type") == "conveyor":
-                # 只有架空输送带是四向车的物理障碍；地面输送线（整箱线）四向车可直接驶上沿线移动。
-                if not cell.get("conveyorGround"):
-                    conveyor.add((int(cell["row"]), int(cell["col"])))
-        bundle["shuttle_cells"] = (blocked, conveyor)
-    blocked, conveyor = bundle["shuttle_cells"]
+        bundle["shuttle_cells"] = (blocked, elevated, ground, gates)
+    blocked, elevated, ground, gates = bundle["shuttle_cells"]
 
     grid = topology.get("grid", {})
     rows = int(grid.get("rows") or 0)
@@ -547,18 +596,24 @@ def _shortest_path_shuttle_uncached(
         row, col, layer = state
         if state == start or state == goal:
             return True
+        if extra_blocked and state in extra_blocked:
+            return False
         zone = zone_at.get((row, col))
         if zone is not None:
+            # 升降通道（竖井）只用于跨层：起讫同层的任务不允许借道竖井格通行，
+            # 四向车仅在真正换层时才进入竖井（否则会与轿厢视觉重叠）。
+            if (row, col) in lift and start_layer == goal_layer:
+                return False
             # 车库内：巷道格（或电梯竖井格，已在 aisle 里登记）。
             return (row, col, layer) in aisle
-        # 车库外：仅地面层、非 blocked/输送带 的普通空格。
+        # 车库外：仅地面层，且严格限定在地面输送线上（四向车不走普通道路）。
         if layer != 1:
             return False
-        if (row, col) in blocked or (row, col) in conveyor:
+        if (row, col) in blocked or (row, col) in elevated:
             return False
         if rows > 0 and cols > 0 and not (0 <= row < rows and 0 <= col < cols):
             return False
-        return True
+        return (row, col) in ground
 
     if start == goal:
         return [start]
@@ -591,6 +646,19 @@ def _shortest_path_shuttle_uncached(
         for nxt in neighbors:
             if not is_walkable(nxt):
                 continue
+            # 出入库必须经过出货位（dock）所在 2×2 闸口块（起点/终点豁免：
+            # 交付点与当前站位本身允许在闸口之外起止）。
+            if gates is not None:
+                cur_in_zone = (row, col) in zone_at
+                nxt_in_zone = (nxt[0], nxt[1]) in zone_at
+                if cur_in_zone != nxt_in_zone:
+                    # 跨越车库边界：闸口约束作用在「车库外」的那一格上。
+                    out_cell = (nxt[0], nxt[1]) if cur_in_zone else (row, col)
+                    if out_cell not in gates and out_cell not in (
+                        (start[0], start[1]),
+                        (goal[0], goal[1]),
+                    ):
+                        continue
             new_cost = cost_so_far[current] + 1.0
             if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
                 cost_so_far[nxt] = new_cost

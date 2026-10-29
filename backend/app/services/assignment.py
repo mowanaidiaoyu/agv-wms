@@ -67,6 +67,19 @@ def task_cost(
     return len(path) + delivery_cost + battery_penalty + zone_penalty - urgent_bonus - aging_bonus
 
 
+def _assignable(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """过滤掉被前置任务阻塞的任务（blockedBy 未全部完成不可派，如等待倒库让位的取货任务）。"""
+    by_id = {task["id"]: task for task in tasks}
+
+    def ready(task: dict[str, Any]) -> bool:
+        return all(
+            (dep_task is None or dep_task.get("status") == "completed")
+            for dep_task in (by_id.get(dep_id) for dep_id in (task.get("blockedBy") or []))
+        )
+
+    return [task for task in tasks if ready(task)]
+
+
 def greedy_assign(
     robots: list[dict[str, Any]],
     tasks: list[dict[str, Any]],
@@ -75,7 +88,7 @@ def greedy_assign(
     extra_blocked: set[tuple[str, int, int]] | None = None,
 ) -> list[tuple[str, str]]:
     available = [robot for robot in robots if robot["status"] == "idle"]
-    remaining = [task for task in tasks if task["status"] == "pending"]
+    remaining = [task for task in _assignable(tasks) if task["status"] == "pending"]
     matches: list[tuple[str, str]] = []
     while available and remaining:
         best: AssignmentInput | None = None
@@ -106,7 +119,7 @@ def hungarian_assign(
     extra_blocked: set[tuple[str, int, int]] | None = None,
 ) -> list[tuple[str, str]]:
     idle_robots = [robot for robot in robots if robot["status"] == "idle"]
-    pending_tasks = [task for task in tasks if task["status"] == "pending"]
+    pending_tasks = [task for task in _assignable(tasks) if task["status"] == "pending"]
     compatible_tasks = [task for task in pending_tasks if any(robot["type"] == task["robotType"] for robot in idle_robots)]
     if not idle_robots or not compatible_tasks:
         return []
