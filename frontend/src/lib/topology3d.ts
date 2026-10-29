@@ -1147,15 +1147,19 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         const rollerCount = 10
         const rollerSpan = w * 0.92 - 0.2
         const pitch = rollerSpan / rollerCount
+        // 升降平台滚筒与输送带同约定：轴向垂直于流向、沿流向密排（与带面渲染一致，
+        // 否则升降机看起来相对皮带横放 90°）。转向移载机保持十字垂直（有意设计）。
+        const liftAlongFlow = underDir.dx !== 0
+        const liftRollerAxis: 'x' | 'z' = liftAlongFlow ? 'z' : 'x'
         for (let i = 0; i < rollerCount; i += 1) {
           const t = -rollerSpan / 2 + pitch * (i + 0.5)
           items.push({
             kind: 'cyl',
             key: `${node.id}-roller-${i}`,
-            position: rollerAxis === 'x' ? [cx, lowerDeck - rollerR, cz + t] : [cx + t, lowerDeck - rollerR, cz],
+            position: liftAlongFlow ? [cx + t, lowerDeck - rollerR, cz] : [cx, lowerDeck - rollerR, cz + t],
             radius: rollerR,
             length: w * 0.92 - 0.28,
-            axis: rollerAxis,
+            axis: liftRollerAxis,
             color: '#c7d2dd',
             floor,
             entity,
