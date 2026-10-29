@@ -2,7 +2,7 @@
   "planId": "g1b1-topology-6ceb4920-handoff-layout-v1",
   "schemaVersion": "1.0.0",
   "topologyId": "topology-6ceb4920",
-  "topologyRevision": "2.0.0:fe9fd41bf5cec86b",
+  "topologyRevision": "2.0.0:a85a404beaae5dd9",
   "overallStatus": "PARTIAL",
   "recommendedOptionId": "scheme-a-height-transfer",
   "pickingArmPreview": {
@@ -16,16 +16,16 @@
       "workRadius": 7.9
     },
     "kinematics": {
-        "upperArmLength": 4.0,
-        "forearmLength": 3.9,
-        "shoulderHeight": 4.0,
-        "baseRadius": 0.68,
-        "upperArmThickness": 0.42,
-        "forearmThickness": 0.38,
-        "jointRadius": 0.32,
-        "gripperScale": 1.45,
-        "safeTravelHeight": 6.3,
-        "linkCollisionRadius": 0.24
+      "upperArmLength": 4.0,
+      "forearmLength": 3.9,
+      "shoulderHeight": 4.0,
+      "baseRadius": 0.68,
+      "upperArmThickness": 0.42,
+      "forearmThickness": 0.38,
+      "jointRadius": 0.32,
+      "gripperScale": 1.45,
+      "safeTravelHeight": 6.3,
+      "linkCollisionRadius": 0.24
     },
     "pickup": {
       "nodeId": "existing-ground-conveyor-cell-r92-c48",
@@ -57,7 +57,7 @@
       "liftId": "shuttle-lift-b",
       "row": 98,
       "col": 49,
-      "minimumPlanarDistanceCells": 8.60
+      "minimumPlanarDistanceCells": 8.6
     },
     "downstream": {
       "nextRequiredCellId": "cell-r86-c51",
@@ -184,18 +184,66 @@
     "overheadApproach": {
       "fromTrackNodeId": "L2-r96-c19",
       "points": [
-        { "row": 96, "col": 19, "level": 2 },
-        { "row": 94, "col": 19, "level": 2 },
-        { "row": 92, "col": 19, "level": 2 },
-        { "row": 90, "col": 19, "level": 2 },
-        { "row": 88, "col": 19, "level": 2 },
-        { "row": 86, "col": 19, "level": 2 },
-        { "row": 84, "col": 19, "level": 2 },
-        { "row": 82, "col": 19, "level": 2 },
-        { "row": 80, "col": 19, "level": 2 },
-        { "row": 78, "col": 19, "level": 2 },
-        { "row": 76, "col": 19, "level": 2 },
-        { "row": 76, "col": 17, "level": 2 }
+        {
+          "row": 96,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 94,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 92,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 90,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 88,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 86,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 84,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 82,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 80,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 78,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 76,
+          "col": 19,
+          "level": 2
+        },
+        {
+          "row": 76,
+          "col": 17,
+          "level": 2
+        }
       ],
       "clearanceConflictCells": [
         "cell-r92-c19"
@@ -213,8 +261,28 @@
       "capacity": 1
     },
     "verifiedLifts": [
-      { "liftId": "shuttle-lift-a", "row": 98, "col": 21, "levels": [1, 2, 3, 4] },
-      { "liftId": "shuttle-lift-b", "row": 98, "col": 49, "levels": [1, 2, 3, 4] }
+      {
+        "liftId": "shuttle-lift-a",
+        "row": 98,
+        "col": 21,
+        "levels": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "liftId": "shuttle-lift-b",
+        "row": 98,
+        "col": 49,
+        "levels": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
     ]
   },
   "connectionOptions": [
@@ -227,23 +295,78 @@
         "inputCellId": "cell-r74-c48",
         "outputCellId": "cell-r74-c52",
         "points": [
-          { "row": 74, "col": 48, "level": 1 },
-          { "row": 74, "col": 49, "level": 1 },
-          { "row": 74, "col": 50, "level": 1 },
-          { "row": 74, "col": 51, "level": 2 },
-          { "row": 74, "col": 52, "level": 2 }
+          {
+            "row": 74,
+            "col": 48,
+            "level": 1
+          },
+          {
+            "row": 74,
+            "col": 49,
+            "level": 1
+          },
+          {
+            "row": 74,
+            "col": 50,
+            "level": 1
+          },
+          {
+            "row": 74,
+            "col": 51,
+            "level": 2
+          },
+          {
+            "row": 74,
+            "col": 52,
+            "level": 2
+          }
         ],
         "method": "guarded incline or lift-transfer with positive discharge confirmation",
         "capacity": 1
       },
       "missingConveyorRanges": [
-        { "row": 74, "colStart": 54, "colEnd": 55, "level": 2 },
-        { "row": 74, "colStart": 58, "colEnd": 59, "level": 2 },
-        { "row": 74, "colStart": 62, "colEnd": 65, "level": 2 },
-        { "row": 74, "colStart": 68, "colEnd": 73, "level": 2 },
-        { "row": 74, "colStart": 76, "colEnd": 81, "level": 2 },
-        { "row": 74, "colStart": 84, "colEnd": 89, "level": 2 },
-        { "row": 74, "colStart": 92, "colEnd": 96, "level": 2 }
+        {
+          "row": 74,
+          "colStart": 54,
+          "colEnd": 55,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 58,
+          "colEnd": 59,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 62,
+          "colEnd": 65,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 68,
+          "colEnd": 73,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 76,
+          "colEnd": 81,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 84,
+          "colEnd": 89,
+          "level": 2
+        },
+        {
+          "row": 74,
+          "colStart": 92,
+          "colEnd": 96,
+          "level": 2
+        }
       ],
       "merge": {
         "facilityId": "proposed-merge-a-r74-c67",

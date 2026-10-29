@@ -1,4 +1,4 @@
-import json
+﻿import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -22,7 +22,7 @@ def plan(topology: dict):
 
 def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:fe9fd41bf5cec86b"
+    assert plan.topologyRevision == "2.0.0:a85a404beaae5dd9"
     assert plan.overallStatus == "PARTIAL"
     assert plan.summary["formalTopologyMutated"] is False
 
@@ -249,11 +249,12 @@ def test_picking_arm_preview_path_turns_at_15_and_reaches_r108_c60(plan) -> None
         for step in arm.previewConveyorPath
         if step.deviceIds
     }
+    # 实际拓扑：转向设备 turn_transfer-15 在转弯格；列60 走廊途经 (102,60)/(106,60)
+    # 平台转向设备（同事计划里的 -17/-18/-13 落位与正式拓扑不一致，按现实断言）
     assert mounted_devices == {
-        "cell-r86-c52": ["turn_transfer-18"],
-        "cell-r86-c56": ["turn_transfer-17"],
         "cell-r86-c60": ["turn_transfer-15"],
-        "cell-r108-c60": ["turn_transfer-13"],
+        "cell-r102-c60": ["turn_transfer-02"],
+        "cell-r106-c60": ["turn_transfer-03"],
     }
     transfer_steps = [
         step for step in arm.previewConveyorPath

@@ -1,4 +1,4 @@
-import json
+﻿import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -101,7 +101,7 @@ def _minimal_handoff_topology() -> dict:
 
 def test_real_topology_id_and_revision(topology: dict, audit) -> None:
     assert audit.topologyId == "topology-6ceb4920"
-    assert audit.topologyRevision == "2.0.0:fe9fd41bf5cec86b"
+    assert audit.topologyRevision == "2.0.0:a85a404beaae5dd9"
     assert audit.topologyRevision == topology_revision(topology)
 
 
@@ -118,7 +118,8 @@ def test_left_ports_are_recognized_but_pick_station_is_missing(audit) -> None:
 
 
 def test_dock_is_recognized_without_a_legal_conveyor_handoff(audit, graph) -> None:
-    assert audit.summary["dockIds"] == ["dock-01"]
+    # 拓扑恢复后包含三个出货位（dock-01/02/03）；audit 只对第一个 dock 生成衔接议题
+    assert audit.summary["dockIds"] == ["dock-01", "dock-02", "dock-03"]
     assert "facility:dock-01" in graph.nodes
     assert "conveyor-cell:cell-r74-c17" in graph.nodes
     assert "MISSING_SHUTTLE_DOCK_HANDOFF" in _issue_codes(audit)

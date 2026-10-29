@@ -4,6 +4,7 @@ import {
   findPickingArmCollisions,
   pickingArmJointPoints,
   solvePickingArmJoints,
+  type CollisionBox,
 } from './pickingArmSafety'
 
 const kinematics: PickingArmKinematics = {
@@ -58,7 +59,7 @@ describe('picking arm safety geometry', () => {
   })
 
   it('keeps the enlarged high-base arm clear of the critical nearby L2 conveyors', () => {
-    const obstacles = [
+    const obstacles: CollisionBox[] = [
       { id: 'cell-r87-c54:L2', min: [-0.48, 2.8, 3.52], max: [0.48, 3.12, 4.48] },
       { id: 'cell-r91-c60:L2', min: [5.52, 2.8, -0.48], max: [6.48, 3.12, 0.48] },
       { id: 'cell-r86-c50:L2', min: [-4.48, 2.8, 4.52], max: [-3.52, 3.12, 5.48] },

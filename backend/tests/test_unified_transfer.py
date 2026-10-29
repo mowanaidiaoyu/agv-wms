@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -68,7 +68,7 @@ def test_pyc_topology_uses_validated_c_shuttle_graph_contract() -> None:
     contract = shuttle_contract(_topology())
 
     assert contract["topologyId"] == "topology-6ceb4920"
-    assert contract["topologyRevision"] == "2.0.0:f8f67854c2895e4f"
+    assert contract["topologyRevision"] == "2.0.0:a85a404beaae5dd9"
     assert contract["planningEnabled"] is True
     assert {lift["lift_id"] for lift in contract["lifts"]} == {
         "shuttle-lift-a",
