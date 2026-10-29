@@ -91,6 +91,167 @@ export interface TopologyPayload {
   nodes: TopologyNode[]
 }
 
+export type LayoutAuditStatus = 'PASS' | 'PARTIAL' | 'BLOCKED'
+
+export interface LayoutPosition {
+  floor: string
+  row: number
+  col: number
+  level: number
+}
+
+export interface LayoutReferenceNode {
+  referenceId: string
+  kind: string
+  networkType: string
+  position: LayoutPosition
+  sourceId: string
+  validationStatus: LayoutAuditStatus
+  evidence: string[]
+}
+
+export interface ProposedLayoutFacility {
+  facilityId: string
+  kind: string
+  networkType: string
+  position: LayoutPosition
+  spansLevels: number[]
+  status: 'proposed'
+  validationStatus: LayoutAuditStatus
+  capacity: number
+  purpose: string
+  existingRefIds: string[]
+  occupancyPolicy: 'exclusive' | 'co_located_with_reference'
+  conflicts: string[]
+  evidence: string[]
+}
+
+export interface ProposedLayoutConnection {
+  connectionId: string
+  fromId: string
+  toId: string
+  networkType: string
+  edgeType: string
+  direction: string
+  points: LayoutPosition[]
+  status: LayoutAuditStatus
+  capacity: number
+  handoffAction?: string | null
+  heightTransition?: Record<string, unknown> | null
+  requiredCellIds: string[]
+  conflicts: string[]
+  evidence: string[]
+}
+
+export interface LayoutRoute {
+  routeId: string
+  side: 'left' | 'right' | 'shared'
+  optionId: string
+  status: LayoutAuditStatus
+  facilityIds: string[]
+  connectionIds: string[]
+  blockingReasons: string[]
+}
+
+export interface LayoutOption {
+  optionId: string
+  label: string
+  status: LayoutAuditStatus
+  description: string
+  facilityIds: string[]
+  connectionIds: string[]
+  assumptions: string[]
+  blockingReasons: string[]
+}
+
+export interface PickingArmEndpoint {
+  nodeId: string
+  topologyCellId?: string | null
+  position: LayoutPosition
+  beltHeight: number
+  deckIndex?: number | null
+  direction?: string | null
+  provenance: 'topology' | 'proposed'
+  validationStatus: LayoutAuditStatus
+  evidence: string[]
+}
+
+export interface PickingArmConveyorStep {
+  cellId: string
+  position: LayoutPosition
+  direction: string
+  beltHeight: number
+  deviceIds: string[]
+  transitionToNext: 'conveyor' | 'device_transfer' | 'endpoint'
+  transferDeviceId?: string | null
+}
+
+export interface PickingArmKinematics {
+  upperArmLength: number
+  forearmLength: number
+  shoulderHeight: number
+  baseRadius: number
+  upperArmThickness: number
+  forearmThickness: number
+  jointRadius: number
+  gripperScale: number
+  safeTravelHeight: number
+  linkCollisionRadius: number
+}
+
+export interface PickingArmLayout {
+  armId: string
+  status: 'proposed'
+  validationStatus: LayoutAuditStatus
+  installation: LayoutPosition
+  mountHeight: number
+  workRadius: number
+  kinematics: PickingArmKinematics
+  pickup: PickingArmEndpoint
+  dropoff: PickingArmEndpoint
+  liftBId: string
+  liftBPosition: LayoutPosition
+  liftBClearanceCells: number
+  downstreamCellId: string
+  downstreamStatus: LayoutAuditStatus
+  previewConveyorPath: PickingArmConveyorStep[]
+  previewEndpointId: string
+  previewPathStatus: LayoutAuditStatus
+  previewStopReason: string
+  previewTransferDeviceId?: string | null
+  previewTransferStatus?: LayoutAuditStatus | null
+  previewTransferEvidence: string[]
+  actionSequence: string[]
+  requiredAuthoritativeSignals: string[]
+  canDeclareDelivery: boolean
+  evidence: string[]
+}
+
+export interface TransportLayoutPlan {
+  planId: string
+  schemaVersion: string
+  topologyId: string
+  topologyRevision: string
+  overallStatus: LayoutAuditStatus
+  recommendedOptionId: string
+  pickingArm?: PickingArmLayout | null
+  references: LayoutReferenceNode[]
+  facilities: ProposedLayoutFacility[]
+  connections: ProposedLayoutConnection[]
+  routes: LayoutRoute[]
+  options: LayoutOption[]
+  issues: Array<{
+    code: string
+    severity: 'INFO' | 'WARNING' | 'ERROR'
+    sourceId?: string | null
+    targetId?: string | null
+    reason: string
+    evidence: string[]
+  }>
+  summary: Record<string, unknown>
+  assumptions: string[]
+}
+
 export interface StoredRecord<T> {
   id: string
   name: string

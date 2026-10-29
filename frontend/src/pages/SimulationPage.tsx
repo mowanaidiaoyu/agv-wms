@@ -33,6 +33,7 @@ import { TransferInventoryPanel } from '../components/simulation/TransferInvento
 import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
 import { createDemoOrders } from '../lib/orders'
+import { findLayoutPreviewItem } from '../lib/transportLayout'
 import { usePlatformStore } from '../store/usePlatformStore'
 import type { ShuttleTransferInput, SimulationAlert, SimulationOrderInput } from '../types'
 
@@ -100,6 +101,12 @@ export function SimulationPage() {
   const [selectedRobotId, setSelectedRobotId] = useState('')
   const [followSelectedRobot, setFollowSelectedRobot] = useState(false)
   const [showInventoryBoxes, setShowInventoryBoxes] = useState(false)
+  const [showLayoutPreview, setShowLayoutPreview] = useState(false)
+  const [showPickingArmPreview, setShowPickingArmPreview] = useState(false)
+  const [pickingArmPreviewCycle, setPickingArmPreviewCycle] = useState(0)
+  const [pickingArmResetRequest, setPickingArmResetRequest] = useState(0)
+  const [selectedLayoutOptionId, setSelectedLayoutOptionId] = useState('')
+  const [selectedLayoutItemId, setSelectedLayoutItemId] = useState('')
   const [focusRequest, setFocusRequest] = useState(0)
   const [pickupNotice, setPickupNotice] = useState<{
     id: string
@@ -151,6 +158,18 @@ export function SimulationPage() {
     enabled: Boolean(resolvedTopologyId),
     retry: false,
   })
+  const transportLayoutQuery = useQuery({
+    queryKey: ['transport-layout-plan', resolvedTopologyId],
+    queryFn: () => api.getTransportLayoutPlan(resolvedTopologyId),
+    enabled: Boolean(resolvedTopologyId),
+    retry: false,
+  })
+  useEffect(() => {
+    const plan = transportLayoutQuery.data
+    if (!plan) return
+    setSelectedLayoutOptionId(plan.recommendedOptionId)
+    setSelectedLayoutItemId('')
+  }, [transportLayoutQuery.data])
   useEffect(() => {
     if (resolvedTopologyId && resolvedTopologyId !== selectedTopologyId) {
       setSelectedTopologyId(resolvedTopologyId)
@@ -164,6 +183,9 @@ export function SimulationPage() {
     : undefined
   const topologyIdForBoard = currentState?.topologyId || resolvedTopologyId
   const currentTopology = availableTopologies.find((item) => item.id === resolvedTopologyId)
+  const selectedLayoutItem = transportLayoutQuery.data && selectedLayoutItemId
+    ? findLayoutPreviewItem(transportLayoutQuery.data, selectedLayoutItemId)
+    : undefined
 
   useEffect(() => {
     if (candidateState?.topologyId && resolvedTopologyId && candidateState.topologyId !== resolvedTopologyId) {
@@ -329,10 +351,12 @@ export function SimulationPage() {
   }
 
   async function resetRunState() {
-    if (!selectedRunId) return
-    await api.resetSimulation(selectedRunId)
-    clearLiveEvents()
-    await refreshRunState()
+    setPickingArmResetRequest((request) => request + 1)
+    if (selectedRunId) {
+      await api.resetSimulation(selectedRunId)
+      clearLiveEvents()
+      await refreshRunState()
+    }
   }
 
   const sortedTasks = useMemo(() => [...(currentState?.tasks ?? [])].sort((left, right) => {
@@ -465,7 +489,7 @@ export function SimulationPage() {
             <Square size={16} />
             停止
           </button>
-          <button className="ghost-button" onClick={() => void resetRunState()} disabled={!selectedRunId} type="button">
+          <button className="ghost-button" onClick={() => void resetRunState()} disabled={!selectedRunId && !showPickingArmPreview} type="button">
             <RotateCcw size={16} />
             重置
           </button>
@@ -563,7 +587,127 @@ export function SimulationPage() {
               >
                 彩色库存
               </button>
+              <button
+                className={`ghost-button topology-floor-chip ${showLayoutPreview ? 'topology-floor-chip-active' : ''}`}
+                type="button"
+                aria-label="接驳布局预览"
+                aria-pressed={showLayoutPreview}
+                disabled={!transportLayoutQuery.data}
+                title={transportLayoutQuery.isError ? '当前拓扑没有兼容的接驳方案，或 Revision 不匹配' : '显示独立 proposed 布局，不修改正式拓扑'}
+                onClick={() => setShowLayoutPreview((visible) => !visible)}
+              >
+                接驳布局
+              </button>
+              <button
+                className={`ghost-button topology-floor-chip ${showPickingArmPreview ? 'topology-floor-chip-active' : ''}`}
+                type="button"
+                aria-label="人工拣选出口机械臂预览"
+                aria-pressed={showPickingArmPreview}
+                disabled={!transportLayoutQuery.data?.pickingArm}
+                title="独立视觉预览；不会扣库存、累计交付或完成订单"
+                onClick={() => {
+                  setShowPickingArmPreview((visible) => {
+                    if (!visible) setPickingArmPreviewCycle((cycle) => cycle + 1)
+                    return !visible
+                  })
+                }}
+              >
+                机械臂预览
+              </button>
             </div>
+
+            {showLayoutPreview && transportLayoutQuery.data ? (
+              <aside className="simulation-layout-preview-panel" aria-label="接驳布局预览面板">
+                <header>
+                  <div>
+                    <strong>接驳布局预览</strong>
+                    <span>{transportLayoutQuery.data.planId}</span>
+                  </div>
+                  <b className={`layout-status layout-status-${transportLayoutQuery.data.overallStatus.toLowerCase()}`}>
+                    {transportLayoutQuery.data.overallStatus}
+                  </b>
+                </header>
+                <p>仅显示 proposed 施工方案；不会写入拓扑、库存或仿真状态。</p>
+                <div className="simulation-layout-options" role="group" aria-label="接驳方案">
+                  {transportLayoutQuery.data.options.map((option) => (
+                    <button
+                      key={option.optionId}
+                      type="button"
+                      className={selectedLayoutOptionId === option.optionId ? 'active' : ''}
+                      onClick={() => {
+                        setSelectedLayoutOptionId(option.optionId)
+                        setSelectedLayoutItemId('')
+                      }}
+                    >
+                      <span>{option.label}</span>
+                      <small>{option.status}</small>
+                    </button>
+                  ))}
+                </div>
+                <div className="simulation-layout-legend" aria-label="预览图例">
+                  <span><i className="legend-left" />左侧 CTU</span>
+                  <span><i className="legend-right" />右侧 Shuttle</span>
+                  <span><i className="legend-verified" />真实已验证</span>
+                  <span><i className="legend-proposed" />拟新增</span>
+                  <span><i className="legend-blocked" />阻断/冲突</span>
+                  <span><i className="legend-merge" />Merge/Outbound</span>
+                </div>
+                {selectedLayoutItem ? (
+                  <section className="simulation-layout-selection" aria-label="候选设施详情">
+                    <strong>
+                      {'facilityId' in selectedLayoutItem
+                        ? selectedLayoutItem.facilityId
+                        : 'referenceId' in selectedLayoutItem
+                          ? selectedLayoutItem.referenceId
+                          : selectedLayoutItem.connectionId}
+                    </strong>
+                    <span>
+                      {'position' in selectedLayoutItem
+                        ? `r${selectedLayoutItem.position.row}, c${selectedLayoutItem.position.col}, L${selectedLayoutItem.position.level}`
+                        : `${selectedLayoutItem.direction} · ${selectedLayoutItem.edgeType}`}
+                    </span>
+                    {'purpose' in selectedLayoutItem ? <p>{selectedLayoutItem.purpose}</p> : null}
+                    {'handoffAction' in selectedLayoutItem && selectedLayoutItem.handoffAction
+                      ? <p>{selectedLayoutItem.handoffAction}</p>
+                      : null}
+                    {'conflicts' in selectedLayoutItem && selectedLayoutItem.conflicts.length ? (
+                      <ul>{selectedLayoutItem.conflicts.map((conflict) => <li key={conflict}>{conflict}</li>)}</ul>
+                    ) : null}
+                  </section>
+                ) : (
+                  <small className="simulation-layout-hint">点击场景中的候选设施、路径或绿色真实节点查看详情。</small>
+                )}
+              </aside>
+            ) : null}
+
+            {showPickingArmPreview && transportLayoutQuery.data?.pickingArm ? (
+              <aside className="simulation-arm-preview-panel" aria-label="人工拣选出口机械臂预览面板">
+                <header>
+                  <div>
+                    <strong>人工拣选出口机械臂</strong>
+                    <span>{transportLayoutQuery.data.pickingArm.armId}</span>
+                  </div>
+                  <b className="layout-status layout-status-partial">PREVIEW</b>
+                </header>
+                <p>搬运已拣订单周转箱；动画结束不会更改库存、订单交付数或订单状态。</p>
+                <dl>
+                  <div><dt>安装</dt><dd>r{transportLayoutQuery.data.pickingArm.installation.row},c{transportLayoutQuery.data.pickingArm.installation.col},L{transportLayoutQuery.data.pickingArm.installation.level}</dd></div>
+                  <div><dt>取货</dt><dd>{transportLayoutQuery.data.pickingArm.pickup.topologyCellId} · ground</dd></div>
+                  <div><dt>放货</dt><dd>{transportLayoutQuery.data.pickingArm.dropoff.topologyCellId} · L{transportLayoutQuery.data.pickingArm.dropoff.position.level}</dd></div>
+                  <div><dt>转向</dt><dd>{transportLayoutQuery.data.pickingArm.previewTransferDeviceId} · r86,c60 · PARTIAL</dd></div>
+                  <div><dt>终点</dt><dd>{transportLayoutQuery.data.pickingArm.previewEndpointId} · 预览路径终点</dd></div>
+                  <div><dt>路径</dt><dd>{transportLayoutQuery.data.pickingArm.previewConveyorPath.length} 个真实 Conveyor 节点</dd></div>
+                </dl>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setPickingArmPreviewCycle((cycle) => cycle + 1)}
+                >
+                  重新装载预览周转箱
+                </button>
+                <small>暂停、继续、1×/2×/4× 与重置复用页面上方 Run 控制。</small>
+              </aside>
+            ) : null}
 
             {focusTask ? (
               <div className="simulation-task-focus-card" aria-label="当前聚焦任务">
@@ -631,6 +775,15 @@ export function SimulationPage() {
                     onSelectRobot={(id) => setSelectedRobotId(id)}
                     paused={currentState?.status === 'paused'}
                     transitionDuration={currentState?.tickIntervalSeconds ?? 0.3}
+                    layoutPlan={transportLayoutQuery.data}
+                    layoutPreviewVisible={showLayoutPreview}
+                    layoutOptionId={selectedLayoutOptionId}
+                    selectedLayoutItemId={selectedLayoutItemId}
+                    onSelectLayoutItem={setSelectedLayoutItemId}
+                    pickingArmPreviewVisible={showPickingArmPreview}
+                    pickingArmPreviewCycleToken={`arm-preview-${pickingArmPreviewCycle}`}
+                    pickingArmResetRequest={pickingArmResetRequest}
+                    speedMultiplier={speedMultiplier}
                   />
                 </Suspense>
               </SimulationSceneBoundary>

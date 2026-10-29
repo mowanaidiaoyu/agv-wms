@@ -13,11 +13,15 @@ from ..schemas import (
     SimulationSpeedRequest,
     SimulationSpeedResponse,
     SimulationStartRequest,
+    TransportLayoutPlanResponse,
+    TransportNetworkAuditResponse,
     TopologyPayload,
 )
 from ..services.goods import build_inventory, load_catalog
 from ..services.runtime import repo, simulation_service
 from ..services.shuttle_topology import topology_revision
+from ..services.transport_layout import LayoutRevisionMismatch, load_transport_layout_plan
+from ..services.transport_network import audit_transport_network
 from ..services.unified_transfer import plan_transfer, shuttle_contract
 
 router = APIRouter(prefix=API_PREFIX)
@@ -55,6 +59,33 @@ def get_topology(topology_id: str):
     if not topology:
         raise HTTPException(status_code=404, detail="Topology not found")
     return topology
+
+
+@router.get(
+    "/topologies/{topology_id}/transport-network/audit",
+    response_model=TransportNetworkAuditResponse,
+)
+def get_transport_network_audit(topology_id: str):
+    topology = repo.get_topology_read_only(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    return audit_transport_network(topology["payload"])
+
+
+@router.get(
+    "/topologies/{topology_id}/transport-layout-plan",
+    response_model=TransportLayoutPlanResponse,
+)
+def get_transport_layout_plan(topology_id: str):
+    topology = repo.get_topology_read_only(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    try:
+        return load_transport_layout_plan(topology["payload"])
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Transport layout plan not found") from error
+    except LayoutRevisionMismatch as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.delete("/topologies/{topology_id}")

@@ -4,6 +4,8 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Group, MOUSE, Mesh, Vector3 } from 'three'
 import { BatchedTopologyMeshes, GoodsBoxes, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
+import { TransportLayoutPreview } from './TransportLayoutPreview'
+import { PickingArmHandoff, type PickingArmCargo } from './PickingArmHandoff'
 import {
   CELL,
   CONVEYOR_DECK_BASE,
@@ -33,6 +35,7 @@ import type {
   SimulationRobot,
   SimulationTask,
   TopologyPayload,
+  TransportLayoutPlan,
   TransferInventoryBalance,
 } from '../../types'
 
@@ -50,6 +53,16 @@ export type Simulation3DSceneProps = {
   onSelectRobot?: (robotId: string) => void
   paused?: boolean
   transitionDuration?: number
+  layoutPlan?: TransportLayoutPlan
+  layoutPreviewVisible?: boolean
+  layoutOptionId?: string
+  selectedLayoutItemId?: string
+  onSelectLayoutItem?: (itemId: string) => void
+  pickingArmPreviewVisible?: boolean
+  pickingArmPreviewCycleToken?: string
+  pickingArmResetRequest?: number
+  pickingArmCargo?: PickingArmCargo
+  speedMultiplier?: 1 | 2 | 4
 }
 
 const SHUTTLE_COLOR = '#c084fc'
@@ -818,6 +831,21 @@ function Simulation3DScene({
   onSelectRobot,
   paused = false,
   transitionDuration = 0.3,
+  layoutPlan,
+  layoutPreviewVisible = false,
+  layoutOptionId = '',
+  selectedLayoutItemId = '',
+  onSelectLayoutItem,
+  pickingArmPreviewVisible = false,
+  pickingArmPreviewCycleToken = 'arm-preview-0',
+  pickingArmResetRequest = 0,
+  pickingArmCargo = {
+    toteId: 'preview-tote-sku-a',
+    orderId: 'ORDER-PREVIEW',
+    skuId: 'SKU-A',
+    pickedQuantity: 10,
+  },
+  speedMultiplier = 1,
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
@@ -1411,6 +1439,30 @@ function Simulation3DScene({
           />
         )
       })}
+
+      {layoutPreviewVisible && layoutPlan && layoutOptionId ? (
+        <TransportLayoutPreview
+          plan={layoutPlan}
+          optionId={layoutOptionId}
+          cols={spec.cols}
+          rows={spec.rows}
+          selectedItemId={selectedLayoutItemId}
+          onSelectItem={onSelectLayoutItem}
+        />
+      ) : null}
+
+      {pickingArmPreviewVisible && layoutPlan?.pickingArm && activeFloor === '1F' ? (
+        <PickingArmHandoff
+          topology={topology}
+          layout={layoutPlan.pickingArm}
+          cargo={pickingArmCargo}
+          preview
+          previewCycleToken={pickingArmPreviewCycleToken}
+          paused={paused}
+          speedMultiplier={speedMultiplier}
+          resetRequest={pickingArmResetRequest}
+        />
+      ) : null}
 
       {routePoints.length > 1 ? (
         <Line

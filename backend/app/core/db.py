@@ -88,6 +88,23 @@ def get_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def get_read_conn() -> Iterator[sqlite3.Connection]:
+    """Open the existing database in SQLite read-only mode.
+
+    Diagnostic GET endpoints use this path so they cannot initialize tables,
+    commit a transaction, create a run, or mutate inventory/event state.
+    """
+
+    uri = f"{DB_PATH.resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return dict(row) if row is not None else {}
 

@@ -10,6 +10,7 @@ import type {
   SimulationTask,
   StoredRecord,
   TopologyPayload,
+  TransportLayoutPlan,
 } from '../types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -82,6 +83,9 @@ export const api = {
   },
   getTopology(topologyId: string) {
     return request<StoredRecord<TopologyPayload>>(`/topologies/${topologyId}`)
+  },
+  getTransportLayoutPlan(topologyId: string) {
+    return request<TransportLayoutPlan>(`/topologies/${topologyId}/transport-layout-plan`)
   },
   saveTopology(payload: TopologyPayload) {
     return request<StoredRecord<TopologyPayload>>(`/topologies${payload.id ? '' : ''}`, {
