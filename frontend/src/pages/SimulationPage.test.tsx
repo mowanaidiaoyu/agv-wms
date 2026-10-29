@@ -161,6 +161,8 @@ vi.mock('../lib/api', () => ({
       warnings: [],
     })),
     startSimulation: vi.fn(),
+    insertSimulationOrder: vi.fn(),
+    cancelSimulationOrder: vi.fn(),
     pauseSimulation: vi.fn(),
     resumeSimulation: vi.fn(),
     stopSimulation: vi.fn(),
@@ -192,6 +194,8 @@ describe('SimulationPage', () => {
       liveEvents: [],
     })
     vi.mocked(api.startSimulation).mockReset()
+    vi.mocked(api.insertSimulationOrder).mockReset()
+    vi.mocked(api.cancelSimulationOrder).mockReset()
     vi.mocked(api.resetSimulation).mockReset()
     vi.mocked(api.getSimulationState).mockReset()
     vi.mocked(api.getTopology).mockResolvedValue({ id: topology.id, name: topology.name, payload: topology })
@@ -237,9 +241,12 @@ describe('SimulationPage', () => {
     )
 
     expect(await screen.findByTestId('simulation-3d')).toBeInTheDocument()
+    expect(sceneMock.lastProps).toMatchObject({ followSelectedRobot: false })
     expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
-    expect((await screen.findAllByText('ORD-DEMO-002')).length).toBeGreaterThan(0)
     expect(screen.getByText('订单队列')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: '新建订单' })).toHaveLength(1)
+    expect(screen.getByLabelText('订单拆解与 CTU 分配')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '7车联动订单' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '实时指标' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '设备状态' })).not.toBeInTheDocument()
 
@@ -250,6 +257,132 @@ describe('SimulationPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '关闭运行详情' }))
     expect(screen.queryByRole('heading', { name: '设备状态' })).not.toBeInTheDocument()
+  })
+
+  it('inserts a new order into the active run and refreshes the authoritative queue', async () => {
+    usePlatformStore.setState({
+      selectedTopologyId: topology.id,
+      selectedRunId: 'run-active',
+      liveState: {
+        id: 'run-active',
+        status: 'running',
+        tick: 12,
+        topologyId: topology.id,
+        robots: [],
+        tasks: [],
+        orders: [],
+        inventory: [],
+        alerts: [],
+        queues: { conveyor: [], station: [], buffer: [] },
+        createdAt: '2026-10-28T00:00:00Z',
+        updatedAt: '2026-10-28T00:00:12Z',
+      },
+    })
+    vi.mocked(api.insertSimulationOrder).mockImplementation(async (_runId, order) => ({
+      id: 'run-active',
+      status: 'running',
+      tick: 12,
+      topologyId: topology.id,
+      robots: [],
+      tasks: [],
+      orders: [{
+        ...order,
+        status: 'waiting_dispatch',
+        statusLabel: '等待调度',
+        taskIds: [],
+        totalTasks: 0,
+        completedTasks: 0,
+        progress: 0,
+      }],
+      inventory: [],
+      alerts: [],
+      queues: { conveyor: [], station: [], buffer: [] },
+      createdAt: '2026-10-28T00:00:00Z',
+      updatedAt: '2026-10-28T00:00:12Z',
+    }))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
+    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
+
+    await waitFor(() => expect(api.insertSimulationOrder).toHaveBeenCalledWith(
+      'run-active',
+      expect.objectContaining({ lines: expect.any(Array) }),
+    ))
+    const inserted = vi.mocked(api.insertSimulationOrder).mock.calls[0][1]
+    expect(await screen.findByText(`订单 ${inserted.id} 已插入当前仿真并进入调度。`)).toBeInTheDocument()
+    expect(screen.getAllByText(inserted.id).length).toBeGreaterThan(0)
+  })
+
+  it('shows and deletes a next-run draft immediately after the current run is stopped', async () => {
+    usePlatformStore.setState({
+      selectedTopologyId: topology.id,
+      selectedRunId: 'run-stopped',
+      liveState: {
+        id: 'run-stopped',
+        status: 'stopped',
+        tick: 28,
+        topologyId: topology.id,
+        robots: [],
+        tasks: [],
+        orders: [{
+          id: 'ORD-HISTORY-001',
+          priority: 'normal',
+          dispatchMode: 'parallel',
+          maxParallelCtu: 7,
+          targetStation: '出库口 01',
+          createdAt: '2026-10-28T00:00:00Z',
+          lines: [{ id: 'history-line', skuId: 'sku-1', skuName: '六角螺栓 M8', quantity: 1 }],
+          status: 'completed',
+          statusLabel: '已完成',
+          taskIds: [],
+          totalTasks: 1,
+          completedTasks: 1,
+          progress: 100,
+        }],
+        inventory: [],
+        alerts: [],
+        queues: { conveyor: [], station: [], buffer: [] },
+        createdAt: '2026-10-28T00:00:00Z',
+        updatedAt: '2026-10-28T00:00:28Z',
+      },
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    expect(screen.getAllByText('ORD-HISTORY-001').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
+    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
+
+    const removeButton = await screen.findByRole('button', { name: /删除订单 ORD-/ })
+    const draftId = removeButton.getAttribute('aria-label')?.replace('删除订单 ', '') ?? ''
+    expect(draftId).toMatch(/^ORD-/)
+    expect(screen.getAllByText(draftId).length).toBeGreaterThan(0)
+    expect(screen.getByText('待下次启动')).toBeInTheDocument()
+    expect(api.insertSimulationOrder).not.toHaveBeenCalled()
+
+    fireEvent.click(removeButton)
+    await waitFor(() => expect(screen.queryByRole('button', { name: `删除订单 ${draftId}` })).not.toBeInTheDocument())
+    expect(screen.getAllByText('ORD-HISTORY-001').length).toBeGreaterThan(0)
+    confirm.mockRestore()
   })
 
   it('keeps one 3D scene mounted while transfer and inventory tabs render distinct content', async () => {
@@ -493,7 +626,11 @@ describe('SimulationPage', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '运行中' })).toBeDisabled())
     expect(api.startSimulation).toHaveBeenCalledWith(
       topology.id,
-      expect.arrayContaining([expect.objectContaining({ id: 'ORD-DEMO-001' })]),
+      expect.arrayContaining([expect.objectContaining({
+        id: 'ORD-DEMO-001',
+        dispatchMode: 'parallel',
+        maxParallelCtu: 7,
+      })]),
       [],
     )
     expect(within(screen.getByLabelText('仿真运行状态')).getByText('运行中')).toBeInTheDocument()

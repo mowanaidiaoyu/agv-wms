@@ -108,6 +108,18 @@ export const api = {
       body: JSON.stringify({ topologyId, orders, transfers }),
     })
   },
+  insertSimulationOrder(runId: string, order: SimulationOrderInput) {
+    return request<SimulationState>(`/simulations/${runId}/orders`, {
+      method: 'POST',
+      body: JSON.stringify(order),
+    })
+  },
+  cancelSimulationOrder(runId: string, orderId: string, reason = '用户取消') {
+    return request<SimulationState>(`/simulations/${runId}/orders/${orderId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    })
+  },
   pauseSimulation(runId: string) {
     return request<{ runId: string; status: string }>(`/simulations/${runId}/pause`, { method: 'POST' })
   },

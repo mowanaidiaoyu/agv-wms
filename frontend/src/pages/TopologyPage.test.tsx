@@ -65,6 +65,10 @@ describe('TopologyPage', () => {
 
     // 画布是 3D 场景，而非 2D 棋盘（无「适配 / 100%」控件）
     expect(await screen.findByTestId('topology-3d')).toBeInTheDocument()
+    expect(screen.getByLabelText('仓库方向罗盘')).toHaveTextContent('北')
+    expect(screen.getByLabelText('仓库方向罗盘')).toHaveTextContent('东')
+    expect(screen.getByLabelText('仓库方向罗盘')).toHaveTextContent('南')
+    expect(screen.getByLabelText('仓库方向罗盘')).toHaveTextContent('西')
     expect(screen.queryByRole('button', { name: /适配全图|适配/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /100%/ })).not.toBeInTheDocument()
   })

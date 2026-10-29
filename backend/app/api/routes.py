@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from ..core.config import API_PREFIX
 from ..schemas import (
@@ -10,6 +11,8 @@ from ..schemas import (
     ShuttlePlanRequest,
     ShuttleTransferFailRequest,
     SimulationControlResponse,
+    SimulationOrderCancelRequest,
+    SimulationOrderInput,
     SimulationSpeedRequest,
     SimulationSpeedResponse,
     SimulationStartRequest,
@@ -49,8 +52,16 @@ def list_topologies():
 
 
 @router.post("/topologies")
-def create_topology(payload: TopologyPayload):
-    return repo.upsert_topology(payload.id, payload.name, payload.model_dump(by_alias=True))
+async def create_topology(request: Request):
+    # 原始 JSON 直通：pydantic 重新序列化会给可选字段补/删 null，导致
+    # 拓扑 revision 与 data/topology_666.json / 配置戳 / 测试断言出现伪差异。
+    # 这里只校验、不重建，入库结构与客户端发来的完全一致。
+    raw = await request.json()
+    try:
+        TopologyPayload.model_validate(raw)
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error.errors()[:5])) from error
+    return repo.upsert_topology(str(raw["id"]), str(raw["name"]), raw)
 
 
 @router.get("/topologies/{topology_id}")
@@ -187,6 +198,40 @@ def pause_simulation(run_id: str):
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@router.post("/simulations/{run_id}/orders")
+async def insert_simulation_order(run_id: str, payload: SimulationOrderInput):
+    """向已在运行或暂停的 Run 原子插入订单，返回最新权威状态。"""
+    try:
+        state = await simulation_service.add_order(run_id, payload.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Run not found")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(
+        json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"),
+        media_type="application/json",
+    )
+
+
+@router.post("/simulations/{run_id}/orders/{order_id}/cancel")
+async def cancel_simulation_order(
+    run_id: str,
+    order_id: str,
+    payload: SimulationOrderCancelRequest,
+):
+    """安全取消订单：未取货任务直接释放，已取货任务先回库。"""
+    try:
+        state = await simulation_service.cancel_order(run_id, order_id, payload.reason)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Run or order not found")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(
+        json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"),
+        media_type="application/json",
+    )
+
+
 @router.post("/simulations/{run_id}/resume", response_model=SimulationControlResponse)
 def resume_simulation(run_id: str):
     try:
@@ -198,9 +243,9 @@ def resume_simulation(run_id: str):
 
 
 @router.post("/simulations/{run_id}/stop", response_model=SimulationControlResponse)
-def stop_simulation(run_id: str):
+async def stop_simulation(run_id: str):
     try:
-        return simulation_service.stop(run_id)
+        return await simulation_service.stop(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
 

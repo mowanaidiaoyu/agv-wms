@@ -16,7 +16,7 @@ const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
   ctu_robot: '点击放单个；拖拽矩形批量放置 CTU 设备',
   shuttle_robot: '点击放单个；拖拽矩形批量放置四向车设备',
   lift_transfer: '点击放单个；拖拽矩形批量放置升降移载机（可落在输送带格上）',
-  turn_transfer: '点击放单个；拖拽矩形批量放置转向移载机（可落在输送带格上）',
+  turn_transfer: '点击放置单层转向移载机；放置后可选择上层或下层，并手动设置入口与出口方向',
   shuttle_dock: '放在地面输送线上：设置取什么货物、取多少；仿真启动后四向车取货驶出，在此交付沿带面运走',
 }
 

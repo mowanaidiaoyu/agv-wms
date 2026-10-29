@@ -201,10 +201,7 @@ function DockCard({
             <div key={task.id} className={`shuttle-delivery-task ${task.status === 'completed' ? 'done' : ''}`}>
               <div className="shuttle-delivery-task-head">
                 <b>{task.id}</b>
-                <span>
-                  {task.taskKind === 'relocate' ? '倒库 · ' : ''}
-                  {task.phaseLabel || task.status}
-                </span>
+                <span>{task.phaseLabel || task.status}</span>
               </div>
               <div className="shuttle-delivery-task-meta">
                 <span>

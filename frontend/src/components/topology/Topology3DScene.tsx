@@ -1,8 +1,8 @@
 import { useMemo, useRef, useState } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { Canvas, useFrame } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { MOUSE } from 'three'
+import { MOUSE, Vector3 } from 'three'
 import {
   BatchedTopologyMeshes,
   GoodsBoxes,
@@ -29,7 +29,7 @@ import {
   type SceneSpec,
   type SceneTower,
 } from '../../lib/topology3d'
-import type { CellBox } from '../../lib/topology'
+import { conveyorBlockCellIds, type CellBox } from '../../lib/topology'
 import type { EditorObjectType, GoodsSlot, TopologyPayload, ZoneType } from '../../types'
 import type { TopologySelection } from '../../store/useTopologyEditorStore'
 
@@ -45,6 +45,33 @@ export type Topology3DSceneProps = {
   onCellEnter: (row: number, col: number) => void
   onEntityDown: (kind: SceneEntityKind, id: string, floor: string) => void
   onMoveCell: (row: number, col: number) => void
+  onCompassAngleChange?: (angle: number) => void
+}
+
+function CompassOrientationReporter({
+  target,
+  onChange,
+}: {
+  target: [number, number, number]
+  onChange?: (angle: number) => void
+}) {
+  const lastAngle = useRef<number | null>(null)
+  const origin = useMemo(() => new Vector3(), [])
+  const north = useMemo(() => new Vector3(), [])
+
+  useFrame(({ camera }) => {
+    if (!onChange) return
+    origin.set(target[0], target[1], target[2]).project(camera)
+    north.set(target[0], target[1], target[2] + 5).project(camera)
+    const dx = north.x - origin.x
+    const dy = north.y - origin.y
+    if (Math.abs(dx) + Math.abs(dy) < 0.0001) return
+    const angle = Math.atan2(dx, dy)
+    if (lastAngle.current !== null && Math.abs(angle - lastAngle.current) < 0.005) return
+    lastAngle.current = angle
+    onChange(angle)
+  })
+  return null
 }
 
 function isLeftButton(e: ThreeEvent<PointerEvent>): boolean {
@@ -102,6 +129,7 @@ function useGoodsLayer(topology: TopologyPayload, goods: GoodsSlot[], floors: st
 }
 
 function SceneContent({
+  topology,
   spec,
   goodsBoxes,
   activeFloor,
@@ -114,6 +142,7 @@ function SceneContent({
   onEntityDown,
   onMoveCell,
 }: {
+  topology: TopologyPayload
   spec: SceneSpec
   goodsBoxes: SceneBox[]
   activeFloor: string
@@ -154,7 +183,12 @@ function SceneContent({
     const ids = new Set<string>()
     if (!selection) return ids
     if (selection.kind === 'cell') {
-      ids.add(selection.id)
+      const cell = topology.cells.find((item) => item.id === selection.id)
+      if (cell?.type === 'conveyor') {
+        for (const id of conveyorBlockCellIds(topology, selection.id)) ids.add(id)
+      } else {
+        ids.add(selection.id)
+      }
     } else if (selection.kind === 'node') {
       // 节点可能由多个 box 组成（如 CTU 车 5 层载货位），按 entity 匹配整组高亮
       for (const item of spec.items) {
@@ -164,7 +198,7 @@ function SceneContent({
       for (const item of spec.items) {
         if (item.entity?.kind === 'zone' && item.entity.id === selection.id) ids.add(item.key)
       }
-    } else if (selection.kind === 'storage-batch' || selection.kind === 'conveyor-batch' || selection.kind === 'conveyor-run') {
+    } else if (selection.kind === 'storage-batch' || selection.kind === 'conveyor-batch') {
       for (const id of selection.ids) ids.add(id)
     } else if (selection.kind === 'shuttle-batch') {
       const slotKey = (r: number, c: number) => `${r}:${c}`
@@ -328,6 +362,7 @@ export default function Topology3DScene({
   onCellEnter,
   onEntityDown,
   onMoveCell,
+  onCompassAngleChange,
 }: Topology3DSceneProps) {
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   const goodsBoxes = useGoodsLayer(topology, goods ?? [], spec.floors)
@@ -343,6 +378,7 @@ export default function Topology3DScene({
       <color attach="background" args={['#0a0f19']} />
       <fog attach="fog" args={['#0a0f19', 500, 1600]} />
       <SceneContent
+        topology={topology}
         spec={spec}
         goodsBoxes={goodsBoxes}
         activeFloor={activeFloor}
@@ -355,6 +391,7 @@ export default function Topology3DScene({
         onEntityDown={onEntityDown}
         onMoveCell={onMoveCell}
       />
+      <CompassOrientationReporter target={spec.camera.target} onChange={onCompassAngleChange} />
       <OrbitControls
         makeDefault
         target={spec.camera.target}

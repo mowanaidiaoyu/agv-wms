@@ -13,27 +13,7 @@ NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "tu
 SimulationStatus = Literal["idle", "running", "paused", "stopped", "completed"]
 
 
-class ConveyorDeckConfig(BaseModel):
-    """输送线单层甲板的显式配置：进出侧、用途、速度与容量。"""
-
-    enabled: bool = True
-    inputSide: ConveyorSide
-    outputSide: ConveyorSide
-    role: Literal["outbound", "return", "custom"] = "custom"
-    speed: float = Field(default=1.0, gt=0)
-    capacity: int = Field(default=1, ge=1)
-
-
-class ConveyorDecks(BaseModel):
-    """一块 2×2 输送格的分层甲板配置：下层去程（去升降机），上层回程。"""
-
-    lower: ConveyorDeckConfig
-    upper: ConveyorDeckConfig | None = None
-
-
 class ConveyorBinding(BaseModel):
-    """把一个业务区（出货位/拣选工位）绑定到它实际使用的输送块。"""
-
     blockId: str
     side: ConveyorSide
 
@@ -46,11 +26,10 @@ class Zone(BaseModel):
     y: int
     width: int
     height: int
+    conveyorBinding: ConveyorBinding | None = None
     slotAisles: dict[str, int] | None = None
     removedSlots: list[str] | None = None
     slotLifts: list[str] | None = None
-    # 显式输送绑定：声明该区通过哪一块输送线的哪一侧进出（无声明时回退按方向推导）
-    conveyorBinding: ConveyorBinding | None = None
 
 
 class GridConfig(BaseModel):
@@ -59,6 +38,20 @@ class GridConfig(BaseModel):
     cellSize: int = 32
     originX: int = 0
     originY: int = 0
+
+
+class ConveyorDeckConfig(BaseModel):
+    enabled: bool = True
+    inputSide: ConveyorSide
+    outputSide: ConveyorSide
+    role: Literal["outbound", "return", "custom"] = "custom"
+    speed: float = Field(default=1.0, gt=0)
+    capacity: int = Field(default=1, ge=1)
+
+
+class ConveyorDecks(BaseModel):
+    lower: ConveyorDeckConfig
+    upper: ConveyorDeckConfig | None = None
 
 
 class TopologyCell(BaseModel):
@@ -71,15 +64,13 @@ class TopologyCell(BaseModel):
     cost: float = 1.0
     walkable: bool = True
     conveyorDirection: ConveyorDirection | None = None
+    conveyorDecks: ConveyorDecks | None = None
+    conveyorMode: Literal["single", "round_trip", "independent"] | None = None
+    conveyorLineId: str | None = None
     levels: int = 1
     conveyorAnchor: dict[str, int] | None = None
     # 地面输送线（整箱，四向车出货用）：贴地单层带面；架空输送线（零散件，CTU 用）保持默认 False
     conveyorGround: bool = False
-    # 显式分层甲板配置（pyc-new 输送模型）：声明后由 compile_conveyor_graph 编译路由；
-    # 未声明时回退按 conveyorDirection 推导的固定 tick 行为
-    conveyorDecks: ConveyorDecks | None = None
-    # 该格上把货物在层间转运（下→上）的换层甲板位置，仅显式模型使用
-    transferDeck: Literal["lower", "upper"] | None = None
 
 
 class TopologyNode(BaseModel):
@@ -91,6 +82,10 @@ class TopologyNode(BaseModel):
     zoneId: str | None = None
     capacity: int = 1
     label: str
+    # 转向移载机只作用于指定输送层，并独立保存手动入口/出口。
+    transferDeck: Literal["lower", "upper"] | None = None
+    transferInputSide: ConveyorSide | None = None
+    transferOutputSide: ConveyorSide | None = None
     # 四向车出货位（shuttle_dock）专用：设置取什么货物、取多少。
     # 仿真启动时按出货位生成搬运任务：四向车取货 → 经巷道出库 → 在地面输送线上交付移动。
     skuId: str | None = None
@@ -141,9 +136,15 @@ class SimulationOrderLineInput(BaseModel):
 class SimulationOrderInput(BaseModel):
     id: str
     priority: Literal["normal", "urgent"] = "normal"
+    dispatchMode: Literal["compact", "balanced", "parallel"] = "balanced"
+    maxParallelCtu: int = Field(default=7, ge=1, le=7)
     targetStation: str = "出库口"
     createdAt: str
     lines: list[SimulationOrderLineInput] = Field(min_length=1)
+
+
+class SimulationOrderCancelRequest(BaseModel):
+    reason: str = Field(default="用户取消", min_length=1, max_length=200)
 
 
 class ShuttleTransferInput(BaseModel):

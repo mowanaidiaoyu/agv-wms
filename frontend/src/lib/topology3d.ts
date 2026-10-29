@@ -1,7 +1,9 @@
-import { GROUND_FLOOR, conveyorAnchorOf, floorsOf, nodeFootprint } from './topology'
+import { GROUND_FLOOR, conveyorAnchorOf, conveyorDecksOf, conveyorDirectionFromSide, floorsOf, nodeFootprint } from './topology'
 import type {
   CellType,
+  ConveyorDeckKey,
   ConveyorDirection,
+  ConveyorSide,
   GoodsSlot,
   NodeType,
   TopologyCell,
@@ -265,64 +267,6 @@ export function shuttleTrackWorldPosition(
   ]
 }
 
-/** 地面输送线格的吸附信息：所在 2×2 块锚点 + 带的延伸方向（横向=沿 col）。 */
-export type GroundBeltSnap = { anchorRow: number; anchorCol: number; horizontal: boolean }
-
-/**
- * 构建「地面线格 → 块锚点 + 走向」查找表。带走向按相邻块判断：
- * 左右（col±2）有同类块即横向延伸，否则纵向。
- */
-export function buildGroundBeltLookup(
-  cells: Array<{
-    row: number
-    col: number
-    type?: string
-    conveyorGround?: boolean | null
-    conveyorAnchor?: { row: number; col: number } | null
-  }>,
-): Map<string, GroundBeltSnap> {
-  const groundCells = new Map<string, { row: number; col: number }>()
-  const anchors = new Set<string>()
-  for (const cell of cells) {
-    if (cell.type !== 'conveyor' || !cell.conveyorGround) continue
-    const anchor = cell.conveyorAnchor ?? { row: cell.row, col: cell.col }
-    groundCells.set(`${cell.row},${cell.col}`, { row: anchor.row, col: anchor.col })
-    anchors.add(`${anchor.row},${anchor.col}`)
-  }
-  const lookup = new Map<string, GroundBeltSnap>()
-  for (const [key, anchor] of groundCells) {
-    lookup.set(key, {
-      anchorRow: anchor.row,
-      anchorCol: anchor.col,
-      horizontal:
-        anchors.has(`${anchor.row},${anchor.col - 2}`) || anchors.has(`${anchor.row},${anchor.col + 2}`),
-    })
-  }
-  return lookup
-}
-
-/**
- * 四向车在地面输送线上的渲染位置。车身 2×2、输送块也 2×2，但轨道坐标以格为步长：
- * 若路径走在带面的第二排/列上，车身中心会偏离带面中心线半格，视觉上只有 1×2 重叠。
- * 这里把横带方向吸附到带面中心线（2×2 块的内分界），沿带方向保持逐格连续移动，
- * 使车身与带面始终保持 2×2 重叠。
- */
-export function shuttleGroundSnapPosition(
-  row: number,
-  col: number,
-  snap: GroundBeltSnap,
-  cols: number,
-  rows: number,
-): [number, number, number] {
-  const [x, y, z] = shuttleTrackWorldPosition(row, col, 1, cols, rows)
-  if (snap.horizontal) {
-    // 带沿 col 延伸：横带方向是 row，中心线 = anchor.row 与 anchor.row+1 的分界
-    return [x, y, rows / 2 - (snap.anchorRow + 1)]
-  }
-  // 带沿 row 延伸：横带方向是 col，中心线 = anchor.col 与 anchor.col+1 的分界
-  return [snap.anchorCol + 1 - cols / 2, y, z]
-}
-
 /** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */
 export function robotWorldPosition(
   floor: string,
@@ -457,11 +401,12 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       const anchor = conveyorAnchorOf(cell)
       if (cell.row !== anchor.row || cell.col !== anchor.col) continue
       const levels = Math.max(1, cell.levels ?? 1)
-      const dir = DIRECTION_VEC3[cell.conveyorDirection ?? 'right']
+      const deckConfig = conveyorDecksOf(topology, cell)
+      const lowerDir = DIRECTION_VEC3[conveyorDirectionFromSide(deckConfig.lower.outputSide)]
       const beltW = CELL * 2 * 0.98 // 相邻块贴合，消除块间间隔，视觉上连续
       const cx = x + CELL / 2
       const cz = z - CELL / 2
-      const alongX = dir.dx !== 0
+      const alongX = lowerDir.dx !== 0
 
       // 地面输送线（整箱）：贴地单层带面，无支腿/拉撑/上层甲板
       const isGroundBlock = Boolean(cell.conveyorGround)
@@ -486,12 +431,15 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         [-corner, -corner],
       ]
       deckYs.forEach((deckY, deckIndex) => {
+        const currentDeck = deckIndex === 0 ? deckConfig.lower : deckConfig.upper
+        const dir = DIRECTION_VEC3[conveyorDirectionFromSide(currentDeck?.outputSide ?? deckConfig.lower.outputSide)]
+        const deckAlongX = dir.dx !== 0
         // 滚筒中心略低于带面，筒顶即输送面
         const rollerY = y + deckY - rollerR
         const frameCenterY = rollerY - frameH / 2 + 0.01
         for (const side of [1, -1]) {
           const offset = (beltW / 2 - railW / 2) * side
-          const beamPosition: [number, number, number] = alongX
+          const beamPosition: [number, number, number] = deckAlongX
             ? [cx, frameCenterY, cz + offset]
             : [cx + offset, frameCenterY, cz]
           // 槽钢截面：竖直腹板 + 上下翼缘，看起来像工业型材而不是一根方管
@@ -499,7 +447,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
             kind: 'box',
             key: `${cell.id}-beam-web-${deckIndex}-${side}`,
             position: beamPosition,
-            size: alongX ? [beltW, frameH, 0.035] : [0.035, frameH, beltW],
+            size: deckAlongX ? [beltW, frameH, 0.035] : [0.035, frameH, beltW],
             color: '#2563eb',
             floor,
             entity,
@@ -513,7 +461,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
                 frameCenterY + flange * (frameH / 2 - flangeT / 2),
                 beamPosition[2],
               ],
-              size: alongX ? [beltW, flangeT, railW] : [railW, flangeT, beltW],
+              size: deckAlongX ? [beltW, flangeT, railW] : [railW, flangeT, beltW],
               color: '#1d4ed8',
               floor,
               entity,
@@ -530,10 +478,10 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
           items.push({
             kind: 'cyl',
             key: `${cell.id}-roller-${deckIndex}-${i}`,
-            position: alongX ? [cx + t, rollerY, cz] : [cx, rollerY, cz + t],
+            position: deckAlongX ? [cx + t, rollerY, cz] : [cx, rollerY, cz + t],
             radius: rollerR,
             length: rollerLength,
-            axis: alongX ? 'z' : 'x',
+            axis: deckAlongX ? 'z' : 'x',
             color: '#b8c4d0',
             floor,
             entity,
@@ -562,16 +510,16 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
           }
         }
 
-        // 走向标识：侧梁顶上的小黄标，替代原先的大箭头
+        // 分层走向标识：下层蓝色、上层黄色，分别使用各自出口方向。
         items.push({
           kind: 'box',
           key: `${cell.id}-mark-${deckIndex}`,
-          position: alongX
+          position: deckAlongX
             ? [cx + dir.dx * (beltW / 2 - 0.26), frameCenterY + frameH / 2 + 0.015, cz + beltW / 2 - railW / 2]
             : [cx + beltW / 2 - railW / 2, frameCenterY + frameH / 2 + 0.015, cz + dir.dz * (beltW / 2 - 0.26)],
-          size: alongX ? [0.3, 0.02, 0.05] : [0.05, 0.02, 0.3],
-          color: '#fbbf24',
-          emissive: '#b45309',
+          size: deckAlongX ? [0.3, 0.02, 0.05] : [0.05, 0.02, 0.3],
+          color: deckIndex === 0 ? '#38bdf8' : '#fbbf24',
+          emissive: deckIndex === 0 ? '#0369a1' : '#b45309',
           floor,
           entity,
         })
@@ -1072,9 +1020,21 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       const rollerR = 0.05
       const railW = 0.07
       const frameBottom = y + mountBeltBase - rollerR - frameH
-      const underDir = DIRECTION_VEC3[mount?.conveyorDirection ?? 'right']
-      // 移栽滚筒与主线走向垂直，便于区分主线与移栽段
-      const rollerAxis: 'x' | 'z' = underDir.dx !== 0 ? 'x' : 'z'
+      const mountDecks = mount?.type === 'conveyor' ? conveyorDecksOf(topology, mount) : null
+      const underDir = DIRECTION_VEC3[
+        mountDecks ? conveyorDirectionFromSide(mountDecks.lower.outputSide) : (mount?.conveyorDirection ?? 'right')
+      ]
+      const turnDeck: ConveyorDeckKey = node.transferDeck
+        ?? (levels > 1 && !mount?.conveyorGround ? 'upper' : 'lower')
+      const turnDeckIndex = turnDeck === 'upper' && levels > 1 ? 1 : 0
+      const turnDeckConfig = mountDecks?.[turnDeck]
+      const turnInputSide = node.transferInputSide ?? turnDeckConfig?.inputSide ?? 'west'
+      const turnOutputSide = node.transferOutputSide ?? turnDeckConfig?.outputSide ?? 'north'
+      const turnOutputDir = DIRECTION_VEC3[conveyorDirectionFromSide(turnOutputSide)]
+      // 转向层的滚筒轴与其出口运动方向垂直；升降机沿用主线安装方向。
+      const rollerAxis: 'x' | 'z' = isLift
+        ? (underDir.dx !== 0 ? 'x' : 'z')
+        : (turnOutputDir.dx !== 0 ? 'z' : 'x')
 
       if (isLift) {
         // 升降移栽机：底座 + 两根导轨立柱 + 顶部横梁 + 液压杆 + 单个升降平台。
@@ -1147,19 +1107,15 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
         const rollerCount = 10
         const rollerSpan = w * 0.92 - 0.2
         const pitch = rollerSpan / rollerCount
-        // 升降平台滚筒与输送带同约定：轴向垂直于流向、沿流向密排（与带面渲染一致，
-        // 否则升降机看起来相对皮带横放 90°）。转向移载机保持十字垂直（有意设计）。
-        const liftAlongFlow = underDir.dx !== 0
-        const liftRollerAxis: 'x' | 'z' = liftAlongFlow ? 'z' : 'x'
         for (let i = 0; i < rollerCount; i += 1) {
           const t = -rollerSpan / 2 + pitch * (i + 0.5)
           items.push({
             kind: 'cyl',
             key: `${node.id}-roller-${i}`,
-            position: liftAlongFlow ? [cx + t, lowerDeck - rollerR, cz] : [cx, lowerDeck - rollerR, cz + t],
+            position: rollerAxis === 'x' ? [cx, lowerDeck - rollerR, cz + t] : [cx + t, lowerDeck - rollerR, cz],
             radius: rollerR,
             length: w * 0.92 - 0.28,
-            axis: liftRollerAxis,
+            axis: rollerAxis,
             color: '#c7d2dd',
             floor,
             entity,
@@ -1179,8 +1135,9 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
           })
         }
       } else {
-        // 转向移栽机：每层一套机架 + 滚筒台面 + 护边（双层线下层也有）。
-        for (let level = 0; level < levels; level += 1) {
+        // 转向移栽机只安装在指定的一层；未安装层保留原输送带结构。
+        {
+          const level = turnDeckIndex
           const deckTop = y + mountBeltBase + level * CONVEYOR_DECK_STEP
           items.push({
             kind: 'box',
@@ -1224,6 +1181,23 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
               position: [cx + side * (w / 2 - railW / 2), deckTop - rollerR - 0.02, cz],
               size: [railW, 0.08, w],
               color: '#1d4ed8',
+              floor,
+              entity,
+            })
+          }
+          const directionMarkers: Array<{ side: ConveyorSide; color: string; key: string }> = [
+            { side: turnInputSide, color: '#22c55e', key: 'input' },
+            { side: turnOutputSide, color: '#f97316', key: 'output' },
+          ]
+          for (const marker of directionMarkers) {
+            const vector = DIRECTION_VEC3[conveyorDirectionFromSide(marker.side)]
+            items.push({
+              kind: 'box',
+              key: `${node.id}-${marker.key}-direction`,
+              position: [cx + vector.dx * w * 0.33, deckTop + 0.025, cz + vector.dz * w * 0.33],
+              size: vector.dx !== 0 ? [w * 0.27, 0.05, 0.11] : [0.11, 0.05, w * 0.27],
+              color: marker.color,
+              emissive: marker.color,
               floor,
               entity,
             })

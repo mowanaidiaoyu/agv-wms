@@ -1,6 +1,24 @@
 export type ZoneType = 'ctu' | 'shuttle' | 'port' | 'pick_station' | 'drop_zone'
 export type CellType = 'road' | 'blocked' | 'conveyor'
 export type ConveyorDirection = 'right' | 'left' | 'up' | 'down'
+export type ConveyorSide = 'north' | 'east' | 'south' | 'west'
+export type ConveyorDeckKey = 'lower' | 'upper'
+export type ConveyorDeckRole = 'outbound' | 'return' | 'custom'
+export type ConveyorRunMode = 'single' | 'round_trip' | 'independent'
+
+export interface ConveyorDeckConfig {
+  enabled: boolean
+  inputSide: ConveyorSide
+  outputSide: ConveyorSide
+  role: ConveyorDeckRole
+  speed?: number
+  capacity?: number
+}
+
+export interface ConveyorDecks {
+  lower: ConveyorDeckConfig
+  upper?: ConveyorDeckConfig
+}
 export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock'
 export type EditorObjectType =
   | 'select'
@@ -26,6 +44,11 @@ export interface Zone {
   y: number
   width: number
   height: number
+  /** 业务区域与输送线端点的固定连接；避免运行时再按最近距离猜测。 */
+  conveyorBinding?: {
+    blockId: string
+    side: ConveyorSide
+  } | null
   /** 四向车库每层巷道位掩码：`"行,列"` → bit0..bit3 对应货架层 1..4 是否为巷道 */
   slotAisles?: Record<string, number>
   /** 四向车库被删除的 2×2 槽位（`"行,列"` 列表）：该位置不再渲染货架/巷道，视为空位 */
@@ -52,6 +75,11 @@ export interface TopologyCell {
   cost: number
   walkable: boolean
   conveyorDirection?: ConveyorDirection | null
+  /** 上下层独立的物料入口/出口。只在 2×2 块锚点格保存，其余格通过 conveyorAnchor 解析。 */
+  conveyorDecks?: ConveyorDecks | null
+  conveyorMode?: ConveyorRunMode | null
+  /** 物理输送线路标识。相邻但不同线路的块不会因为坐标接触而被误连接。 */
+  conveyorLineId?: string | null
   levels?: number
   /** 所属 2×2 输送带块的左上锚点（奇数起点支持）。缺失时回退到 floor-到-偶。 */
   conveyorAnchor?: { row: number; col: number } | null
@@ -68,6 +96,11 @@ export interface TopologyNode {
   zoneId?: string | null
   capacity: number
   label: string
+  /** 转向移载机只安装在一个输送层；下层输送带不会因上层设备而被覆盖。 */
+  transferDeck?: ConveyorDeckKey | null
+  /** 转向移载机在所选层的手动入口和出口方向。 */
+  transferInputSide?: ConveyorSide | null
+  transferOutputSide?: ConveyorSide | null
   /** 四向车出货位（shuttle_dock）：取什么货物（商品目录 skuId） */
   skuId?: string | null
   skuName?: string | null
@@ -298,6 +331,11 @@ export interface SimulationRobot {
   targetLayer?: number
   currentTaskId: string | null
   waitTicks: number
+  lastCellChangeTick?: number
+  blockedByRobotId?: string | null
+  deadlockGroupId?: string | null
+  recoveryCount?: number
+  activePortId?: string | null
   failed: boolean
   phaseLabel: string
   load: number
@@ -483,10 +521,6 @@ export interface SimulationTask {
   orderId?: string | null
   dockId?: string | null
   requestedVehicleId?: string | null
-  /** 任务种类：relocate = 倒库（为取深处货物让位）；缺省为普通取货/交付 */
-  taskKind?: string | null
-  /** 前置任务（如倒库）未全部完成时不可派发 */
-  blockedBy?: string[] | null
   robotType: RobotType
   mode: 'direct' | 'cross_zone' | 'shuttle_transfer'
   status: string
@@ -511,6 +545,17 @@ export interface SimulationTask {
   etaTicks: number
   urgent: boolean
   assignedRobotId: string | null
+  taskIndex?: number
+  splitStrategy?: SimulationOrderDispatchMode
+  sourceGroupLabel?: string
+  assignedPortId?: string
+  assignedPortLabel?: string
+  portQueuePosition?: number
+  portSelectionCost?: number
+  portSelectionReason?: string
+  lastProgressTick?: number
+  deadlockGroupId?: string | null
+  recoveryCount?: number
   remainingTicks: number
   /** 人工拣货位入口格（拓扑有 pick_station 时才有） */
   pickStationCellId?: string | null
@@ -522,6 +567,17 @@ export interface SimulationTask {
   placedGoods?: SimulationTaskLine[]
   /** 人工拣货闭环各计时阶段的统一剩余 tick（下层输送/升降/上层输送/拣货/放置/回程共用） */
   remainingStageTicks?: number
+  conveyorTransport?: {
+    phase: string
+    deck: ConveyorDeckKey
+    route: string[]
+    index: number
+    currentBlockId?: string | null
+    nextBlockId?: string | null
+    waitingTicks: number
+    movedTicks: number
+    startedTick: number
+  } | null
   /** 回库时正在放置的订单行序号 */
   returnLineIndex?: number
   history: SimulationTaskHistory[]
@@ -541,10 +597,13 @@ export interface SimulationTask {
 }
 
 export type SimulationOrderPriority = 'normal' | 'urgent'
+export type SimulationOrderDispatchMode = 'compact' | 'balanced' | 'parallel'
 export type SimulationOrderStatus =
   | 'ready'
   | 'waiting_dispatch'
   | 'executing'
+  | 'returning'
+  | 'cancelled'
   | 'completed'
   | 'exception'
 
@@ -559,6 +618,8 @@ export interface SimulationOrderLineInput {
 export interface SimulationOrderInput {
   id: string
   priority: SimulationOrderPriority
+  dispatchMode?: SimulationOrderDispatchMode
+  maxParallelCtu?: number
   targetStation: string
   createdAt: string
   lines: SimulationOrderLineInput[]
@@ -574,6 +635,22 @@ export interface SimulationOrder extends SimulationOrderInput {
   missingQuantity?: number
   startedTick?: number | null
   completedTick?: number | null
+  cancelRequested?: boolean
+  cancelRequestedTick?: number | null
+  cancelledTick?: number | null
+  cancelReason?: string | null
+  decomposition?: {
+    stage: 'inventory_matched' | 'tasks_generated' | 'dispatching' | 'executing' | 'returning' | 'cancelled' | 'completed' | 'exception'
+    requestedQuantity: number
+    allocatedQuantity: number
+    missingQuantity: number
+    taskCount: number
+    assignedTaskCount: number
+    activeVehicleIds: string[]
+    vehicleCapacity: number
+    strategy: SimulationOrderDispatchMode
+    maxParallelCtu: number
+  }
   lines: Array<SimulationOrderLineInput & { allocated?: number; picked?: number }>
 }
 
@@ -651,6 +728,45 @@ export interface SimulationState {
   transferEvents?: TransferInventoryEvent[]
   alerts: SimulationAlert[]
   queues: SimulationQueues
+  conveyorItems?: Array<{
+    taskId: string
+    orderId?: string | null
+    deck: ConveyorDeckKey
+    currentBlockId?: string | null
+    nextBlockId?: string | null
+    waitingTicks: number
+    phase: string
+    goodsCount: number
+  }>
+  trafficMonitor?: {
+    waitForEdges: Array<{
+      waiter: string
+      owner: string
+      resource: string
+      kind: 'cell' | 'port'
+    }>
+    stalledTaskIds: string[]
+    suspectedDeadlocks: Array<{
+      id: string
+      type: 'cyclic_wait' | 'livelock'
+      robotIds: string[]
+      taskIds: string[]
+      firstTick: number
+      lastTick: number
+      consecutiveTicks: number
+      level: 'suspected' | 'confirmed'
+      reason: string
+      recoveryStatus?: 'executing' | 'completed' | null
+      priorityRobotId?: string
+      actions?: Array<{
+        robotId: string
+        action: string
+        cellId?: string
+        taskId?: string
+      }>
+    }>
+    activeRecoveries: Array<Record<string, unknown>>
+  }
   createdAt: string
   updatedAt: string
 }

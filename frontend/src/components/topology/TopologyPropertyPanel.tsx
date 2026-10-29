@@ -5,12 +5,16 @@ import { TopologyGlyph } from '../TopologyGlyph'
 import { api } from '../../lib/api'
 import {
   CELL_LABELS,
-  DIRECTION_LABELS,
+  CONVEYOR_DECK_LABELS,
+  CONVEYOR_SIDE_LABELS,
   NODE_LABELS,
   OBJECT_LABELS,
   ZONE_LABELS,
   boxToRect,
-  conveyorAnchorOf,
+  conveyorAnchorCell,
+  conveyorBlockCellIds,
+  conveyorBlocks,
+  conveyorDecksOf,
   floorsOf,
   isPointInBox,
   nodeFootprint,
@@ -18,14 +22,14 @@ import {
   shuttleSlotLift,
   shuttleSlotRemoved,
   slotNumberFor,
+  validateConveyorTopology,
 } from '../../lib/topology'
 import type { EditorObjectType } from '../../types'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
-import type { CellType, ConveyorDirection, NodeType, TopologyCell, TopologyNode, TopologyPayload, ZoneType } from '../../types'
+import type { CellType, ConveyorDeckKey, ConveyorSide, NodeType, TopologyNode, TopologyPayload, ZoneType } from '../../types'
 
 const CELL_TYPES: CellType[] = ['road', 'blocked', 'conveyor']
 const ZONE_TYPES: ZoneType[] = ['ctu', 'shuttle', 'port', 'pick_station', 'drop_zone']
-const DIRECTIONS: ConveyorDirection[] = ['right', 'down', 'left', 'up']
 
 function NumericField({
   label,
@@ -98,6 +102,7 @@ export function TopologyPropertyPanel() {
   const deleteSelectedCell = useTopologyEditorStore((state) => state.deleteSelectedCell)
   const updateConveyorLevels = useTopologyEditorStore((state) => state.updateConveyorLevels)
   const updateConveyorGround = useTopologyEditorStore((state) => state.updateConveyorGround)
+  const updateConveyorBlockDeck = useTopologyEditorStore((state) => state.updateConveyorBlockDeck)
   const applyShuttleAisle = useTopologyEditorStore((state) => state.applyShuttleAisle)
   const applyShuttleSlotRemove = useTopologyEditorStore((state) => state.applyShuttleSlotRemove)
   const applyShuttleLift = useTopologyEditorStore((state) => state.applyShuttleLift)
@@ -145,14 +150,15 @@ export function TopologyPropertyPanel() {
     )
   }
 
-  if (selection?.kind === 'conveyor-run') {
+  if (cell?.type === 'conveyor') {
     return (
-      <ConveyorRunEditor
-        selection={selection}
+      <ConveyorBlockEditor
+        cellId={cell.id}
         draft={draft}
-        onUpdateCell={updateCell}
         onSetLevels={updateConveyorLevels}
         onSetGround={updateConveyorGround}
+        onUpdateDeck={updateConveyorBlockDeck}
+        onDelete={deleteSelectedCell}
       />
     )
   }
@@ -182,33 +188,6 @@ export function TopologyPropertyPanel() {
             ))}
           </select>
         </label>
-        {cell.type === 'conveyor' ? (
-          <>
-            <label className="topo-property-field">
-              <span>输送方向</span>
-              <select
-                value={cell.conveyorDirection ?? 'right'}
-                onChange={(event) => updateCell(cell.id, { conveyorDirection: event.target.value as ConveyorDirection })}
-              >
-                {DIRECTIONS.map((direction) => (
-                  <option key={direction} value={direction}>
-                    {DIRECTION_LABELS[direction]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="topo-property-field">
-              <span>层数</span>
-              <select
-                value={cell.levels ?? 1}
-                onChange={(event) => updateCell(cell.id, { levels: Number(event.target.value) })}
-              >
-                <option value={1}>单层</option>
-                <option value={2}>双层</option>
-              </select>
-            </label>
-          </>
-        ) : null}
         <NumericField
           label="通行代价 cost"
           value={cell.cost}
@@ -240,6 +219,20 @@ export function TopologyPropertyPanel() {
 
   if (node) {
     const kind = node.type
+    const turnMount = node.type === 'turn_transfer'
+      ? draft.cells.find((cell) =>
+          cell.type === 'conveyor'
+          && (cell.floor ?? '1F') === (node.floor ?? '1F')
+          && cell.row === node.row
+          && cell.col === node.col,
+        )
+      : undefined
+    const turnLevels = Math.max(1, turnMount?.levels ?? 1)
+    const transferDeck: ConveyorDeckKey = node.transferDeck
+      ?? (turnLevels > 1 && !turnMount?.conveyorGround ? 'upper' : 'lower')
+    const turnDeckConfig = turnMount ? conveyorDecksOf(draft, turnMount)[transferDeck] : undefined
+    const transferInputSide = node.transferInputSide ?? turnDeckConfig?.inputSide ?? 'west'
+    const transferOutputSide = node.transferOutputSide ?? turnDeckConfig?.outputSide ?? 'north'
     return (
       <div className="topo-property-body">
         <EntityBadge kind={kind} id={node.id} />
@@ -278,6 +271,55 @@ export function TopologyPropertyPanel() {
           <input value={node.label} onChange={(event) => updateNode(node.id, { label: event.target.value })} />
         </label>
         <NumericField label="容量" value={node.capacity} min={1} onChange={(capacity) => updateNode(node.id, { capacity: Math.max(1, Math.floor(capacity)) })} />
+        {node.type === 'turn_transfer' ? (
+          <div className="topo-turn-transfer-settings">
+            <div className="topo-property-note">
+              <strong>单层转向设备</strong>
+              <p>设备只安装在所选层。选择上层时，下层仍保留为普通输送线。</p>
+            </div>
+            <label className="topo-property-field">
+              <span>安装层级</span>
+              <select
+                value={transferDeck}
+                onChange={(event) => updateNode(node.id, {
+                  transferDeck: event.target.value as ConveyorDeckKey,
+                  transferInputSide,
+                  transferOutputSide,
+                })}
+              >
+                <option value="lower">下层</option>
+                <option value="upper" disabled={turnLevels < 2 || Boolean(turnMount?.conveyorGround)}>上层</option>
+              </select>
+            </label>
+            {!turnMount ? <div className="topo-manual-validation">转向移载机必须放置在输送模块上。</div> : null}
+            <ManualDirectionPicker
+              label="入口方向"
+              value={transferInputSide}
+              onChange={(side) => updateNode(node.id, {
+                transferDeck,
+                transferInputSide: side,
+                transferOutputSide,
+              })}
+            />
+            <ManualDirectionPicker
+              label="出口方向"
+              value={transferOutputSide}
+              onChange={(side) => updateNode(node.id, {
+                transferDeck,
+                transferInputSide,
+                transferOutputSide: side,
+              })}
+            />
+            <div className="topo-manual-route-preview">
+              {CONVEYOR_SIDE_LABELS[transferInputSide]}入口
+              <b>→</b>
+              {CONVEYOR_SIDE_LABELS[transferOutputSide]}出口
+            </div>
+            {transferInputSide === transferOutputSide ? (
+              <div className="topo-manual-validation">入口方向和出口方向不能相同。</div>
+            ) : null}
+          </div>
+        ) : null}
         {node.type === 'shuttle_dock' ? <ShuttleDockFields node={node} onChange={updateNode} /> : null}
         <label className="topo-property-field">
           <span>所属区域</span>
@@ -301,6 +343,7 @@ export function TopologyPropertyPanel() {
 
   if (zone) {
     const storageNodes = draft.nodes.filter((n) => n.type === 'storage' && n.zoneId === zone.id)
+    const bindableBlocks = conveyorBlocks(draft).filter((block) => !block.anchorCell.conveyorGround)
     return (
       <div className="topo-property-body">
         <EntityBadge kind="storage" id={zone.id} />
@@ -336,6 +379,47 @@ export function TopologyPropertyPanel() {
           <NumericField label="宽" value={zone.width} min={1} onChange={(width) => patchZone(zone.id, { width: Math.max(1, Math.floor(width)) })} />
           <NumericField label="高" value={zone.height} min={1} onChange={(height) => patchZone(zone.id, { height: Math.max(1, Math.floor(height)) })} />
         </div>
+        {zone.type === 'port' || zone.type === 'pick_station' ? (
+          <>
+            <label className="topo-property-field">
+              <span>固定连接输送块</span>
+              <select
+                value={zone.conveyorBinding?.blockId ?? ''}
+                onChange={(event) => patchZone(zone.id, {
+                  conveyorBinding: event.target.value
+                    ? { blockId: event.target.value, side: zone.conveyorBinding?.side ?? 'west' }
+                    : null,
+                })}
+              >
+                <option value="">自动选择（兼容旧拓扑）</option>
+                {bindableBlocks.map((block) => (
+                  <option key={block.key} value={block.key}>
+                    {block.floor} · 块 ({block.row}, {block.col})
+                  </option>
+                ))}
+              </select>
+            </label>
+            {zone.conveyorBinding ? (
+              <label className="topo-property-field">
+                <span>设备连接侧</span>
+                <select
+                  value={zone.conveyorBinding.side}
+                  onChange={(event) => patchZone(zone.id, {
+                    conveyorBinding: { ...zone.conveyorBinding!, side: event.target.value as ConveyorSide },
+                  })}
+                >
+                  {(['north', 'east', 'south', 'west'] as ConveyorSide[]).map((side) => (
+                    <option key={side} value={side}>{CONVEYOR_SIDE_LABELS[side]}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            <div className="topo-property-note">
+              <strong>固定模型连接</strong>
+              <p>绑定后，仿真和动画将从指定输送块进入，不再根据距离猜测出入口。</p>
+            </div>
+          </>
+        ) : null}
         <button className="ghost-button" type="button" onClick={() => resyncZone(zone.id)}>
           <RefreshCw size={14} />
           重算归属
@@ -512,87 +596,156 @@ function ShuttleDockFields({
   )
 }
 
-function ConveyorRunEditor({
-  selection,
+const MANUAL_SIDE_OPTIONS: Array<{ side: ConveyorSide; arrow: string }> = [
+  { side: 'north', arrow: '↑' },
+  { side: 'east', arrow: '→' },
+  { side: 'south', arrow: '↓' },
+  { side: 'west', arrow: '←' },
+]
+
+function ManualDirectionPicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: ConveyorSide
+  onChange: (side: ConveyorSide) => void
+}) {
+  return (
+    <div className="topo-manual-direction">
+      <span>{label}</span>
+      <div className="topo-manual-direction-buttons">
+        {MANUAL_SIDE_OPTIONS.map(({ side, arrow }) => (
+          <button
+            key={side}
+            type="button"
+            className={value === side ? 'active' : ''}
+            aria-pressed={value === side}
+            onClick={() => onChange(side)}
+          >
+            <b>{arrow}</b>
+            <small>{CONVEYOR_SIDE_LABELS[side]}</small>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ConveyorBlockEditor({
+  cellId,
   draft,
-  onUpdateCell,
   onSetLevels,
   onSetGround,
+  onUpdateDeck,
+  onDelete,
 }: {
-  selection: { kind: 'conveyor-run'; cellId: string; ids: string[]; floor: string }
+  cellId: string
   draft: TopologyPayload
-  onUpdateCell: (id: string, patch: Partial<TopologyCell>) => void
   onSetLevels: (ids: string[], levels: number) => void
   onSetGround: (ids: string[], ground: boolean) => void
+  onUpdateDeck: (cellId: string, deck: ConveyorDeckKey, patch: { inputSide?: ConveyorSide; outputSide?: ConveyorSide }) => void
+  onDelete: () => void
 }) {
-  const runCells = draft.cells.filter((cell) => selection.ids.includes(cell.id))
-
-  // 按 2×2 块锚点去重，得到逐块方向编辑项（保持逐块方向可改，不回归单格编辑能力）
-  const blocks: { row: number; col: number; cellId: string; direction: ConveyorDirection }[] = []
-  const seen = new Set<string>()
-  for (const cell of runCells) {
-    const a = conveyorAnchorOf(cell)
-    const key = `${a.row}:${a.col}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const anchorCell = runCells.find((item) => item.row === a.row && item.col === a.col)
-    blocks.push({
-      row: a.row,
-      col: a.col,
-      cellId: anchorCell?.id ?? cell.id,
-      direction: (anchorCell?.conveyorDirection ?? cell.conveyorDirection ?? 'right') as ConveyorDirection,
-    })
+  const [activeDeck, setActiveDeck] = useState<ConveyorDeckKey>('lower')
+  const selected = draft.cells.find((cell) => cell.id === cellId)!
+  const anchor = conveyorAnchorCell(draft, selected)
+  const ids = conveyorBlockCellIds(draft, anchor.id)
+  const levels = Math.max(1, anchor.levels ?? 1)
+  const ground = Boolean(anchor.conveyorGround)
+  const decks = conveyorDecksOf(draft, anchor)
+  const deck = activeDeck === 'upper' && levels > 1 && !ground ? 'upper' : 'lower'
+  const config = decks[deck] ?? {
+    enabled: true,
+    inputSide: 'west' as ConveyorSide,
+    outputSide: 'east' as ConveyorSide,
+    role: deck === 'lower' ? 'outbound' as const : 'return' as const,
   }
-
-  const level = runCells[0]?.levels ?? 1
-  const ground = runCells[0]?.conveyorGround ?? false
+  const blockKey = `${anchor.floor ?? '1F'}:${anchor.row}:${anchor.col}`
+  const issues = validateConveyorTopology(draft).filter((issue) => issue.blockKey === blockKey)
 
   return (
     <div className="topo-property-body">
       <div className="topo-property-hero">
         <Layers size={26} />
         <div className="topo-property-hero-text">
-          <p className="topology-property-eyebrow">输送线</p>
-          <h3>整条连通输送线 · {runCells.length} 格</h3>
+          <p className="topology-property-eyebrow">单个输送模块</p>
+          <h3>模块 ({anchor.row}, {anchor.col})</h3>
         </div>
       </div>
-      <ReadonlyRow label="规模" value={`${blocks.length} 个 2×2 块 · ${selection.floor}`} />
+      <ReadonlyRow label="占位" value={`2×2 四格 · ${anchor.floor ?? '1F'}`} />
       <div className="topo-property-note">
-        <strong>拖动可移动整条输送线</strong>
-        <p>在画布按住该输送带拖动，即可整体平移到新位置（保持 2×2 块对齐）。</p>
+        <strong>方向完全手动设置</strong>
+        <p>当前模块独立保存入口和出口；修改不会联动或改写任何相邻模块。</p>
       </div>
+
       <label className="topo-property-field">
-        <span>整线层数</span>
-        <select value={level} onChange={(event) => onSetLevels(selection.ids, Number(event.target.value))}>
+        <span>模块层数</span>
+        <select value={levels} onChange={(event) => {
+          const nextLevels = Number(event.target.value)
+          onSetLevels(ids, nextLevels)
+          if (nextLevels === 1) setActiveDeck('lower')
+        }}>
           <option value={1}>单层</option>
           <option value={2}>双层</option>
         </select>
       </label>
       <label className="topo-property-field">
         <span>输送线形式</span>
-        <select
-          value={ground ? 'ground' : 'elevated'}
-          onChange={(event) => onSetGround(selection.ids, event.target.value === 'ground')}
-        >
-          <option value="elevated">架空（零散件 · CTU 交付）</option>
-          <option value="ground">地面（整箱 · 四向车出货）</option>
+        <select value={ground ? 'ground' : 'elevated'} onChange={(event) => {
+          const nextGround = event.target.value === 'ground'
+          onSetGround(ids, nextGround)
+          if (nextGround) {
+            onSetLevels(ids, 1)
+            setActiveDeck('lower')
+          }
+        }}>
+          <option value="elevated">架空输送模块</option>
+          <option value="ground">地面输送模块</option>
         </select>
       </label>
-      {blocks.map((block) => (
-        <label className="topo-property-field" key={`${block.row}-${block.col}`}>
-          <span>块 ({block.row}, {block.col}) 方向</span>
-          <select
-            value={block.direction}
-            onChange={(event) => onUpdateCell(block.cellId, { conveyorDirection: event.target.value as ConveyorDirection })}
-          >
-            {DIRECTIONS.map((direction) => (
-              <option key={direction} value={direction}>
-                {DIRECTION_LABELS[direction]}
-              </option>
-            ))}
-          </select>
-        </label>
-      ))}
+
+      {levels > 1 && !ground ? (
+        <div className="topo-manual-deck-tabs" role="tablist" aria-label="编辑输送层">
+          <button type="button" className={deck === 'lower' ? 'active' : ''} onClick={() => setActiveDeck('lower')}>下层</button>
+          <button type="button" className={deck === 'upper' ? 'active' : ''} onClick={() => setActiveDeck('upper')}>上层</button>
+        </div>
+      ) : null}
+
+      <div className={`topo-manual-deck-card ${deck}`}>
+        <strong>{deck === 'lower' ? '下层方向' : '上层方向'}</strong>
+        <ManualDirectionPicker
+          label="入口方向"
+          value={config.inputSide}
+          onChange={(inputSide) => onUpdateDeck(anchor.id, deck, { inputSide })}
+        />
+        <ManualDirectionPicker
+          label="出口方向"
+          value={config.outputSide}
+          onChange={(outputSide) => onUpdateDeck(anchor.id, deck, { outputSide })}
+        />
+        <div className="topo-manual-route-preview">
+          {CONVEYOR_SIDE_LABELS[config.inputSide]}入口
+          <b>→</b>
+          {CONVEYOR_SIDE_LABELS[config.outputSide]}出口
+        </div>
+      </div>
+
+      {issues.length ? (
+        <div className="topo-manual-validation">
+          {issues.map((issue, index) => (
+            <p key={`${issue.deck}-${index}`}>{CONVEYOR_DECK_LABELS[issue.deck]}：{issue.message}</p>
+          ))}
+        </div>
+      ) : (
+        <div className="topo-manual-validation ok">当前模块方向连接有效。</div>
+      )}
+
+      <button className="ghost-button topo-property-danger" type="button" onClick={onDelete}>
+        <Trash2 size={14} />
+        删除该输送模块
+      </button>
     </div>
   )
 }

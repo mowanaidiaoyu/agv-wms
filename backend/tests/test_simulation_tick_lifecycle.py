@@ -115,6 +115,165 @@ def test_start_creates_background_run_and_advances_multiple_ticks(monkeypatch) -
     assert broadcast_ticks == [1, 2, 3]
 
 
+def test_running_order_insertion_reserves_inventory_and_rejects_duplicates() -> None:
+    topology = _topology()
+    repository = MemoryRepository()
+    service = SimulationService(repository)
+    first_order = _order(topology)
+    inserted_order = deepcopy(first_order)
+    inserted_order["id"] = "ORD-INSERTED-002"
+    inserted_order["lines"][0]["id"] = "line-inserted-002"
+
+    async def scenario() -> None:
+        result = await service.start(topology, [first_order], [])
+        run_id = result["runId"]
+        service.pause(run_id)
+
+        state = await service.add_order(run_id, inserted_order)
+        assert [order["id"] for order in state["orders"]] == [
+            "ORD-TICK-001",
+            "ORD-INSERTED-002",
+        ]
+        original_slots = {
+            (line["nodeId"], line["layer"])
+            for task in state["tasks"]
+            if task.get("orderId") == "ORD-TICK-001"
+            for line in task["lines"]
+        }
+        inserted_slots = {
+            (line["nodeId"], line["layer"])
+            for task in state["tasks"]
+            if task.get("orderId") == "ORD-INSERTED-002"
+            for line in task["lines"]
+        }
+        assert original_slots
+        assert inserted_slots
+        assert original_slots.isdisjoint(inserted_slots)
+        assert any(event[2] == "order_inserted" for event in repository.events)
+
+        with pytest.raises(ValueError, match="已存在"):
+            await service.add_order(run_id, inserted_order)
+
+        unavailable = deepcopy(inserted_order)
+        unavailable["id"] = "ORD-NO-STOCK"
+        unavailable["lines"][0]["skuId"] = "SKU-DOES-NOT-EXIST"
+        with pytest.raises(ValueError, match="库存不足"):
+            await service.add_order(run_id, unavailable)
+        assert len(state["orders"]) == 2
+
+        await service.stop(run_id)
+
+    asyncio.run(scenario())
+
+
+def test_pending_order_can_be_cancelled_and_releases_tasks() -> None:
+    topology = _topology()
+    repository = MemoryRepository()
+    service = SimulationService(repository)
+
+    async def scenario() -> None:
+        result = await service.start(topology, [_order(topology)], [])
+        run_id = result["runId"]
+        service.pause(run_id)
+
+        state = await service.cancel_order(run_id, "ORD-TICK-001", "计划变更")
+        order = state["orders"][0]
+        related = [task for task in state["tasks"] if task.get("orderId") == order["id"]]
+        assert order["status"] == "cancelled"
+        assert order["cancelReason"] == "计划变更"
+        assert related and all(task["status"] == "cancelled" for task in related)
+        assert any(event[2] == "order_cancel_requested" for event in repository.events)
+
+        await service.stop(run_id)
+
+    asyncio.run(scenario())
+
+
+def test_picked_order_returns_inventory_before_becoming_cancelled() -> None:
+    topology = _topology()
+    repository = MemoryRepository()
+    service = SimulationService(repository)
+
+    async def scenario() -> None:
+        result = await service.start(topology, [_order(topology)], [])
+        run_id = result["runId"]
+        service.pause(run_id)
+        runtime = service.runtimes[run_id]
+        task = next(task for task in runtime.state["tasks"] if task.get("orderId") == "ORD-TICK-001")
+        robot = next(robot for robot in runtime.state["robots"] if robot.get("type") == "ctu")
+        slot = dict(task["lines"][0])
+        runtime.state["inventory"] = [
+            item for item in runtime.state["inventory"]
+            if not (
+                item.get("nodeId") == slot.get("nodeId")
+                and int(item.get("layer", 1)) == int(slot.get("layer", 1))
+            )
+        ]
+        task.update(status="assigned", phase="delivery_to_port", picked=1, assignedRobotId=robot["id"])
+        robot.update(
+            currentTaskId=task["id"],
+            status="moving",
+            carrying=[slot],
+            load=1,
+        )
+
+        state = await service.cancel_order(run_id, "ORD-TICK-001", "客户撤单")
+        assert state["orders"][0]["status"] == "returning"
+        assert task["phase"] == "return_to_storage"
+        assert task["cancelAfterReturn"] is True
+
+        # 模拟车辆到达原库位，只有完成库存恢复后订单才进入 cancelled。
+        service._restore_transit_goods(runtime, robot, task)
+        service._refresh_orders(runtime)
+        assert task["status"] == "cancelled"
+        assert runtime.state["orders"][0]["status"] == "cancelled"
+        assert any(
+            item.get("nodeId") == slot.get("nodeId")
+            and int(item.get("layer", 1)) == int(slot.get("layer", 1))
+            for item in runtime.state["inventory"]
+        )
+
+        await service.stop(run_id)
+
+    asyncio.run(scenario())
+
+
+def test_parallel_order_spreads_tasks_across_reachable_delivery_ports() -> None:
+    topology = _topology()
+    inventory = build_inventory(topology)
+    requested: dict[str, dict[str, Any]] = {}
+    for slot in inventory[:14]:
+        sku_id = str(slot["skuId"])
+        line = requested.setdefault(
+            sku_id,
+            {
+                "id": f"line-{len(requested) + 1}",
+                "skuId": sku_id,
+                "skuName": slot.get("skuName") or sku_id,
+                "spec": slot.get("spec"),
+                "quantity": 0,
+            },
+        )
+        line["quantity"] += 1
+    order = {
+        "id": "ORD-MULTI-PORT",
+        "priority": "normal",
+        "dispatchMode": "parallel",
+        "maxParallelCtu": 7,
+        "targetStation": "自动选择出库口",
+        "createdAt": "2026-10-28T00:00:00Z",
+        "lines": list(requested.values()),
+    }
+
+    service = SimulationService(MemoryRepository())
+    tasks, _ = service._seed_order_tasks(topology, [order], inventory)
+
+    assert len(tasks) == 7
+    assert len({task["assignedPortId"] for task in tasks}) >= 2
+    assert all(task["deliveryCellId"] for task in tasks)
+    assert all(task["portQueuePosition"] >= 1 for task in tasks)
+
+
 @pytest.mark.parametrize(
     ("with_order", "with_transfer"),
     [(True, False), (False, True), (True, True)],
@@ -210,8 +369,7 @@ def test_pause_resume_stop_and_reset_lifecycle(monkeypatch) -> None:
             await asyncio.sleep(0.001)
         resumed_tick = runtime.state["tick"]
 
-        service.stop(runtime.run_id)
-        await runtime.task_handle
+        await service.stop(runtime.run_id)
         await asyncio.sleep(0.005)
         assert runtime.state["tick"] == resumed_tick
         assert runtime.state["status"] == "stopped"

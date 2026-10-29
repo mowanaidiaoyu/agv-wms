@@ -1,21 +1,27 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Bot,
+  Boxes,
   ChevronLeft,
   ChevronRight,
   Clock3,
+  GitBranch,
   MapPin,
   Package2,
   Plus,
   ShoppingCart,
+  Trash2,
   X,
   Zap,
 } from 'lucide-react'
 import type {
   GoodsCatalogSku,
   SimulationOrder,
+  SimulationOrderDispatchMode,
   SimulationOrderInput,
   SimulationOrderLineInput,
   SimulationOrderPriority,
+  SimulationTask,
 } from '../../types'
 
 type OrderView = SimulationOrderInput & Partial<SimulationOrder>
@@ -24,8 +30,16 @@ const statusLabels: Record<string, string> = {
   ready: '待启动',
   waiting_dispatch: '等待调度',
   executing: '执行中',
+  returning: '取消回库中',
+  cancelled: '已取消',
   completed: '已完成',
   exception: '异常',
+}
+
+const dispatchModeLabels: Record<SimulationOrderDispatchMode, string> = {
+  compact: '车辆节省',
+  balanced: '智能均衡',
+  parallel: '并行优先',
 }
 
 function orderQuantity(order: OrderView) {
@@ -43,6 +57,9 @@ export function OrderRail({
   onSelect,
   onToggle,
   onCreate,
+  onRemove,
+  removingOrderId,
+  runStatus,
 }: {
   orders: OrderView[]
   selectedOrderId: string
@@ -50,12 +67,17 @@ export function OrderRail({
   onSelect: (orderId: string) => void
   onToggle: () => void
   onCreate: () => void
+  onRemove?: (order: OrderView) => void
+  removingOrderId?: string
+  runStatus?: string
 }) {
   const counts = useMemo(() => ({
     waiting: orders.filter((order) => !order.status || ['ready', 'waiting_dispatch'].includes(order.status)).length,
     executing: orders.filter((order) => order.status === 'executing').length,
-    completed: orders.filter((order) => order.status === 'completed').length,
+    completed: orders.filter((order) => ['completed', 'cancelled'].includes(order.status ?? '')).length,
   }), [orders])
+  const draftCount = orders.filter((order) => (order.status ?? 'ready') === 'ready').length
+  const runtimeCount = orders.length - draftCount
 
   return (
     <aside className={`simulation-order-rail ${collapsed ? 'simulation-order-rail-collapsed' : ''}`}>
@@ -63,7 +85,9 @@ export function OrderRail({
         {!collapsed ? (
           <div>
             <strong>订单队列</strong>
-            <span>{orders.length} 个订单等待仿真</span>
+            <span>{draftCount
+              ? `${runtimeCount} 个本次订单 · ${draftCount} 个待下次启动`
+              : `${runtimeCount} 个本次订单`}</span>
           </div>
         ) : <ShoppingCart size={18} />}
         <button type="button" onClick={onToggle} title={collapsed ? '展开订单' : '收起订单'}>
@@ -82,27 +106,52 @@ export function OrderRail({
             {orders.length ? orders.map((order) => {
               const active = order.id === selectedOrderId
               const status = order.status || 'ready'
+              const canRemove = status === 'ready' || (
+                ['running', 'paused'].includes(runStatus ?? '')
+                && !['completed', 'cancelled', 'exception'].includes(status)
+              )
               return (
-                <button
-                  type="button"
+                <div
                   key={order.id}
                   className={`simulation-order-card ${active ? 'active' : ''} simulation-order-${status}`}
-                  onClick={() => onSelect(order.id)}
                 >
-                  <span className="simulation-order-card-topline">
-                    <strong>{order.id}</strong>
-                    {order.priority === 'urgent' ? <em><Zap size={11} />紧急</em> : null}
-                  </span>
-                  <span className="simulation-order-card-state">
-                    <b>{orderStatus(order)}</b>
-                    <small>{order.progress ?? 0}%</small>
-                  </span>
-                  <span className="simulation-order-progress"><i style={{ width: `${order.progress ?? 0}%` }} /></span>
-                  <span className="simulation-order-card-meta">
-                    <small><Package2 size={12} />{order.lines.length} SKU · {orderQuantity(order)} 箱</small>
-                    <small><MapPin size={12} />{order.targetStation}</small>
-                  </span>
-                </button>
+                  <button
+                    className="simulation-order-card-select"
+                    type="button"
+                    onClick={() => onSelect(order.id)}
+                  >
+                    <span className="simulation-order-card-topline">
+                      <strong>{order.id}</strong>
+                      {order.priority === 'urgent' ? <em><Zap size={11} />紧急</em> : null}
+                    </span>
+                    <span className="simulation-order-card-state">
+                      <b>{orderStatus(order)}</b>
+                      <small>{order.progress ?? 0}%</small>
+                    </span>
+                    <span className="simulation-order-progress"><i style={{ width: `${order.progress ?? 0}%` }} /></span>
+                    <span className="simulation-order-card-meta">
+                      <small><Package2 size={12} />{order.lines.length} SKU · {orderQuantity(order)} 箱</small>
+                      <small><MapPin size={12} />{order.targetStation}</small>
+                    </span>
+                    <span className="simulation-order-card-plan">
+                      <GitBranch size={12} />
+                      {order.totalTasks ? `${order.totalTasks} 个 CTU 任务` : status === 'ready' ? '待下次启动' : dispatchModeLabels[order.dispatchMode ?? 'balanced']}
+                      {order.decomposition?.activeVehicleIds.length ? ` · ${order.decomposition.activeVehicleIds.length} 辆已分配` : ''}
+                    </span>
+                  </button>
+                  {canRemove ? (
+                    <button
+                      className="simulation-order-remove"
+                      type="button"
+                      aria-label={`${status === 'ready' ? '删除' : '取消'}订单 ${order.id}`}
+                      title={status === 'ready' ? '删除待启动订单' : '安全取消订单'}
+                      disabled={removingOrderId === order.id}
+                      onClick={() => onRemove?.(order)}
+                    >
+                      {removingOrderId === order.id ? <Clock3 size={13} /> : <Trash2 size={13} />}
+                    </button>
+                  ) : null}
+                </div>
               )
             }) : (
               <div className="simulation-orders-empty">
@@ -144,14 +193,17 @@ export function OrderComposer({
   catalogError?: string
   onRetryCatalog?: () => void
   onClose: () => void
-  onSubmit: (order: SimulationOrderInput) => void
+  onSubmit: (order: SimulationOrderInput) => void | Promise<void>
 }) {
   const [priority, setPriority] = useState<SimulationOrderPriority>('normal')
+  const [dispatchMode, setDispatchMode] = useState<SimulationOrderDispatchMode>('balanced')
+  const [maxParallelCtu, setMaxParallelCtu] = useState(7)
   const [targetStation, setTargetStation] = useState('出库口 01')
   const [selectedSkuId, setSelectedSkuId] = useState('')
   const [quantity, setQuantity] = useState(1)
   const [lines, setLines] = useState<SimulationOrderLineInput[]>([])
   const [formError, setFormError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const selectedSku = catalog.find((sku) => sku.skuId === selectedSkuId)
 
   useEffect(() => {
@@ -198,22 +250,34 @@ export function OrderComposer({
     setQuantity(1)
   }
 
-  function submit() {
+  async function submit() {
+    if (submitting) return
     setFormError('')
     if (!lines.length) {
       setFormError('请至少添加一种商品后再提交订单。')
       return
     }
-    onSubmit({
-      id: nextOrderId(),
-      priority,
-      targetStation,
-      createdAt: new Date().toISOString(),
-      lines,
-    })
-    setLines([])
-    setPriority('normal')
-    setQuantity(1)
+    try {
+      setSubmitting(true)
+      await onSubmit({
+        id: nextOrderId(),
+        priority,
+        dispatchMode,
+        maxParallelCtu,
+        targetStation,
+        createdAt: new Date().toISOString(),
+        lines,
+      })
+      setLines([])
+      setPriority('normal')
+      setDispatchMode('balanced')
+      setMaxParallelCtu(7)
+      setQuantity(1)
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '订单提交失败')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   function applyTemplate(templatePriority: SimulationOrderPriority, startIndex: number, count: number) {
@@ -224,12 +288,32 @@ export function OrderComposer({
     }
     setFormError('')
     setPriority(templatePriority)
+    setDispatchMode(templatePriority === 'urgent' ? 'compact' : 'balanced')
     setLines(selected.map((sku, index) => ({
       id: `line-template-${index + 1}-${Date.now()}`,
       skuId: sku.skuId,
       skuName: sku.name,
       spec: sku.spec,
       quantity: index === 0 && templatePriority === 'normal' ? 2 : 1,
+    })))
+  }
+
+  function applyFleetTemplate() {
+    const selected = catalog.slice(0, 7)
+    if (selected.length < 7) {
+      setFormError('商品目录不足 7 种，无法生成多车协同订单。')
+      return
+    }
+    setFormError('')
+    setPriority('normal')
+    setDispatchMode('parallel')
+    setMaxParallelCtu(7)
+    setLines(selected.map((sku, index) => ({
+      id: `line-fleet-${index + 1}-${Date.now()}`,
+      skuId: sku.skuId,
+      skuName: sku.name,
+      spec: sku.spec,
+      quantity: 2,
     })))
   }
 
@@ -252,6 +336,9 @@ export function OrderComposer({
             <button type="button" onClick={() => applyTemplate('urgent', 5, 2)}>
               <Zap size={17} /><span><b>紧急插单</b><small>高优先级进入任务队列</small></span>
             </button>
+            <button type="button" onClick={applyFleetTemplate}>
+              <Bot size={17} /><span><b>多车协同订单</b><small>一张订单拆为 7 个 CTU 任务</small></span>
+            </button>
           </div>
         </section>
 
@@ -265,6 +352,20 @@ export function OrderComposer({
             <select value={targetStation} onChange={(event) => setTargetStation(event.target.value)}>
               <option>出库口 01</option>
               <option>出库口 02</option>
+            </select>
+          </label>
+          <h3>CTU 拆解策略</h3>
+          <div className="simulation-order-dispatch">
+            {(['compact', 'balanced', 'parallel'] as const).map((mode) => (
+              <button className={dispatchMode === mode ? 'active' : ''} type="button" key={mode} onClick={() => setDispatchMode(mode)}>
+                <b>{dispatchModeLabels[mode]}</b>
+                <small>{mode === 'compact' ? '尽量装满单车' : mode === 'balanced' ? '兼顾距离与车辆数' : '优先多车并行'}</small>
+              </button>
+            ))}
+          </div>
+          <label>最大并行 CTU
+            <select value={maxParallelCtu} onChange={(event) => setMaxParallelCtu(Number(event.target.value))} disabled={dispatchMode === 'compact'}>
+              {[1, 2, 3, 4, 5, 6, 7].map((count) => <option key={count} value={count}>{count} 辆</option>)}
             </select>
           </label>
         </section>
@@ -299,23 +400,72 @@ export function OrderComposer({
         </section>
       </div>
       <div className="simulation-order-composer-footer">
-        <span>{lines.length} 种SKU · {lines.reduce((sum, line) => sum + line.quantity, 0)} 箱</span>
-        <button className="accent-button" type="button" onClick={submit} disabled={!lines.length}>提交订单</button>
+        <span>{lines.length} 种SKU · {lines.reduce((sum, line) => sum + line.quantity, 0)} 箱 · {dispatchModeLabels[dispatchMode]}</span>
+        <button className="accent-button" type="button" onClick={() => void submit()} disabled={!lines.length || submitting}>
+          {submitting ? '提交中…' : '提交订单'}
+        </button>
       </div>
     </aside>
   )
 }
 
-const timelineStages = ['订单创建', '库存匹配', '任务生成', '设备执行', '输送交付', '出库汇合', '完成']
+const timelineStages = ['订单创建', '库存匹配', '任务拆解', 'CTU分配', '协同执行', '输送交付', '完成']
 
 function currentStage(order: OrderView) {
   if (order.status === 'completed') return 6
   if (order.status === 'exception') return 1
   if (order.status === 'executing') {
-    return order.statusLabel?.includes('输送') ? 4 : 3
+    if (order.statusLabel?.includes('输送')) return 5
+    return order.decomposition?.assignedTaskCount === order.decomposition?.taskCount ? 4 : 3
   }
   if (order.status === 'waiting_dispatch') return 2
   return 0
+}
+
+export function OrderOrchestrationPanel({
+  order,
+  tasks,
+  onFocusRobot,
+}: {
+  order?: OrderView
+  tasks: SimulationTask[]
+  onFocusRobot?: (robotId: string) => void
+}) {
+  if (!order) return null
+  const decomposition = order.decomposition
+  const requested = decomposition?.requestedQuantity ?? orderQuantity(order)
+  const allocated = decomposition?.allocatedQuantity ?? 0
+  const assigned = tasks.filter((task) => task.assignedRobotId).length
+  const strategy = order.dispatchMode ?? decomposition?.strategy ?? 'balanced'
+  return (
+    <section className="simulation-order-orchestration" aria-label="订单拆解与 CTU 分配">
+      <header>
+        <span><GitBranch size={15} /><b>订单编排</b><small>{dispatchModeLabels[strategy]}</small></span>
+        <strong>{requested} 箱 → {tasks.length || '待拆解'} 个任务 → {assigned} 辆 CTU</strong>
+      </header>
+      <div className="simulation-order-orchestration-flow">
+        <span className={decomposition ? 'done' : 'active'}><Boxes size={14} /><b>库存匹配</b><small>{decomposition ? `${allocated}/${requested} 箱` : '启动后匹配'}</small></span>
+        <i>→</i>
+        <span className={tasks.length ? 'done' : ''}><GitBranch size={14} /><b>任务拆解</b><small>{tasks.length ? `${tasks.length} 个工作包` : `目标 ${order.maxParallelCtu ?? 7} 辆`}</small></span>
+        <i>→</i>
+        <span className={assigned === tasks.length && tasks.length ? 'done' : tasks.length ? 'active' : ''}><Bot size={14} /><b>CTU 分配</b><small>{assigned}/{tasks.length || 0} 已分配</small></span>
+      </div>
+      {tasks.length ? (
+        <div className="simulation-order-task-map">
+          {tasks.map((task, index) => (
+            <button type="button" key={task.id} disabled={!task.assignedRobotId} onClick={() => task.assignedRobotId && onFocusRobot?.(task.assignedRobotId)}>
+              <span><b>T{String(task.taskIndex ?? index + 1).padStart(2, '0')}</b><small>{task.lines.length} 箱</small></span>
+              <em>→</em>
+              <span>
+                <b>{task.assignedRobotId ?? '等待分配'} · {task.assignedPortLabel ?? '出库口待选'}</b>
+                <small>{task.sourceGroupLabel ?? task.phaseLabel}{task.portQueuePosition ? ` · 出口队列 ${task.portQueuePosition}` : ''}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : <p>启动仿真后，将在这里展示库存匹配、任务拆解和车辆分配结果。</p>}
+    </section>
+  )
 }
 
 export function OrderTimeline({ order }: { order?: OrderView }) {

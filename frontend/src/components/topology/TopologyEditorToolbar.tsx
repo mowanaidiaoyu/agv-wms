@@ -3,12 +3,27 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Save, Trash2, FilePlus2, PlayCircle } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
+import { validateConveyorTopology, type ConveyorValidationIssue } from '../../lib/topology'
 import { usePlatformStore } from '../../store/usePlatformStore'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
 import type { StoredRecord, TopologyPayload } from '../../types'
 
 function recordLabel(record: StoredRecord<TopologyPayload>): string {
   return `${record.name}（${record.id}）`
+}
+
+class TopologyValidationError extends Error {
+  issue: ConveyorValidationIssue
+  total: number
+
+  constructor(issue: ConveyorValidationIssue, total: number) {
+    const layer = issue.deck === 'lower' ? '下层' : '上层'
+    const extra = total > 1 ? `（另外还有 ${total - 1} 处错误）` : ''
+    super(`输送模块 ${issue.blockKey} ${layer}：${issue.message}${extra}`)
+    this.name = 'TopologyValidationError'
+    this.issue = issue
+    this.total = total
+  }
 }
 
 export function TopologyEditorToolbar() {
@@ -39,7 +54,13 @@ export function TopologyEditorToolbar() {
   }
 
   const saveMutation = useMutation({
-    mutationFn: (payload: TopologyPayload) => api.saveTopology(payload),
+    mutationFn: (payload: TopologyPayload) => {
+      const errors = validateConveyorTopology(payload).filter((issue) => issue.severity === 'error')
+      if (errors.length) {
+        throw new TopologyValidationError(errors[0], errors.length)
+      }
+      return api.saveTopology(payload)
+    },
     onSuccess: async (saved) => {
       setSaved(saved.payload, saved.id)
       setSelectedTopologyId(saved.id)
@@ -52,10 +73,25 @@ export function TopologyEditorToolbar() {
         openSimulation(saved.id)
       }
     },
-    onError: (error) => {
+    onError: (error, payload) => {
       enterSimulationRef.current = false
       setSavingForSimulation(false)
-      setNotice({ kind: 'error', text: `保存失败：${String(error)}` })
+      if (error instanceof TopologyValidationError) {
+        const parts = error.issue.blockKey.split(':')
+        const floor = parts.length >= 3 ? parts[parts.length - 3] : ''
+        const row = Number(parts[parts.length - 2])
+        const col = Number(parts[parts.length - 1])
+        const cell = payload.cells.find((item) =>
+          item.type === 'conveyor'
+          && (item.floor ?? '1F') === floor
+          && item.row === row
+          && item.col === col,
+        )
+        if (cell) useTopologyEditorStore.getState().selectCellById(cell.id)
+        setNotice({ kind: 'error', text: `保存失败：${error.message}` })
+        return
+      }
+      setNotice({ kind: 'error', text: `保存失败：${error instanceof Error ? error.message : String(error)}` })
     },
   })
 
@@ -185,7 +221,7 @@ export function TopologyEditorToolbar() {
         {dirty ? <span className="topo-badge topo-badge-dirty">未保存修改</span> : null}
         {!loadedId ? <span className="topo-badge topo-badge-new">新建中</span> : null}
         {notice ? (
-          <span className={`topo-notice topo-notice-${notice.kind}`} role="status">
+          <span className={`topo-notice topo-notice-${notice.kind}`} role="status" title={notice.text}>
             {notice.text}
           </span>
         ) : null}

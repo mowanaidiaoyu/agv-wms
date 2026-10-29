@@ -19,18 +19,15 @@ import {
   SHUTTLE_RACK_BASE_Y,
   ZONE_LEVEL_HEIGHT,
   buildGoodsSceneBoxes,
-  buildGroundBeltLookup,
   buildSceneSpec,
   robotWorldPosition,
-  shuttleGroundSnapPosition,
   shuttleTrackWorldPosition,
   worldToCell,
   worldX,
   worldZ,
-  type GroundBeltSnap,
   type SceneCylinder,
 } from '../../lib/topology3d'
-import { conveyorAnchorOf, parseCellId } from '../../lib/topology'
+import { conveyorAnchorOf, conveyorDecksOf, conveyorDirectionFromSide, parseCellId } from '../../lib/topology'
 import { advanceInterpolationElapsed, interpolateScalar, interpolationProgress } from '../../lib/simulationMotion'
 import type {
   GoodsSlot,
@@ -73,9 +70,7 @@ const SHUTTLE_EMISSIVE = '#6d28d9'
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
-/** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。
- * 拐角走直角：目标垂直转向时先沿当前行进轴对齐、再转垂直轴（L 形路径按距离插值），
- * 避免直线插值斜切拐角（看起来像拐弯时走直线）。 */
+/** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。 */
 function RobotGroup({ position, children, onClick, paused = false, transitionDuration = 0.3 }: { position: [number, number, number]; children: ReactNode; onClick?: () => void; paused?: boolean; transitionDuration?: number }) {
   const groupRef = useRef<Group>(null)
   const current = useRef(new Vector3(position[0], position[1], position[2]))
@@ -83,10 +78,6 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
   const target = useRef(new Vector3(position[0], position[1], position[2]))
   const elapsed = useRef(transitionDuration)
   const durationRef = useRef(transitionDuration)
-  // 当前行进轴（'x'/'z'）；'y' 为电梯升降，不参与拐角
-  const heading = useRef<'x' | 'z'>('x')
-  // L 形拐角：先走的轴与对齐值（null = 目标与本段起点同轴，直线插值即可）
-  const corner = useRef<{ axis: 'x' | 'z'; value: number } | null>(null)
   const invalidate = useThree((state) => state.invalidate)
   const [x, y, z] = position
 
@@ -95,18 +86,6 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
     if (targetChanged) {
       start.current.copy(current.current)
       elapsed.current = 0
-      const dx = x - start.current.x
-      const dz = z - start.current.z
-      if (Math.abs(dx) > 1e-6 && Math.abs(dz) > 1e-6) {
-        // 斜向目标 = 拐角：先沿当前行进轴对齐目标坐标，再转另一轴
-        const first = heading.current
-        corner.current = { axis: first, value: first === 'x' ? x : z }
-        heading.current = first === 'x' ? 'z' : 'x'
-      } else {
-        corner.current = null
-        if (Math.abs(dx) > 1e-6) heading.current = 'x'
-        else if (Math.abs(dz) > 1e-6) heading.current = 'z'
-      }
     } else if (durationRef.current !== transitionDuration && elapsed.current < durationRef.current) {
       start.current.copy(current.current)
       elapsed.current = 0
@@ -120,7 +99,6 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
       current.current.copy(target.current)
       start.current.copy(target.current)
       elapsed.current = transitionDuration
-      corner.current = null
       groupRef.current?.position.copy(current.current)
     }
     invalidate()
@@ -130,30 +108,7 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
     if (paused) return
     elapsed.current = advanceInterpolationElapsed(elapsed.current, delta, transitionDuration, false)
     const progress = interpolationProgress(elapsed.current, transitionDuration)
-    const cur = current.current
-    const c = corner.current
-    if (c) {
-      // L 形路径按距离插值：leg1 沿拐角轴走到对齐点，leg2 转垂直轴到目标
-      const sx = start.current.x
-      const sz = start.current.z
-      const leg1 = Math.abs(c.value - (c.axis === 'x' ? sx : sz))
-      const leg2 = c.axis === 'x' ? Math.abs(z - sz) : Math.abs(x - sx)
-      const total = leg1 + leg2 || 1
-      const d = progress * total
-      const yLerp = start.current.y + (y - start.current.y) * progress
-      if (d <= leg1) {
-        const sign = c.axis === 'x' ? Math.sign(x - sx) : Math.sign(z - sz)
-        if (c.axis === 'x') cur.set(sx + sign * d, yLerp, sz)
-        else cur.set(sx, yLerp, sz + sign * d)
-      } else {
-        const sign = c.axis === 'x' ? Math.sign(z - sz) : Math.sign(x - sx)
-        const rem = d - leg1
-        if (c.axis === 'x') cur.set(x, yLerp, sz + sign * rem)
-        else cur.set(sx + sign * rem, yLerp, z)
-      }
-    } else {
-      cur.lerpVectors(start.current, target.current, progress)
-    }
+    const cur = current.current.lerpVectors(start.current, target.current, progress)
     if (progress < 1) invalidate()
     if (groupRef.current) groupRef.current.position.copy(cur)
   })
@@ -862,25 +817,6 @@ function cellWorldPosition(
   ]
 }
 
-/**
- * 四向车渲染位置：在地面输送线上时横带方向吸附带面中心线（车身 2×2 与输送块
- * 2×2 始终全重叠）；车库内 / 其它位置用轨道坐标（天然与 2×2 槽块对齐）。
- */
-function shuttleRobotRenderPosition(
-  robot: SimulationRobot,
-  cols: number,
-  rows: number,
-  groundBelt: Map<string, GroundBeltSnap>,
-): [number, number, number] {
-  const row = robot.currentRow
-  const col = robot.currentCol
-  const snap = groundBelt.get(`${row},${col}`)
-  if (snap) {
-    return shuttleGroundSnapPosition(row, col, snap, cols, rows)
-  }
-  return shuttleTrackWorldPosition(row, col, Number(robot.currentLayer ?? 1), cols, rows)
-}
-
 function Simulation3DScene({
   topology,
   goods,
@@ -913,8 +849,6 @@ function Simulation3DScene({
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
-  // 地面线吸附表：四向车车身 2×2 在带面上与输送块 2×2 保持全重叠。
-  const groundBeltLookup = useMemo(() => buildGroundBeltLookup(topology.cells), [topology.cells])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1006,7 +940,12 @@ function Simulation3DScene({
     // 从落货块出发，沿 conveyorDirection 逐格走到输送线末端，生成货箱的行走折线；
     // 末端若是升降移栽机，则在移栽机上从下层升到上层。
     // lowerY 为架空线带面高度，groundBeltY 为地面线带面高度；逐格按所在块取对应高度。
-    const conveyorPath = (start: (typeof cells)[number], lowerY: number, groundBeltY: number) => {
+    const conveyorPath = (
+      start: (typeof cells)[number],
+      lowerY: number,
+      groundBeltY: number,
+      deck: 'lower' | 'upper' = 'lower',
+    ) => {
       const points: [number, number, number][] = []
       // 途经输送格：上层带面与下层是同一批格子，出站/回程沿这批格子行走，避免直线漂移。
       const beltCells: (typeof cells)[number][] = []
@@ -1015,7 +954,7 @@ function Simulation3DScene({
       let guard = 0
       while (cell && cell.type === 'conveyor' && guard < 400) {
         guard += 1
-        y = cell.conveyorGround ? groundBeltY : lowerY
+        y = cell.conveyorGround ? groundBeltY : lowerY + (deck === 'upper' ? CONVEYOR_DECK_STEP : 0)
         points.push([worldX(cell.col, cols) + CELL / 2, y, worldZ(cell.row, rows) - CELL / 2])
         beltCells.push(cell)
         const blockAnchor = conveyorAnchorOf(cell)
@@ -1030,9 +969,10 @@ function Simulation3DScene({
           const anchorCell = cellByPosition.get(
             `${cell.floor ?? '1F'}:${blockAnchor.row}:${blockAnchor.col}`,
           )
-          const blockDirection = DIRECTION_VEC3[
-            anchorCell?.conveyorDirection ?? cell.conveyorDirection ?? 'right'
-          ]
+          const anchorDecks = conveyorDecksOf(topology, anchorCell ?? cell)
+          const blockDirection = DIRECTION_VEC3[conveyorDirectionFromSide(
+            (anchorDecks[deck] ?? anchorDecks.lower).outputSide,
+          )]
           blockMap.set(blockKey, {
             key: blockKey,
             row: blockAnchor.row,
@@ -1043,7 +983,11 @@ function Simulation3DScene({
             ground: Boolean(anchorCell?.conveyorGround ?? cell.conveyorGround),
           })
         }
-        const direction = DIRECTION_VEC3[cell.conveyorDirection ?? 'right']
+        const anchorCell = cellByPosition.get(
+          `${cell.floor ?? '1F'}:${blockAnchor.row}:${blockAnchor.col}`,
+        ) ?? cell
+        const decks = conveyorDecksOf(topology, anchorCell)
+        const direction = DIRECTION_VEC3[conveyorDirectionFromSide((decks[deck] ?? decks.lower).outputSide)]
         const nextRow = cell.row - direction.dz
         const nextCol = cell.col + direction.dx
         const next = cellByPosition.get(`${cell.floor ?? '1F'}:${nextRow}:${nextCol}`)
@@ -1170,7 +1114,16 @@ function Simulation3DScene({
         entryCol = parsed.col
         entryFloor = parsed.floor ?? '1F'
       }
-      const conveyor = nearestConveyor(entryRow, entryCol, entryFloor, robot?.type === 'shuttle')
+      const portZone = task.assignedPortId
+        ? topology.zones.find((zone) => zone.id === task.assignedPortId)
+        : null
+      const bindingParts = portZone?.conveyorBinding?.blockId.split(':')
+      const boundConveyor = bindingParts && bindingParts.length >= 3
+        ? cellByPosition.get(
+            `${bindingParts[bindingParts.length - 3]}:${Number(bindingParts[bindingParts.length - 2])}:${Number(bindingParts[bindingParts.length - 1])}`,
+          )
+        : null
+      const conveyor = boundConveyor ?? nearestConveyor(entryRow, entryCol, entryFloor, robot?.type === 'shuttle')
       if (!conveyor) continue
       const anchor = conveyorAnchorOf(conveyor)
       const anchorCell = cells.find(
@@ -1187,10 +1140,10 @@ function Simulation3DScene({
       const lowerY = deckY + 0.16
       const groundBeltY = floorIndex * FLOOR_HEIGHT + CONVEYOR_GROUND_BELT_Y
       const baseY = groundRun ? groundBeltY : lowerY
-      const routeKey = `${anchorKey}:${groundRun ? 'g' : 'e'}`
+      const routeKey = `${anchorKey}:${groundRun ? 'g' : 'e'}:lower`
       let routeResult = pathCache.get(routeKey)
       if (!routeResult) {
-        routeResult = conveyorPath(anchorCell, lowerY, groundBeltY)
+        routeResult = conveyorPath(anchorCell, lowerY, groundBeltY, 'lower')
         pathCache.set(routeKey, routeResult)
       }
       const { points: route, beltCells } = routeResult
@@ -1222,7 +1175,8 @@ function Simulation3DScene({
                 ] as [number, number, number],
               ]
             : route
-      const direction = DIRECTION_VEC3[anchorCell.conveyorDirection ?? conveyor.conveyorDirection ?? 'right']
+      const routeDecks = conveyorDecksOf(topology, anchorCell)
+      const direction = DIRECTION_VEC3[conveyorDirectionFromSide(routeDecks.lower.outputSide)]
       const perp: [number, number] = [-direction.dz, direction.dx]
       const cx = worldX(anchor.col, cols) + CELL / 2
       const cz = worldZ(anchor.row, rows) - CELL / 2
@@ -1244,7 +1198,17 @@ function Simulation3DScene({
       // 出站/回程都沿上层带面行走，只允许 ≤1 格的短跳上下拣货台，禁止长距离直线漂移。
       let outboundLeg: [number, number, number][] = liftRoute
       let returnLeg: [number, number, number][] = liftRoute
-      if (stationRaw) {
+      const explicitUpperDeck = anchorCell.conveyorDecks?.upper?.enabled
+      if (explicitUpperDeck && beltCells.length) {
+        // 新模型：下层只负责去程到升降端；上层有自己的有向路线，专门把空箱送回 CTU 取箱口。
+        const upperStart = beltCells[beltCells.length - 1]
+        const upperRoute = conveyorPath(upperStart, lowerY, groundBeltY, 'upper').points
+        const upperStartPoint = upperRoute[0] ?? liftRoute[liftRoute.length - 1] ?? portPoint
+        const stationPoint = stationRaw ?? upperStartPoint
+        outboundLeg = stationPoint === upperStartPoint ? liftRoute : [...liftRoute, stationPoint]
+        returnLeg = [stationPoint, ...upperRoute, portPoint]
+      } else if (stationRaw) {
+        // 旧拓扑兼容：没有分层路由时沿用历史反向数组动画。
         let bestIdx = -1
         let bestDist = Number.POSITIVE_INFINITY
         beltCells.forEach((cell, idx) => {
@@ -1267,6 +1231,24 @@ function Simulation3DScene({
       }
       const stationRoute = outboundLeg
       const returnPath = returnLeg
+      const transport = task.conveyorTransport
+      const transportBlockId = transport?.phase === task.phase ? transport.currentBlockId : null
+      const transportBlock = transportBlockId
+        ? transportBlockId.split(':')
+        : null
+      const transportPoint: [number, number, number] | null = transportBlock && transportBlock.length >= 4
+        ? (() => {
+            const transportRow = Number(transportBlock[transportBlock.length - 3])
+            const transportCol = Number(transportBlock[transportBlock.length - 2])
+            const transportDeck = transportBlock[transportBlock.length - 1]
+            if (!Number.isFinite(transportRow) || !Number.isFinite(transportCol)) return null
+            return [
+              worldX(transportCol, cols) + CELL / 2,
+              lowerY + (transportDeck === 'upper' ? CONVEYOR_DECK_STEP : 0),
+              worldZ(transportRow, rows) - CELL / 2,
+            ]
+          })()
+        : null
 
       slots.forEach((line, lineIndex) => {
         const index = counters.get(anchorKey) ?? 0
@@ -1282,6 +1264,22 @@ function Simulation3DScene({
           baseY + Math.floor(stack / 2) * 0.32,
           z,
         ]
+        if (transportPoint) {
+          const synchronizedPoint: [number, number, number] = [
+            transportPoint[0] + (lineIndex % 2) * 0.12 - 0.06,
+            transportPoint[1] + Math.floor(lineIndex / 2) * 0.14,
+            transportPoint[2] + (lineIndex % 2) * 0.12 - 0.06,
+          ]
+          boxes.push({
+            key: `${task.id}-${lineIndex}-${transportBlockId}`,
+            position: synchronizedPoint,
+            path: [synchronizedPoint],
+            color: GOODS_CATEGORY_COLORS[line.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR,
+            hold: true,
+            skipRise: true,
+          })
+          return
+        }
         const outboundPath = [startPoint, ...stationRoute]
         const returning = task.phase === 'conveyor_return'
         const waitingAtPort = task.phase === 'pickup_from_port'
@@ -1554,7 +1552,13 @@ function Simulation3DScene({
 
       {robots.map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
-          ? shuttleRobotRenderPosition(robot, spec.cols, spec.rows, groundBeltLookup)
+          ? shuttleTrackWorldPosition(
+            robot.currentRow,
+            robot.currentCol,
+            Number(robot.currentLayer ?? 1),
+            spec.cols,
+            spec.rows,
+          )
           : robotWorldPosition(
             robot.currentFloor ?? '1F',
             robot.currentRow,
@@ -1598,7 +1602,13 @@ function Simulation3DScene({
           const selected = robots.find((robot) => robot.id === selectedRobotId)
           if (!selected) return null
           if (selected.type === 'shuttle') {
-            const [x, y, z] = shuttleRobotRenderPosition(selected, spec.cols, spec.rows, groundBeltLookup)
+            const [x, y, z] = shuttleTrackWorldPosition(
+              selected.currentRow,
+              selected.currentCol,
+              Number(selected.currentLayer ?? 1),
+              spec.cols,
+              spec.rows,
+            )
             return [x, y + 0.42, z] as [number, number, number]
           }
           const base = robotWorldPosition(

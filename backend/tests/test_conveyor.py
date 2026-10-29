@@ -1,4 +1,4 @@
-﻿from app.services.conveyor import compile_conveyor_graph, route_from_block, route_from_cell
+from app.services.conveyor import compile_conveyor_graph, route_from_block, route_from_cell
 from app.services.runtime import repo
 from app.services.simulation import RunRuntime, SimulationService
 

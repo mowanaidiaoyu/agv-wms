@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, PanelRightOpen, Plus, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { Surface } from '../components/Surface'
@@ -176,6 +176,13 @@ export function TopologyPage() {
   const [showGoods, setShowGoods] = useState(false)
   const [toolsCollapsed, setToolsCollapsed] = useState(true)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const compassRef = useRef<HTMLDivElement>(null)
+  const updateCompassAngle = useCallback((angle: number) => {
+    const compass = compassRef.current
+    if (!compass) return
+    compass.style.setProperty('--compass-angle', `${angle}rad`)
+    compass.style.setProperty('--compass-counter-angle', `${-angle}rad`)
+  }, [])
 
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const records = useMemo(() => topologiesQuery.data ?? [], [topologiesQuery.data])
@@ -268,9 +275,20 @@ export function TopologyPage() {
                     onCellEnter={pointerEnterAt}
                     onEntityDown={entityPointerDown}
                     onMoveCell={moveCell}
+                    onCompassAngleChange={updateCompassAngle}
                   />
                 </Suspense>
               )}
+              <div ref={compassRef} className="topo-direction-compass" aria-label="仓库方向罗盘">
+                <div className="topo-direction-compass-rose">
+                  <span className="topo-direction-compass-point north"><span><b>北</b><small>N</small></span></span>
+                  <span className="topo-direction-compass-point east"><span><b>东</b><small>E</small></span></span>
+                  <span className="topo-direction-compass-point south"><span><b>南</b><small>S</small></span></span>
+                  <span className="topo-direction-compass-point west"><span><b>西</b><small>W</small></span></span>
+                  <i aria-hidden="true">◆</i>
+                </div>
+                <em>仓库方向</em>
+              </div>
               <button
                 type="button"
                 className={`topo-inspector-trigger ${selection ? 'topo-inspector-trigger-active' : ''}`}
