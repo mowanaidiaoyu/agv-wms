@@ -101,7 +101,7 @@ def _minimal_handoff_topology() -> dict:
 
 def test_real_topology_id_and_revision(topology: dict, audit) -> None:
     assert audit.topologyId == "topology-6ceb4920"
-    assert audit.topologyRevision == "2.0.0:a85a404beaae5dd9"
+    assert audit.topologyRevision == "2.0.0:9b94d35fbd9a6446"
     assert audit.topologyRevision == topology_revision(topology)
 
 

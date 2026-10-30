@@ -2,7 +2,7 @@
   "planId": "g1b1-topology-6ceb4920-handoff-layout-v1",
   "schemaVersion": "1.0.0",
   "topologyId": "topology-6ceb4920",
-  "topologyRevision": "2.0.0:a85a404beaae5dd9",
+  "topologyRevision": "2.0.0:9b94d35fbd9a6446",
   "overallStatus": "PARTIAL",
   "recommendedOptionId": "scheme-a-height-transfer",
   "pickingArmPreview": {
@@ -61,8 +61,8 @@
     },
     "downstream": {
       "nextRequiredCellId": "cell-r86-c51",
-      "validationStatus": "PASS",
-      "reason": "The adjacent L2 conveyor cell exists and both cells formally run right."
+      "validationStatus": "BLOCKED",
+      "reason": "User removed the L2 conveyor segment cell-r86-c51..c59 (the wrong row-86 run) in the topology editor. The dropoff cell-r86-c50 itself remains; the arm preview works, but the cargo handoff stays BLOCKED until a replacement connecting segment is drawn."
     },
     "previewTransfer": null,
     "previewRoute": {

@@ -22,7 +22,7 @@ def plan(topology: dict):
 
 def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:a85a404beaae5dd9"
+    assert plan.topologyRevision == "2.0.0:9b94d35fbd9a6446"
     assert plan.overallStatus == "PARTIAL"
     assert plan.summary["formalTopologyMutated"] is False
 
@@ -194,10 +194,11 @@ def test_picking_arm_is_preview_only_and_has_real_directed_downstream(
     assert arm.pickup.provenance == "topology"
     assert arm.dropoff.provenance == "topology"
     assert arm.canDeclareDelivery is False
+    # 用户在编辑器删除了错误的 row-86 段（c51..c59，含 turn_transfer-15）：
+    # 放货点 c50 仍在，但下游衔接格缺失 → 下游如实 BLOCKED，等待重绘。
     assert arm.downstreamCellId == "cell-r86-c51"
-    assert arm.downstreamStatus == "PASS"
-    downstream = next(cell for cell in topology["cells"] if cell["id"] == arm.downstreamCellId)
-    assert downstream["conveyorDirection"] == "right"
+    assert arm.downstreamStatus == "BLOCKED"
+    assert not any(cell["id"] == arm.downstreamCellId for cell in topology["cells"])
     assert arm.liftBId == "shuttle-lift-b"
     assert arm.liftBClearanceCells == pytest.approx(8.60)
     assert arm.workRadius == pytest.approx(7.9)
@@ -229,48 +230,26 @@ def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(p
     assert "PICKING_ARM_KINEMATICS_UNDERSIZED" not in issue_codes
 
 
-def test_picking_arm_preview_path_turns_at_15_and_reaches_r108_c60(plan) -> None:
+def test_picking_arm_preview_path_stops_at_c50_until_segment_redrawn(plan) -> None:
     arm = plan.pickingArm
     assert arm is not None
-    assert [step.cellId for step in arm.previewConveyorPath] == (
-        [f"cell-r86-c{col}" for col in range(50, 61)]
-        + [f"cell-r{row}-c60" for row in range(87, 109)]
-    )
+    # 用户删除 c51..c59 后，预览路径从放货点 c50 出发立即受阻：只含起点一格。
+    assert [step.cellId for step in arm.previewConveyorPath] == ["cell-r86-c50"]
     assert all(step.position.level == 2 for step in arm.previewConveyorPath)
     assert all(step.beltHeight == pytest.approx(3.0) for step in arm.previewConveyorPath)
-    assert all(step.direction == "right" for step in arm.previewConveyorPath[:10])
-    assert all(step.direction == "down" for step in arm.previewConveyorPath[10:])
-    assert all(step.directionSource == "layout_plan" for step in arm.previewConveyorPath[10:])
-    assert arm.previewEndpointId == "cell-r108-c60"
-    assert arm.previewPathStatus == "PARTIAL"
-    assert "cell-r108-c60" in arm.previewStopReason
-    mounted_devices = {
-        step.cellId: step.deviceIds
-        for step in arm.previewConveyorPath
-        if step.deviceIds
-    }
-    # 实际拓扑：转向设备 turn_transfer-15 在转弯格；列60 走廊途经 (102,60)/(106,60)
-    # 平台转向设备（同事计划里的 -17/-18/-13 落位与正式拓扑不一致，按现实断言）
-    assert mounted_devices == {
-        "cell-r86-c60": ["turn_transfer-15"],
-        "cell-r102-c60": ["turn_transfer-02"],
-        "cell-r106-c60": ["turn_transfer-03"],
-    }
-    transfer_steps = [
-        step for step in arm.previewConveyorPath
-        if step.transitionToNext == "device_transfer"
-    ]
-    assert [step.cellId for step in transfer_steps] == ["cell-r86-c60"]
-    assert transfer_steps[0].transferDeviceId == "turn_transfer-15"
-    proposed_steps = [
-        step for step in arm.previewConveyorPath
-        if step.transitionToNext == "proposed_direction"
-    ]
-    assert [step.cellId for step in proposed_steps] == [
-        f"cell-r{row}-c60" for row in range(87, 108)
-    ]
+    assert all(step.direction == "right" for step in arm.previewConveyorPath)
+    assert arm.previewEndpointId == "cell-r86-c50"
+    assert arm.previewPathStatus == "BLOCKED"
+    assert "r86,c51" in arm.previewStopReason
     assert arm.previewTransferDeviceId == "turn_transfer-15"
+    # 用户以 c60 的显式甲板（lower north→south outbound）替代原转向设备；
+    # turn_transfer-15 节点已随错误线一并删除，路线声明保留为重绘参考。
+    assert not any(node["id"] == "turn_transfer-15" for node in topology_fixture()["nodes"])
     assert arm.previewTransferStatus == "PARTIAL"
+
+
+def topology_fixture():
+    return json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
 
 
 def test_revision_mismatch_refuses_the_plan(topology: dict) -> None:
