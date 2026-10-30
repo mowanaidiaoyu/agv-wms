@@ -267,6 +267,25 @@ export function shuttleTrackWorldPosition(
   ]
 }
 
+/**
+ * 四向车 2×2 车体世界坐标：吸附到所在 2×2 结构（巷道槽位 / 地面输送块 / 出货位闸口）
+ * 的块中心——车体必须完整覆盖该结构，否则会出现「一半在巷道一半在库位」的错位。
+ * anchorRow/anchorCol 为该 2×2 结构的左上角格。
+ */
+export function shuttleBlockWorldPosition(
+  anchorRow: number,
+  anchorCol: number,
+  level: number,
+  cols: number,
+  rows: number,
+): [number, number, number] {
+  return [
+    worldX(anchorCol, cols) + CELL,
+    SHUTTLE_RACK_BASE_Y + SHUTTLE_TRACK_SURFACE_OFFSET + (Math.max(1, level) - 1) * ZONE_LEVEL_HEIGHT.shuttle,
+    worldZ(anchorRow, rows) - CELL,
+  ]
+}
+
 /** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */
 export function robotWorldPosition(
   floor: string,

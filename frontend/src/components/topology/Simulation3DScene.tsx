@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
@@ -21,6 +21,7 @@ import {
   buildGoodsSceneBoxes,
   buildSceneSpec,
   robotWorldPosition,
+  shuttleBlockWorldPosition,
   shuttleTrackWorldPosition,
   worldToCell,
   worldX,
@@ -849,6 +850,48 @@ function Simulation3DScene({
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
+
+  // 四向车 2×2 车体吸附：巷道槽位 / 地面输送块 / 出货位闸口都是 2×2 结构，
+  // 车体必须完整覆盖所在结构（中心=块中心），否则会「一半在巷道一半在库位」。
+  const shuttleBlockAnchors = useMemo(() => {
+    const anchors = new Map<string, { row: number; col: number }>()
+    const corners = [[0, 0], [0, 1], [1, 0], [1, 1]] as const
+    for (const cell of topology.cells) {
+      if (cell.type !== 'conveyor' || !cell.conveyorGround || !cell.conveyorAnchor) continue
+      const anchor = { row: Number(cell.conveyorAnchor.row), col: Number(cell.conveyorAnchor.col) }
+      for (const [dRow, dCol] of corners) {
+        anchors.set(`${anchor.row + dRow}:${anchor.col + dCol}`, anchor)
+      }
+    }
+    for (const node of topology.nodes) {
+      if (node.type !== 'shuttle_dock' && node.type !== 'picking_handoff') continue
+      const anchor = { row: Number(node.row), col: Number(node.col) }
+      for (const [dRow, dCol] of corners) {
+        anchors.set(`${anchor.row + dRow}:${anchor.col + dCol}`, anchor)
+      }
+    }
+    for (const zone of topology.zones) {
+      if (zone.type !== 'shuttle' || !zone.slotAisles) continue
+      for (const key of Object.keys(zone.slotAisles)) {
+        const [anchorRow, anchorCol] = key.split(',').map(Number)
+        if (Number.isNaN(anchorRow) || Number.isNaN(anchorCol)) continue
+        const anchor = { row: anchorRow, col: anchorCol }
+        for (const [dRow, dCol] of corners) {
+          anchors.set(`${anchorRow + dRow}:${anchorCol + dCol}`, anchor)
+        }
+      }
+    }
+    return anchors
+  }, [topology])
+
+  const shuttleVehiclePosition = useCallback((robot: SimulationRobot): [number, number, number] => {
+    const anchor = shuttleBlockAnchors.get(`${Number(robot.currentRow)}:${Number(robot.currentCol)}`)
+    const layer = Math.max(1, Number(robot.currentLayer ?? 1))
+    if (anchor) {
+      return shuttleBlockWorldPosition(anchor.row, anchor.col, layer, spec.cols, spec.rows)
+    }
+    return shuttleTrackWorldPosition(robot.currentRow, robot.currentCol, layer, spec.cols, spec.rows)
+  }, [shuttleBlockAnchors, spec.cols, spec.rows])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1552,13 +1595,7 @@ function Simulation3DScene({
 
       {robots.map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
-          ? shuttleTrackWorldPosition(
-            robot.currentRow,
-            robot.currentCol,
-            Number(robot.currentLayer ?? 1),
-            spec.cols,
-            spec.rows,
-          )
+          ? shuttleVehiclePosition(robot)
           : robotWorldPosition(
             robot.currentFloor ?? '1F',
             robot.currentRow,
@@ -1602,13 +1639,7 @@ function Simulation3DScene({
           const selected = robots.find((robot) => robot.id === selectedRobotId)
           if (!selected) return null
           if (selected.type === 'shuttle') {
-            const [x, y, z] = shuttleTrackWorldPosition(
-              selected.currentRow,
-              selected.currentCol,
-              Number(selected.currentLayer ?? 1),
-              spec.cols,
-              spec.rows,
-            )
+            const [x, y, z] = shuttleVehiclePosition(selected)
             return [x, y + 0.42, z] as [number, number, number]
           }
           const base = robotWorldPosition(

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { emptyTopology } from '../data/topologyDefaults'
 import { paintCell, placeNode } from './topology'
-import { buildSceneSpec, shuttleTrackWorldPosition } from './topology3d'
+import { buildSceneSpec, shuttleBlockWorldPosition, shuttleTrackWorldPosition } from './topology3d'
 
 describe('shuttleTrackWorldPosition', () => {
   it('matches the backend shuttle-internal-levels-v1 coordinate contract', () => {
@@ -15,6 +15,16 @@ describe('shuttleTrackWorldPosition', () => {
     expect(liftB[0]).toBe(-24.5)
     expect(liftB[1]).toBeCloseTo(4.8)
     expect(liftB[2]).toBe(-81)
+  })
+
+  it('centers the 2x2 vehicle body on its containing block', () => {
+    // 块中心 = 四个格轨道中心的中点（车体完整覆盖块内四格）。
+    const corners = [[92, 47], [92, 48], [93, 47], [93, 48]] as const
+    const tracks = corners.map(([row, col]) => shuttleTrackWorldPosition(row, col, 1, 100, 216))
+    const body = shuttleBlockWorldPosition(92, 47, 1, 100, 216)
+    expect(body[0]).toBeCloseTo((Math.min(...tracks.map((t) => t[0])) + Math.max(...tracks.map((t) => t[0]))) / 2)
+    expect(body[2]).toBeCloseTo((Math.min(...tracks.map((t) => t[2])) + Math.max(...tracks.map((t) => t[2]))) / 2)
+    expect(body[1]).toBeCloseTo(tracks[0][1])
   })
 
   it('renders a turn transfer only on its selected conveyor deck', () => {
