@@ -73,7 +73,9 @@ const SHUTTLE_EMISSIVE = '#6d28d9'
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
-/** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。 */
+/** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。
+ * 拐角走直角：目标垂直转向时先沿当前行进轴对齐、再转垂直轴（L 形路径按距离插值），
+ * 避免直线插值斜切拐角（看起来像拐弯时走直线/漂移）。 */
 function RobotGroup({ position, children, onClick, paused = false, transitionDuration = 0.3 }: { position: [number, number, number]; children: ReactNode; onClick?: () => void; paused?: boolean; transitionDuration?: number }) {
   const groupRef = useRef<Group>(null)
   const current = useRef(new Vector3(position[0], position[1], position[2]))
@@ -81,6 +83,10 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
   const target = useRef(new Vector3(position[0], position[1], position[2]))
   const elapsed = useRef(transitionDuration)
   const durationRef = useRef(transitionDuration)
+  // 当前行进轴（'x'/'z'）；'y' 为电梯升降，不参与拐角
+  const heading = useRef<'x' | 'z'>('x')
+  // L 形拐角：先走的轴与对齐值（null = 目标与本段起点同轴，直线插值即可）
+  const corner = useRef<{ axis: 'x' | 'z'; value: number } | null>(null)
   const invalidate = useThree((state) => state.invalidate)
   const [x, y, z] = position
 
@@ -89,6 +95,18 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
     if (targetChanged) {
       start.current.copy(current.current)
       elapsed.current = 0
+      const dx = x - start.current.x
+      const dz = z - start.current.z
+      if (Math.abs(dx) > 1e-6 && Math.abs(dz) > 1e-6) {
+        // 斜向目标 = 拐角：先沿当前行进轴对齐目标坐标，再转另一轴
+        const first = heading.current
+        corner.current = { axis: first, value: first === 'x' ? x : z }
+        heading.current = first === 'x' ? 'z' : 'x'
+      } else {
+        corner.current = null
+        if (Math.abs(dx) > 1e-6) heading.current = 'x'
+        else if (Math.abs(dz) > 1e-6) heading.current = 'z'
+      }
     } else if (durationRef.current !== transitionDuration && elapsed.current < durationRef.current) {
       start.current.copy(current.current)
       elapsed.current = 0
@@ -102,6 +120,7 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
       current.current.copy(target.current)
       start.current.copy(target.current)
       elapsed.current = transitionDuration
+      corner.current = null
       groupRef.current?.position.copy(current.current)
     }
     invalidate()
@@ -111,7 +130,30 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
     if (paused) return
     elapsed.current = advanceInterpolationElapsed(elapsed.current, delta, transitionDuration, false)
     const progress = interpolationProgress(elapsed.current, transitionDuration)
-    const cur = current.current.lerpVectors(start.current, target.current, progress)
+    const cur = current.current
+    const c = corner.current
+    if (c) {
+      // L 形路径按距离插值：leg1 沿拐角轴走到对齐点，leg2 转垂直轴到目标
+      const sx = start.current.x
+      const sz = start.current.z
+      const leg1 = Math.abs(c.value - (c.axis === 'x' ? sx : sz))
+      const leg2 = c.axis === 'x' ? Math.abs(z - sz) : Math.abs(x - sx)
+      const total = leg1 + leg2 || 1
+      const d = progress * total
+      const yLerp = start.current.y + (y - start.current.y) * progress
+      if (d <= leg1) {
+        const sign = c.axis === 'x' ? Math.sign(x - sx) : Math.sign(z - sz)
+        if (c.axis === 'x') cur.set(sx + sign * d, yLerp, sz)
+        else cur.set(sx, yLerp, sz + sign * d)
+      } else {
+        const sign = c.axis === 'x' ? Math.sign(z - sz) : Math.sign(x - sx)
+        const rem = d - leg1
+        if (c.axis === 'x') cur.set(x, yLerp, sz + sign * rem)
+        else cur.set(sx + sign * rem, yLerp, z)
+      }
+    } else {
+      cur.lerpVectors(start.current, target.current, progress)
+    }
     if (progress < 1) invalidate()
     if (groupRef.current) groupRef.current.position.copy(cur)
   })
