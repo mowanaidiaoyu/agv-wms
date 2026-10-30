@@ -19,7 +19,7 @@ export interface ConveyorDecks {
   lower: ConveyorDeckConfig
   upper?: ConveyorDeckConfig
 }
-export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock'
+export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock' | 'picking_handoff'
 export type EditorObjectType =
   | 'select'
   | 'batch'

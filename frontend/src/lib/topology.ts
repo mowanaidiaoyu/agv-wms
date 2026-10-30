@@ -46,6 +46,7 @@ export const NODE_LABELS: Record<NodeType, string> = {
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
   shuttle_dock: '四向车出货位',
+  picking_handoff: '机械臂交接处',
 }
 
 export const ZONE_LABELS: Record<ZoneType, string> = {
@@ -115,6 +116,7 @@ export const NODE_PREFIX: Record<NodeType, string> = {
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
   shuttle_dock: 'dock',
+  picking_handoff: 'handoff',
 }
 
 /** 只读展示型（节点需要“贴地”，通常在通行路格上承载）。 */
@@ -787,6 +789,7 @@ const NODE_ZONE_AFFINITY: Record<NodeType, ReadonlySet<ZoneType>> = {
   lift_transfer: new Set<ZoneType>(),
   turn_transfer: new Set<ZoneType>(),
   shuttle_dock: new Set<ZoneType>(),
+  picking_handoff: new Set<ZoneType>(),
 }
 
 export function zoneRefForNodeType(

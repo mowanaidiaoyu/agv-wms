@@ -68,7 +68,7 @@ def test_pyc_topology_uses_validated_c_shuttle_graph_contract() -> None:
     contract = shuttle_contract(_topology())
 
     assert contract["topologyId"] == "topology-6ceb4920"
-    assert contract["topologyRevision"] == "2.0.0:9b94d35fbd9a6446"
+    assert contract["topologyRevision"] == "2.0.0:dc95637ce2811b8c"
     assert contract["planningEnabled"] is True
     assert {lift["lift_id"] for lift in contract["lifts"]} == {
         "shuttle-lift-a",

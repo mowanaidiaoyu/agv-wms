@@ -33,6 +33,7 @@ from .pathfinding import (
     shuttle_servable_slots,
 )
 from .simulation_config import build_simulation_config
+from .transport_layout import _load_raw_plan
 from .unified_transfer import (
     apply_drop,
     apply_pick,
@@ -66,7 +67,10 @@ SUPPORTED_SPEED_MULTIPLIERS = {1, 2, 4}
 TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed", "exception"}
 # CTU 出库口排队成本：每个在途任务在出货口约占用 24 tick（与拣选三阶段节拍同量级）。
 PORT_QUEUE_SERVICE_TICKS = 24
-TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position", "conveyor_position"}
+# 机械臂交接：四向车在交接处等待后，机械臂抓取（pick）与放箱（place）的阶段时长。
+ARM_HANDOFF_PICK_TICKS = 3
+ARM_HANDOFF_PLACE_TICKS = 4
+TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position", "conveyor_position", "arm_handoff"}
 # 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
 REROUTE_AFTER_BLOCK_TICKS = 2
 YIELD_AFTER_BLOCK_TICKS = 4
@@ -93,6 +97,8 @@ class RunRuntime:
     initial_metrics: dict[str, Any] = field(default_factory=dict)
     # 显式分层输送模型编译产物（pyc-new 移植）：空 dict 表示回退 legacy 固定 tick
     conveyor_graph: dict[str, Any] = field(default_factory=dict)
+    # 机械臂交接目标（交接处格 + 放货点带面）；None 表示未启用机械臂交接
+    arm_handoff: dict[str, Any] | None = None
 
 
 class WebSocketHub:
@@ -580,6 +586,8 @@ class SimulationService:
             raise ValueError(
                 f"输送线拓扑无效：{issue.get('blockId')} {issue.get('deck')}层，{issue.get('message')}"
             )
+        # 机械臂交接：拓扑有 picking_handoff 标记 + 布局计划声明放货点时启用。
+        arm_handoff = self._arm_handoff_target(topology)
         node_lookup = build_node_lookup(topology)
         robots: list[dict[str, Any]] = []
         for robot in config["robots"]:
@@ -662,6 +670,8 @@ class SimulationService:
             "alerts": [],
             "queues": {"conveyor": [], "station": [], "buffer": []},
             "conveyorItems": [],
+            "pickingArm": {"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None} if arm_handoff else None,
+            "armBeltBoxes": [],
             "createdAt": now_dt().isoformat(),
             "updatedAt": now_dt().isoformat(),
         }
@@ -689,6 +699,7 @@ class SimulationService:
             metrics=metrics,
             speed_multiplier=DEFAULT_SPEED_MULTIPLIER,
             conveyor_graph=conveyor_graph,
+            arm_handoff=arm_handoff,
         )
         # Every WebSocket connection receives one complete snapshot. Normal
         # tick frames can therefore omit the potentially very large inventory.
@@ -825,6 +836,128 @@ class SimulationService:
         ground_ports, elevated_ports = self._split_ports_by_conveyor_kind(topology)
         preferred = elevated_ports or ground_ports
         return preferred[0] if preferred else ""
+
+    def _arm_handoff_target(self, topology: dict[str, Any]) -> dict[str, Any] | None:
+        """机械臂交接目标：拓扑里有 picking_handoff 标记 + 布局计划声明了放货点时才启用。
+
+        返回 {handoffCellId, handoffNodeId, dropoffCellId, dropoffLevel, dropoffBeltHeight}；
+        任一条件缺失返回 None（四向车保持原有交付行为）。
+        """
+        handoff = next(
+            (node for node in topology.get("nodes", []) if node.get("type") == "picking_handoff"),
+            None,
+        )
+        if handoff is None:
+            return None
+        try:
+            raw = _load_raw_plan(str(topology["id"]))
+        except (OSError, ValueError):
+            return None
+        dropoff = (raw.get("pickingArmPreview") or {}).get("dropoff") or {}
+        drop_cell = str(dropoff.get("topologyCellId") or "")
+        if not drop_cell:
+            return None
+        cells_by_id = {
+            str(cell["id"])
+            for cell in topology.get("cells", [])
+            if cell.get("type") == "conveyor"
+        }
+        if drop_cell not in cells_by_id:
+            return None
+        return {
+            "handoffCellId": cell_id(
+                int(handoff["row"]), int(handoff["col"]), handoff.get("floor") or "1F"
+            ),
+            "handoffNodeId": str(handoff["id"]),
+            "dropoffCellId": drop_cell,
+            "dropoffLevel": int(dropoff.get("level") or 2),
+            "dropoffBeltHeight": float(dropoff.get("beltHeight") or 3.0),
+        }
+
+    def _advance_picking_arm(self, runtime: RunRuntime) -> None:
+        """机械臂交接：从交接处四向车抓取货箱，放到放货点输送带；完成后四向车才释放。
+
+        单臂逐箱服务，两阶段计时：pick（抓取）→ place（放至 L2 放货点带面）。
+        等待中的四向车停在交接处（占用该格），后续车辆在地面线上自然排队。
+        """
+        arm = runtime.state.get("pickingArm")
+        target = runtime.arm_handoff
+        if not arm or not target:
+            return
+        tick = runtime.state["tick"]
+        stage = arm.get("stage")
+        if stage in {"pick", "place"}:
+            remaining = int(arm.get("remainingTicks", 0)) - 1
+            arm["remainingTicks"] = max(0, remaining)
+            if remaining > 0:
+                return
+            robot = next(
+                (item for item in runtime.state["robots"] if item["id"] == arm.get("robotId")),
+                None,
+            )
+            task = find_task(runtime.state["tasks"], arm.get("taskId"))
+            if robot is None or task is None or not (robot.get("carrying") or []):
+                # 兜底：车或任务丢失（故障/取消）→ 复位机械臂。
+                arm.update({"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None})
+                return
+            if stage == "pick":
+                arm["stage"] = "place"
+                arm["remainingTicks"] = ARM_HANDOFF_PLACE_TICKS
+                robot["phaseLabel"] = "机械臂放箱至输送线"
+                task["phaseLabel"] = robot["phaseLabel"]
+                self._record_event(
+                    runtime,
+                    tick,
+                    "arm_handoff",
+                    {"stage": "place", "taskId": task["id"], "robotId": robot["id"], "dropoffCellId": target["dropoffCellId"]},
+                )
+                return
+            # place 完成：货箱落到放货点带面，四向车释放、任务完成。
+            box = dict((robot.get("carrying") or [{}])[0])
+            belt = runtime.state.setdefault("armBeltBoxes", [])
+            belt.append({
+                **box,
+                "cellId": target["dropoffCellId"],
+                "level": target["dropoffLevel"],
+                "beltHeight": target["dropoffBeltHeight"],
+                "placedTick": tick,
+            })
+            task["deliveredGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
+            task["armPlacedCellId"] = target["dropoffCellId"]
+            robot["carrying"] = []
+            robot["load"] = 0
+            arm.update({"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None})
+            self._record_event(
+                runtime,
+                tick,
+                "arm_handoff",
+                {"stage": "placed", "taskId": task["id"], "robotId": robot["id"], "cellId": target["dropoffCellId"]},
+            )
+            self._complete_task(runtime, robot, task)
+            return
+        # 空闲：寻找已停在交接处、进入等待阶段的载货四向车。
+        for robot in runtime.state["robots"]:
+            if robot["currentCellId"] != target["handoffCellId"] or not (robot.get("carrying") or []):
+                continue
+            task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+            if task is None or task.get("phase") != "waiting_arm_handoff":
+                continue
+            arm.update({
+                "status": "busy",
+                "stage": "pick",
+                "remainingTicks": ARM_HANDOFF_PICK_TICKS,
+                "taskId": task["id"],
+                "robotId": robot["id"],
+            })
+            robot["phaseLabel"] = "机械臂抓取中"
+            task["phaseLabel"] = robot["phaseLabel"]
+            self._record_event(
+                runtime,
+                tick,
+                "arm_handoff",
+                {"stage": "pick", "taskId": task["id"], "robotId": robot["id"]},
+            )
+            return
 
     def _split_ports_by_conveyor_kind(self, topology: dict[str, Any]) -> tuple[list[str], list[str]]:
         """按最近输送块的类型把 port 分成（地面线, 架空线）两组。
@@ -1318,18 +1451,28 @@ class SimulationService:
             claimed_boxes[box_key(pick_box)] = f"task-dock-{dock['dockId']}-{int(dock.get('cursor') or 0) + 1}"
             dock["cursor"] = int(dock.get("cursor") or 0) + 1
             line = self._lane_line(pick_box)
+            # 机械臂交接：拓扑声明了 picking_handoff + 放货点时，四向车不再直接在
+            # 出货位上带，而是沿地面线把货箱运到交接处，等待机械臂抓取放带。
+            arm_target = self._arm_handoff_target(topology)
+            delivery_cell = (
+                arm_target["handoffCellId"]
+                if arm_target
+                else cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F")
+            )
             task = self._build_task(
                 topology,
                 f"task-dock-{dock['dockId']}-{dock['cursor']}",
                 "shuttle",
                 "cross_zone",
                 [line],
-                cell_id(int(dock["row"]), int(dock["col"]), dock.get("floor") or "1F"),
+                delivery_cell,
                 dock.get("priority") == "urgent",
                 1 if dock.get("priority") == "urgent" else 2,
                 created_tick=created_tick,
             )
             task["dockId"] = dock["dockId"]
+            if arm_target:
+                task["armHandoff"] = True
             if depends:
                 task["blockedBy"] = depends
                 task["phaseLabel"] = "等待倒库让位"
@@ -1685,6 +1828,7 @@ class SimulationService:
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
         self._move_robots(runtime)
+        self._advance_picking_arm(runtime)
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
@@ -3207,7 +3351,31 @@ class SimulationService:
             return
 
         if task["phase"] == "delivery_to_port":
+            if (
+                task.get("robotType") == "shuttle"
+                and task.get("armHandoff")
+                and robot["currentCellId"] == task.get("deliveryCellId")
+            ):
+                # 到达机械臂交接处：停车等待机械臂抓取，禁止自行上带。
+                task["phase"] = "waiting_arm_handoff"
+                task["phaseLabel"] = "等待机械臂抓取"
+                robot["status"] = "handling"
+                robot["phaseLabel"] = task["phaseLabel"]
+                robot["path"] = [robot["currentCellId"]]
+                robot["pathLayers"] = [robot.get("currentLayer", 1)]
+                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+                self._record_event(
+                    runtime,
+                    tick,
+                    "task_state_changed",
+                    {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+                )
+                return
             self._advance_ctu_delivery_action(runtime, robot, task, occupied_cells)
+            return
+
+        if task["phase"] == "waiting_arm_handoff":
+            # 机械臂接管（_advance_picking_arm 驱动）；四向车在此阶段原地等待。
             return
 
         if task["phase"] in {

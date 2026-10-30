@@ -812,6 +812,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
     lift_transfer: '#f97316',
     turn_transfer: '#14b8a6',
     shuttle_dock: '#0d9488',
+    picking_handoff: '#eab308',
   }
   for (const node of topology.nodes) {
     const floor = itemFloor(node)

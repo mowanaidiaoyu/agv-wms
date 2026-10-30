@@ -8,6 +8,7 @@ from app.services.assignment import assign_tasks
 from app.services.pathfinding import cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle, shuttle_servable_slots
 from app.services.runtime import repo
 from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, RunRuntime, SimulationService
+from app.services.simulation_config import build_simulation_config
 
 
 client = TestClient(app)
@@ -1386,3 +1387,141 @@ def test_complete_picking_finishes_picking_immediately():
     assert task["dropZoneZoneId"] == "zone-drop"
     assert task["dropZoneCellId"] == "cell-r4-c1"
     assert robot["status"] == "waiting"
+
+
+_HANDOFF_TARGET = {
+    "handoffCellId": "cell-r9-c9",
+    "handoffNodeId": "picking-handoff-01",
+    "dropoffCellId": "cell-r9-c8",
+    "dropoffLevel": 2,
+    "dropoffBeltHeight": 3.0,
+}
+
+
+def _handoff_topology():
+    return {
+        **TOPOLOGY,
+        "grid": {**TOPOLOGY["grid"], "rows": 10, "cols": 10},
+        "zones": [
+            {"id": "zone-ctu", "label": "CTU", "type": "ctu", "x": 0, "y": 0, "width": 4, "height": 6},
+            {"id": "zone-shuttle", "label": "Shuttle", "type": "shuttle", "x": 0, "y": 8, "width": 4, "height": 2, "slotAisles": {"8,0": 1}},
+        ],
+        "cells": [
+            *TOPOLOGY["cells"],
+            {"id": "cell-r9-c8", "floor": "1F", "row": 9, "col": 8, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+            {"id": "cell-r9-c9", "floor": "1F", "row": 9, "col": 9, "type": "conveyor", "conveyorGround": True,
+             "conveyorAnchor": {"row": 9, "col": 8}},
+        ],
+        "nodes": [
+            *TOPOLOGY["nodes"],
+            {"id": "shuttle-01", "type": "shuttle_robot", "row": 8, "col": 0, "zoneId": "zone-shuttle", "capacity": 1, "label": "SHUTTLE-01"},
+            {
+                "id": "dock-01", "type": "shuttle_dock", "floor": "1F", "row": 9, "col": 8,
+                "zoneId": None, "capacity": 1, "label": "出货位 1",
+                "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "largeCategory": "建筑配件", "quantity": 2,
+            },
+            {
+                "id": "picking-handoff-01", "type": "picking_handoff", "floor": "1F", "row": 9, "col": 9,
+                "zoneId": None, "capacity": 1, "label": "机械臂交接处",
+            },
+        ],
+    }
+
+
+def test_dock_tasks_deliver_to_picking_handoff_when_declared(monkeypatch):
+    # 拓扑声明 picking_handoff（+布局计划放货点）：dock 任务交付目标改为交接处，
+    # 四向车不再直接在出货位上带，而是运到交接处等待机械臂。
+    monkeypatch.setattr(SimulationService, "_arm_handoff_target", lambda self, topo: dict(_HANDOFF_TARGET))
+    service = _service()
+    topology = _handoff_topology()
+    inventory = [
+        {"cellId": "cell-r8-c2", "layer": 1, "depth": depth, "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "qty": 1}
+        for depth in (1, 2)
+    ]
+    tasks = service._seed_shuttle_tasks(topology, None, inventory)
+    assert tasks
+    assert all(task["deliveryCellId"] == "cell-r9-c9" for task in tasks)
+    assert all(task.get("armHandoff") is True for task in tasks)
+
+
+def test_dock_tasks_keep_dock_delivery_without_plan_target():
+    # 有 picking_handoff 节点但无布局计划放货点（合成拓扑无计划文件）→ 保持原交付行为。
+    service = _service()
+    topology = _handoff_topology()
+    inventory = [
+        {"cellId": "cell-r8-c2", "layer": 1, "depth": depth, "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "qty": 1}
+        for depth in (1, 2)
+    ]
+    tasks = service._seed_shuttle_tasks(topology, None, inventory)
+    assert tasks
+    assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
+    assert all(not task.get("armHandoff") for task in tasks)
+
+
+def test_arm_handoff_serves_waiting_shuttle_then_releases(monkeypatch):
+    # 机械臂交接时序：等待 → pick(3 tick) → place(4 tick) → 货箱落到放货点带面、
+    # 四向车释放、任务完成；机械臂回到 idle 可服务下一车。
+    monkeypatch.setattr(SimulationService, "_arm_handoff_target", lambda self, topo: dict(_HANDOFF_TARGET))
+    service = _service()
+    topology = _handoff_topology()
+    runtime = service._create_runtime(
+        "run-arm-handoff",
+        topology,
+        build_simulation_config(topology),
+        [],
+        [],
+    )
+    assert runtime.arm_handoff is not None
+    assert runtime.state["pickingArm"]["status"] == "idle"
+
+    robot = next(item for item in runtime.state["robots"] if item["type"] == "shuttle")
+    box = {"cellId": "cell-r8-c2", "layer": 1, "depth": 1, "skuId": "SKU-DOCK", "skuName": "脚手架 1.7米", "qty": 1}
+    task = {
+        "id": "task-dock-dock-01-1",
+        "orderId": None,
+        "robotType": "shuttle",
+        "mode": "cross_zone",
+        "status": "assigned",
+        "phase": "waiting_arm_handoff",
+        "phaseLabel": "等待机械臂抓取",
+        "deliveryCellId": "cell-r9-c9",
+        "armHandoff": True,
+        "dockId": "dock-01",
+        "assignedRobotId": robot["id"],
+        "lines": [dict(box)],
+        "picked": 1,
+        "urgent": False,
+        "history": [],
+    }
+    runtime.state["tasks"].append(task)
+    robot.update(
+        currentCellId="cell-r9-c9",
+        currentNode="cell-r9-c9",
+        status="handling",
+        currentTaskId=task["id"],
+        carrying=[dict(box)],
+        load=1,
+    )
+
+    service._advance_picking_arm(runtime)
+    assert runtime.state["pickingArm"]["stage"] == "pick"
+    assert robot["phaseLabel"] == "机械臂抓取中"
+
+    for _ in range(3):
+        service._advance_picking_arm(runtime)
+    assert runtime.state["pickingArm"]["stage"] == "place"
+    assert robot["phaseLabel"] == "机械臂放箱至输送线"
+    # place 期间四向车仍载着货箱（不能提前离开）。
+    assert robot["carrying"]
+
+    for _ in range(4):
+        service._advance_picking_arm(runtime)
+    assert task["status"] == "completed"
+    assert task["armPlacedCellId"] == "cell-r9-c8"
+    assert [item["cellId"] for item in runtime.state["armBeltBoxes"]] == ["cell-r9-c8"]
+    assert runtime.state["armBeltBoxes"][0]["level"] == 2
+    assert robot["carrying"] == [] and robot["load"] == 0
+    assert robot["currentTaskId"] is None
+    assert runtime.state["pickingArm"]["status"] == "idle"
+    assert runtime.metrics["completedTasks"] == 1
