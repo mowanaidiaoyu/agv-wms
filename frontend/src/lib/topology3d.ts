@@ -267,23 +267,69 @@ export function shuttleTrackWorldPosition(
   ]
 }
 
+/** 地面输送线格的吸附信息：所在 2×2 块锚点 + 带的延伸方向（横向=沿 col）。 */
+export type GroundBeltSnap = { anchorRow: number; anchorCol: number; horizontal: boolean }
+
 /**
- * 四向车 2×2 车体世界坐标：吸附到所在 2×2 结构（巷道槽位 / 地面输送块 / 出货位闸口）
- * 的块中心——车体必须完整覆盖该结构，否则会出现「一半在巷道一半在库位」的错位。
- * anchorRow/anchorCol 为该 2×2 结构的左上角格。
+ * 构建「地面线格 → 块锚点 + 走向」查找表。带走向按相邻块判断：
+ * 左右（col±2）有同类块即横向延伸，否则纵向。
+ * extraAnchors：巷道槽位/出货位闸口等非输送块 2×2 结构的锚点，
+ * 参与走向判定，使四向车在所有 2×2 结构上都保持完整占位。
  */
-export function shuttleBlockWorldPosition(
-  anchorRow: number,
-  anchorCol: number,
-  level: number,
+export function buildGroundBeltLookup(
+  cells: Array<{
+    row: number
+    col: number
+    type?: string
+    conveyorGround?: boolean | null
+    conveyorAnchor?: { row: number; col: number } | null
+  }>,
+  extraAnchors: Array<{ row: number; col: number }> = [],
+): Map<string, GroundBeltSnap> {
+  const groundCells = new Map<string, { row: number; col: number }>()
+  const anchors = new Set<string>()
+  for (const cell of cells) {
+    if (cell.type !== 'conveyor' || !cell.conveyorGround) continue
+    const anchor = cell.conveyorAnchor ?? { row: cell.row, col: cell.col }
+    groundCells.set(`${cell.row},${cell.col}`, { row: anchor.row, col: anchor.col })
+    anchors.add(`${anchor.row},${anchor.col}`)
+  }
+  for (const anchor of extraAnchors) {
+    anchors.add(`${anchor.row},${anchor.col}`)
+  }
+  const lookup = new Map<string, GroundBeltSnap>()
+  for (const [key, anchor] of groundCells) {
+    lookup.set(key, {
+      anchorRow: anchor.row,
+      anchorCol: anchor.col,
+      horizontal:
+        anchors.has(`${anchor.row},${anchor.col - 2}`) || anchors.has(`${anchor.row},${anchor.col + 2}`),
+    })
+  }
+  return lookup
+}
+
+/**
+ * 四向车在 2×2 结构（地面输送块/巷道槽位/出货位闸口）上的渲染位置。车身 2×2、结构也 2×2，
+ * 但轨道坐标以格为步长：若路径走在结构的第二排/列上，车身中心会偏离结构中心线半格，
+ * 视觉上只有 1×2 重叠。这里把横结构方向吸附到中心线（2×2 块的内分界），沿结构方向
+ * 保持逐格连续移动，使车身与结构始终保持 2×2 重叠。
+ */
+export function shuttleGroundSnapPosition(
+  row: number,
+  col: number,
+  snap: GroundBeltSnap,
   cols: number,
   rows: number,
+  level = 1,
 ): [number, number, number] {
-  return [
-    worldX(anchorCol, cols) + CELL,
-    SHUTTLE_RACK_BASE_Y + SHUTTLE_TRACK_SURFACE_OFFSET + (Math.max(1, level) - 1) * ZONE_LEVEL_HEIGHT.shuttle,
-    worldZ(anchorRow, rows) - CELL,
-  ]
+  const [x, y, z] = shuttleTrackWorldPosition(row, col, level, cols, rows)
+  if (snap.horizontal) {
+    // 带沿 col 延伸：横带方向是 row，中心线 = anchor.row 与 anchor.row+1 的分界
+    return [x, y, rows / 2 - (snap.anchorRow + 1)]
+  }
+  // 带沿 row 延伸：横带方向是 col，中心线 = anchor.col 与 anchor.col+1 的分界
+  return [snap.anchorCol + 1 - cols / 2, y, z]
 }
 
 /** 仿真机器人所在格的世界坐标（贴地，即该格 floor 平面中心；车身局部再自行上抬）。 */

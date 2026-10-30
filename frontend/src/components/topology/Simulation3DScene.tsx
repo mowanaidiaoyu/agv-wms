@@ -21,8 +21,10 @@ import {
   buildGoodsSceneBoxes,
   buildSceneSpec,
   robotWorldPosition,
-  shuttleBlockWorldPosition,
+  buildGroundBeltLookup,
+  shuttleGroundSnapPosition,
   shuttleTrackWorldPosition,
+  type GroundBeltSnap,
   worldToCell,
   worldX,
   worldZ,
@@ -851,23 +853,40 @@ function Simulation3DScene({
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
 
-  // 四向车 2×2 车体吸附：巷道槽位 / 地面输送块 / 出货位闸口都是 2×2 结构，
-  // 车体必须完整覆盖所在结构（中心=块中心），否则会「一半在巷道一半在库位」。
-  const shuttleBlockAnchors = useMemo(() => {
-    const anchors = new Map<string, { row: number; col: number }>()
+  // 四向车 2×2 车体吸附表：地面输送块 / 出货位闸口 / 交接处 / 巷道槽位都是 2×2 结构。
+  // 闸口与巷道槽位转成伪输送块参与走向判定（锚点优先取真实格的 conveyorAnchor），
+  // 使车体在所有 2×2 结构上保持完整占位。
+  const groundBeltLookup = useMemo(() => {
     const corners = [[0, 0], [0, 1], [1, 0], [1, 1]] as const
+    type PseudoCell = {
+      row: number
+      col: number
+      type?: string
+      conveyorGround?: boolean | null
+      conveyorAnchor?: { row: number; col: number } | null
+    }
+    // 真实地面格的锚点映射：闸口/交接处节点若落在输送格上，沿用其真实块锚点。
+    const anchorByPos = new Map<string, { row: number; col: number }>()
     for (const cell of topology.cells) {
       if (cell.type !== 'conveyor' || !cell.conveyorGround || !cell.conveyorAnchor) continue
-      const anchor = { row: Number(cell.conveyorAnchor.row), col: Number(cell.conveyorAnchor.col) }
-      for (const [dRow, dCol] of corners) {
-        anchors.set(`${anchor.row + dRow}:${anchor.col + dCol}`, anchor)
-      }
+      anchorByPos.set(`${Number(cell.row)}:${Number(cell.col)}`, {
+        row: Number(cell.conveyorAnchor.row),
+        col: Number(cell.conveyorAnchor.col),
+      })
     }
+    const pseudoCells: PseudoCell[] = []
     for (const node of topology.nodes) {
       if (node.type !== 'shuttle_dock' && node.type !== 'picking_handoff') continue
-      const anchor = { row: Number(node.row), col: Number(node.col) }
+      const anchor = anchorByPos.get(`${Number(node.row)}:${Number(node.col)}`)
+        ?? { row: Number(node.row), col: Number(node.col) }
       for (const [dRow, dCol] of corners) {
-        anchors.set(`${anchor.row + dRow}:${anchor.col + dCol}`, anchor)
+        pseudoCells.push({
+          row: anchor.row + dRow,
+          col: anchor.col + dCol,
+          type: 'conveyor',
+          conveyorGround: true,
+          conveyorAnchor: anchor,
+        })
       }
     }
     for (const zone of topology.zones) {
@@ -875,23 +894,40 @@ function Simulation3DScene({
       for (const key of Object.keys(zone.slotAisles)) {
         const [anchorRow, anchorCol] = key.split(',').map(Number)
         if (Number.isNaN(anchorRow) || Number.isNaN(anchorCol)) continue
-        const anchor = { row: anchorRow, col: anchorCol }
         for (const [dRow, dCol] of corners) {
-          anchors.set(`${anchorRow + dRow}:${anchorCol + dCol}`, anchor)
+          pseudoCells.push({
+            row: anchorRow + dRow,
+            col: anchorCol + dCol,
+            type: 'conveyor',
+            conveyorGround: true,
+            conveyorAnchor: { row: anchorRow, col: anchorCol },
+          })
         }
       }
     }
-    return anchors
+    // 真实格最后写入：真实 conveyorAnchor 永远优先于节点/槽位推断。
+    for (const cell of topology.cells) {
+      if (cell.type !== 'conveyor' || !cell.conveyorGround) continue
+      pseudoCells.push({
+        row: Number(cell.row),
+        col: Number(cell.col),
+        type: 'conveyor',
+        conveyorGround: true,
+        conveyorAnchor: cell.conveyorAnchor ?? { row: Number(cell.row), col: Number(cell.col) },
+      })
+    }
+    return buildGroundBeltLookup(pseudoCells)
   }, [topology])
 
   const shuttleVehiclePosition = useCallback((robot: SimulationRobot): [number, number, number] => {
-    const anchor = shuttleBlockAnchors.get(`${Number(robot.currentRow)}:${Number(robot.currentCol)}`)
-    const layer = Math.max(1, Number(robot.currentLayer ?? 1))
-    if (anchor) {
-      return shuttleBlockWorldPosition(anchor.row, anchor.col, layer, spec.cols, spec.rows)
+    const row = Number(robot.currentRow)
+    const col = Number(robot.currentCol)
+    const snap: GroundBeltSnap | undefined = groundBeltLookup.get(`${row},${col}`)
+    if (snap) {
+      return shuttleGroundSnapPosition(row, col, snap, spec.cols, spec.rows, Math.max(1, Number(robot.currentLayer ?? 1)))
     }
-    return shuttleTrackWorldPosition(robot.currentRow, robot.currentCol, layer, spec.cols, spec.rows)
-  }, [shuttleBlockAnchors, spec.cols, spec.rows])
+    return shuttleTrackWorldPosition(row, col, Math.max(1, Number(robot.currentLayer ?? 1)), spec.cols, spec.rows)
+  }, [groundBeltLookup, spec.cols, spec.rows])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
