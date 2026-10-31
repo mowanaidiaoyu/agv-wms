@@ -1671,6 +1671,25 @@ function Simulation3DScene({
         />
       ) : null}
 
+      {topology.nodes
+        .filter((node) => node.type === 'picking_handoff')
+        .map((node) => {
+          const row = Number(node.row)
+          const col = Number(node.col)
+          const snap = groundBeltLookup.get(`${row},${col}`)
+          const [x, gy, z] = snap
+            ? shuttleGroundSnapPosition(row, col, snap, spec.cols, spec.rows, 1)
+            : shuttleTrackWorldPosition(row, col, 1, spec.cols, spec.rows)
+          return (
+            <Html key={node.id} position={[x, gy + 1.45, z]} center zIndexRange={[28, 18]}>
+              <div className="simulation-scene-label picking-handoff-label">
+                <b>{node.label || '机械臂拣货位'}</b>
+                <span>四向车停止等待 · 卸完货才离开</span>
+              </div>
+            </Html>
+          )
+        })}
+
       {robots.map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
           ? shuttleVehiclePosition(robot)

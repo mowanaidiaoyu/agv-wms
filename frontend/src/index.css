@@ -5656,6 +5656,16 @@ select {
   background: rgba(66, 32, 6, 0.9);
 }
 
+.picking-handoff-label {
+  border-color: rgba(250, 204, 21, 0.75);
+  color: #fef08a;
+  background: rgba(69, 48, 3, 0.9);
+}
+
+.picking-handoff-label span {
+  color: #fde68a;
+}
+
 .transfer-inventory-panel {
   overflow-y: auto;
 }

@@ -22,7 +22,7 @@ def plan(topology: dict):
 
 def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:8f47312c14b815b7"
+    assert plan.topologyRevision == "2.0.0:760d47b9c5c88579"
     assert plan.overallStatus == "PARTIAL"
     assert plan.summary["formalTopologyMutated"] is False
 

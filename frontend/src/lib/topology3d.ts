@@ -949,6 +949,34 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       }
       continue
     }
+    if (node.type === 'picking_handoff') {
+      // 机械臂拣货位：标记四向车停止等待机械臂的位置。黄色停位垫铺满 2×2，
+      // 中央立一根黄色标记柱，与出货位（青色）区分。
+      const under = cellAt.get(`${floor}:${node.row}:${node.col}`)
+      const beltBase = under?.conveyorGround ? CONVEYOR_GROUND_BELT_Y : CONVEYOR_DECK_BASE
+      const beltY = y + beltBase
+      items.push({
+        kind: 'box',
+        key: `${node.id}-pad`,
+        position: [x + CELL / 2, beltY + 0.035, z - CELL / 2],
+        size: [CELL * 1.9, 0.07, CELL * 1.9],
+        color: '#eab308',
+        emissive: '#713f12',
+        floor,
+        entity,
+      })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-post`,
+        position: [x + CELL / 2, beltY + 0.55, z - CELL / 2],
+        size: [CELL * 0.16, 1.0, CELL * 0.16],
+        color: '#facc15',
+        emissive: '#854d0e',
+        floor,
+        entity,
+      })
+      continue
+    }
     if (node.type === 'shuttle_robot') {
       // 四向车：2×2 占位（与四向车库位同口径），在巷道内移动
       const w = CELL * 2 * 0.88
