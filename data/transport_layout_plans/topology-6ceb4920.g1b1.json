@@ -2,7 +2,7 @@
   "planId": "g1b1-topology-6ceb4920-handoff-layout-v1",
   "schemaVersion": "1.0.0",
   "topologyId": "topology-6ceb4920",
-  "topologyRevision": "2.0.0:dc95637ce2811b8c",
+  "topologyRevision": "2.0.0:8f47312c14b815b7",
   "overallStatus": "PARTIAL",
   "recommendedOptionId": "scheme-a-height-transfer",
   "pickingArmPreview": {
