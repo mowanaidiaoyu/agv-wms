@@ -18,6 +18,8 @@ const TOOL_HINTS: Partial<Record<EditorObjectType, string>> = {
   lift_transfer: '点击放单个；拖拽矩形批量放置升降移载机（可落在输送带格上）',
   turn_transfer: '点击放置单层转向移载机；放置后可选择上层或下层，并手动设置入口与出口方向',
   shuttle_dock: '放在地面输送线上：设置取什么货物、取多少；仿真启动后四向车取货驶出，在此交付沿带面运走',
+  picking_handoff: '放在地面输送线上：四向车停靠的机械臂拣货位；机械臂从这里把货物抓放到输送带面',
+  picking_arm: '点击放置机械臂底座：放在拣货位旁的通行格上，机械臂会朝向拣货位取放货物',
 }
 
 const ZONE_HINTS: Record<ZoneType, string> = {
@@ -29,7 +31,7 @@ const ZONE_HINTS: Record<ZoneType, string> = {
 }
 
 const CELL_TOOL_TYPES: EditorObjectType[] = ['road', 'blocked', 'conveyor', 'ground_conveyor']
-const NODE_TOOL_TYPES: EditorObjectType[] = ['ctu_robot', 'shuttle_robot', 'lift_transfer', 'turn_transfer', 'shuttle_dock']
+const NODE_TOOL_TYPES: EditorObjectType[] = ['ctu_robot', 'shuttle_robot', 'lift_transfer', 'turn_transfer', 'shuttle_dock', 'picking_handoff', 'picking_arm']
 
 const COMPACT_TOOL_LABELS: Partial<Record<EditorObjectType, string>> = {
   select: '选择',
@@ -44,6 +46,8 @@ const COMPACT_TOOL_LABELS: Partial<Record<EditorObjectType, string>> = {
   lift_transfer: '升降',
   turn_transfer: '转向',
   shuttle_dock: '出货位',
+  picking_handoff: '拣货位',
+  picking_arm: '机械臂',
 }
 
 const COMPACT_ZONE_LABELS: Record<ZoneType, string> = {

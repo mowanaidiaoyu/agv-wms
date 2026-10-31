@@ -118,14 +118,14 @@ def test_left_ports_are_recognized_but_pick_station_is_missing(audit) -> None:
 
 
 def test_dock_is_recognized_without_a_legal_conveyor_handoff(audit, graph) -> None:
-    # 拓扑恢复后包含三个出货位（dock-01/02/03）；audit 只对第一个 dock 生成衔接议题
-    assert audit.summary["dockIds"] == ["dock-01", "dock-02", "dock-03"]
-    assert "facility:dock-01" in graph.nodes
+    # 拓扑恢复后包含两个出货位（dock-02/03，dock-01 已随错误输送线删除）；audit 只对第一个 dock 生成衔接议题
+    assert audit.summary["dockIds"] == ["dock-02", "dock-03"]
+    assert "facility:dock-02" in graph.nodes
     assert "conveyor-cell:cell-r74-c17" in graph.nodes
     assert "MISSING_SHUTTLE_DOCK_HANDOFF" in _issue_codes(audit)
     result = audit_directed_path(
         graph,
-        "facility:dock-01",
+        "facility:dock-02",
         "conveyor-cell:cell-r74-c17",
         "dock-to-conveyor",
     )

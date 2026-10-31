@@ -859,6 +859,9 @@ export function SimulationPage() {
                     pickingArmPreviewVisible={showPickingArmPreview}
                     pickingArmPreviewCycleToken={`arm-preview-${pickingArmPreviewCycle}`}
                     pickingArmResetRequest={pickingArmResetRequest}
+                    armRuntime={currentState?.pickingArm ?? null}
+                    armBeltBoxes={currentState?.armBeltBoxes ?? []}
+                    simulationActive={currentState?.status === 'running' || currentState?.status === 'paused'}
                     speedMultiplier={speedMultiplier}
                   />
                 </Suspense>

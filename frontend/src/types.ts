@@ -19,7 +19,7 @@ export interface ConveyorDecks {
   lower: ConveyorDeckConfig
   upper?: ConveyorDeckConfig
 }
-export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock' | 'picking_handoff'
+export type NodeType = 'storage' | 'ctu_robot' | 'shuttle_robot' | 'lift_transfer' | 'turn_transfer' | 'shuttle_dock' | 'picking_handoff' | 'picking_arm'
 export type EditorObjectType =
   | 'select'
   | 'batch'
@@ -33,6 +33,8 @@ export type EditorObjectType =
   | 'lift_transfer'
   | 'turn_transfer'
   | 'shuttle_dock'
+  | 'picking_handoff'
+  | 'picking_arm'
 export type RobotType = 'ctu' | 'shuttle'
 
 export interface Zone {
@@ -737,6 +739,26 @@ export interface SimulationState {
     waitingTicks: number
     phase: string
     goodsCount: number
+  }>
+  pickingArm?: {
+    status: string
+    stage: string | null
+    remainingTicks: number
+    taskId: string | null
+    robotId: string | null
+  } | null
+  armBeltBoxes?: Array<{
+    nodeId?: string | null
+    cellId: string
+    layer?: number
+    level?: number
+    beltHeight?: number
+    depth?: number
+    skuId?: string | null
+    skuName?: string | null
+    qty?: number
+    placedTick?: number
+    [key: string]: unknown
   }>
   trafficMonitor?: {
     waitForEdges: Array<{

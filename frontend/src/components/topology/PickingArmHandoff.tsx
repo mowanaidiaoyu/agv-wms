@@ -38,6 +38,10 @@ export interface PickingArmHandoffProps {
   speedMultiplier: 1 | 2 | 4
   resetRequest: number
   authoritativeSignals?: Partial<PickingArmSignals>
+  /** 覆盖取货点世界坐标（X/Z）：运行时按四向车实际停靠位置（2×2 吸附中心）抓取。 */
+  pickupOverrideXZ?: [number, number]
+  /** 标签形态：preview=预览循环 / live=仿真运行中 / idle=运行中待机 */
+  variant?: 'preview' | 'live' | 'idle'
 }
 
 const TOTE_HEIGHT = 0.34
@@ -75,6 +79,8 @@ export function PickingArmHandoff({
   speedMultiplier,
   resetRequest,
   authoritativeSignals,
+  pickupOverrideXZ,
+  variant = preview ? 'preview' : 'live',
 }: PickingArmHandoffProps) {
   const waistRef = useRef<Group>(null)
   const shoulderRef = useRef<Group>(null)
@@ -95,11 +101,17 @@ export function PickingArmHandoff({
     layout.mountHeight,
     worldZ(layout.installation.row, rows),
   ], [cols, layout.installation.col, layout.installation.row, layout.mountHeight, rows])
-  const pickup = useMemo<[number, number, number]>(() => [
-    worldX(layout.pickup.position.col, cols) - base[0],
-    layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
-    worldZ(layout.pickup.position.row, rows) - base[2],
-  ], [base, cols, layout.pickup.beltHeight, layout.pickup.position.col, layout.pickup.position.row, rows])
+  const pickup = useMemo<[number, number, number]>(() => pickupOverrideXZ
+    ? [
+        pickupOverrideXZ[0] - base[0],
+        layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
+        pickupOverrideXZ[1] - base[2],
+      ]
+    : [
+        worldX(layout.pickup.position.col, cols) - base[0],
+        layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
+        worldZ(layout.pickup.position.row, rows) - base[2],
+      ], [base, cols, layout.pickup.beltHeight, layout.pickup.position.col, layout.pickup.position.row, pickupOverrideXZ, rows])
   const dropoff = useMemo<[number, number, number]>(() => [
     worldX(layout.dropoff.position.col, cols) - base[0],
     layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
@@ -337,10 +349,10 @@ export function PickingArmHandoff({
       <Html position={[0, 4.15, 0]} center distanceFactor={11} zIndexRange={[22, 16]}>
         <div className="picking-arm-device-label">
           <strong>{layout.armId}</strong>
-          <span>{preview ? `预览 · ${phase}` : `权威模式 · ${phase}`}</span>
+          <span>{variant === 'preview' ? `预览 · ${phase}` : variant === 'live' ? `运行中 · ${phase}` : `待机 · ${phase}`}</span>
           <span>{cargoPlaybackState}</span>
           {collisionMessage ? <span className="danger">碰撞阻止：{collisionMessage}</span> : null}
-          <small>proposed / 不代表已交付</small>
+          {variant === 'preview' ? <small>proposed / 不代表已交付</small> : null}
         </div>
       </Html>
     </group>

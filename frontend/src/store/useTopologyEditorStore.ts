@@ -74,6 +74,8 @@ const NODE_TOOL_OF: Partial<Record<EditorObjectType, NodeType>> = {
   lift_transfer: 'lift_transfer',
   turn_transfer: 'turn_transfer',
   shuttle_dock: 'shuttle_dock',
+  picking_handoff: 'picking_handoff',
+  picking_arm: 'picking_arm',
 }
 
 interface DragState {

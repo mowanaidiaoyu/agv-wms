@@ -878,6 +878,7 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
     turn_transfer: '#14b8a6',
     shuttle_dock: '#0d9488',
     picking_handoff: '#eab308',
+    picking_arm: '#a78bfa',
   }
   for (const node of topology.nodes) {
     const floor = itemFloor(node)
@@ -952,13 +953,18 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
     if (node.type === 'picking_handoff') {
       // 机械臂拣货位：标记四向车停止等待机械臂的位置。黄色停位垫铺满 2×2，
       // 中央立一根黄色标记柱，与出货位（青色）区分。
+      // 垫与柱吸附到所在 2×2 块锚点：旧数据的节点可能不在锚点格上，直接用节点坐标会偏离带面块。
       const under = cellAt.get(`${floor}:${node.row}:${node.col}`)
+      const anchorRow = under?.conveyorAnchor?.row ?? node.row
+      const anchorCol = under?.conveyorAnchor?.col ?? node.col
+      const padX = worldX(anchorCol, cols) + CELL / 2
+      const padZ = worldZ(anchorRow, rows) - CELL / 2
       const beltBase = under?.conveyorGround ? CONVEYOR_GROUND_BELT_Y : CONVEYOR_DECK_BASE
       const beltY = y + beltBase
       items.push({
         kind: 'box',
         key: `${node.id}-pad`,
-        position: [x + CELL / 2, beltY + 0.035, z - CELL / 2],
+        position: [padX, beltY + 0.035, padZ],
         size: [CELL * 1.9, 0.07, CELL * 1.9],
         color: '#eab308',
         emissive: '#713f12',
@@ -968,10 +974,35 @@ export function buildSceneSpec(topology: TopologyPayload, goods?: GoodsSlot[]): 
       items.push({
         kind: 'box',
         key: `${node.id}-post`,
-        position: [x + CELL / 2, beltY + 0.55, z - CELL / 2],
+        position: [padX, beltY + 0.55, padZ],
         size: [CELL * 0.16, 1.0, CELL * 0.16],
         color: '#facc15',
         emissive: '#854d0e',
+        floor,
+        entity,
+      })
+      continue
+    }
+    if (node.type === 'picking_arm') {
+      // 机械臂底座：放在拣货位旁通行格的 1×1 底座，紫色圆盘 + 立柱，
+      // PickingArmHandoff 组件的机械臂本体挂载在运行时按该节点定位。
+      items.push({
+        kind: 'box',
+        key: `${node.id}-base`,
+        position: [x, y + 0.05, z],
+        size: [CELL * 0.72, 0.1, CELL * 0.72],
+        color: '#a78bfa',
+        emissive: '#4c1d95',
+        floor,
+        entity,
+      })
+      items.push({
+        kind: 'box',
+        key: `${node.id}-mast`,
+        position: [x, y + 0.4, z],
+        size: [CELL * 0.18, 0.7, CELL * 0.18],
+        color: '#8b5cf6',
+        emissive: '#5b21b6',
         floor,
         entity,
       })

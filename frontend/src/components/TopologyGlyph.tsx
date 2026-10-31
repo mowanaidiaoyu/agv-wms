@@ -78,6 +78,24 @@ export function TopologyGlyph({
         </>
       ) : null}
 
+      {kind === 'picking_handoff' ? (
+        <>
+          <span className="topology-glyph-handoff-pad" />
+          <span className="topology-glyph-handoff-box" />
+          <span className="topology-glyph-handoff-arm" />
+          <span className="topology-glyph-handoff-target" />
+        </>
+      ) : null}
+
+      {kind === 'picking_arm' ? (
+        <>
+          <span className="topology-glyph-arm-base" />
+          <span className="topology-glyph-arm-column" />
+          <span className="topology-glyph-arm-link" />
+          <span className="topology-glyph-arm-gripper" />
+        </>
+      ) : null}
+
       {kind === 'storage' ? (
         <>
           <span className="topology-glyph-storage-frame" />

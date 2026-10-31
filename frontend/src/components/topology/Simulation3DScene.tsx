@@ -36,6 +36,7 @@ import type {
   GoodsSlot,
   ShuttleContract,
   SimulationRobot,
+  SimulationState,
   SimulationTask,
   TopologyPayload,
   TransportLayoutPlan,
@@ -65,6 +66,12 @@ export type Simulation3DSceneProps = {
   pickingArmPreviewCycleToken?: string
   pickingArmResetRequest?: number
   pickingArmCargo?: PickingArmCargo
+  /** 仿真运行时的机械臂状态（state.pickingArm）：有任务时机械臂按真实货箱做取放动作 */
+  armRuntime?: SimulationState['pickingArm']
+  /** 机械臂已放到输送线带面的货箱（state.armBeltBoxes）：渲染在放货点带面高度 */
+  armBeltBoxes?: SimulationState['armBeltBoxes']
+  /** 仿真是否进行中（running/paused）：运行时机械臂常驻显示，空闲时保持待机姿态 */
+  simulationActive?: boolean
   speedMultiplier?: 1 | 2 | 4
 }
 
@@ -72,6 +79,16 @@ const SHUTTLE_COLOR = '#c084fc'
 const SHUTTLE_EMISSIVE = '#6d28d9'
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
+
+/** 仿真运行中但机械臂空闲：全部权威信号为假，机械臂保持待机姿态（不播预览动画）。 */
+const ARM_IDLE_SIGNALS = {
+  cargoToken: null,
+  pickedGoodsReady: false,
+  outputPositionAvailable: false,
+  legalPickupNode: true,
+  legalDropoffNode: true,
+  authoritativeHandoffCompleted: false,
+}
 
 /** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。
  * 拐角走直角：目标垂直转向时先沿当前行进轴对齐、再转垂直轴（L 形路径按距离插值），
@@ -890,6 +907,9 @@ function Simulation3DScene({
     skuId: 'SKU-A',
     pickedQuantity: 10,
   },
+  armRuntime = null,
+  armBeltBoxes = [],
+  simulationActive = false,
   speedMultiplier = 1,
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
@@ -970,6 +990,77 @@ function Simulation3DScene({
     }
     return shuttleTrackWorldPosition(row, col, Math.max(1, Number(robot.currentLayer ?? 1)), spec.cols, spec.rows)
   }, [groundBeltLookup, spec.cols, spec.rows])
+
+  // 机械臂运行时：仿真状态驱动机械臂常驻显示与取放动作，不再依赖「机械臂预览」开关。
+  const armLive = Boolean(armRuntime?.taskId)
+  const armNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_arm'), [topology])
+  const armHandoffNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_handoff'), [topology])
+  // 机械臂底座节点（picking_arm）覆盖布局计划的安装位：编辑器里把底座放哪里，机械臂就装在哪里；
+  // 拣货位节点（picking_handoff）覆盖取货点：四向车实际停在该节点所在格（后端 handoffCellId 同源）。
+  const armLayout = useMemo(() => {
+    const base = layoutPlan?.pickingArm
+    if (!base) return undefined
+    const installation = armNode
+      ? { ...base.installation, floor: '1F', row: Number(armNode.row), col: Number(armNode.col) }
+      : base.installation
+    const pickup = armHandoffNode
+      ? {
+          ...base.pickup,
+          position: { ...base.pickup.position, floor: '1F', row: Number(armHandoffNode.row), col: Number(armHandoffNode.col) },
+        }
+      : base.pickup
+    return { ...base, installation, pickup }
+  }, [armHandoffNode, armNode, layoutPlan])
+  // 取货点世界坐标：与四向车停靠位置同一套 2×2 吸附算法，保证机械臂抓的是车上的货。
+  const armPickupWorld = useMemo(() => {
+    if (!armHandoffNode) return undefined
+    const row = Number(armHandoffNode.row)
+    const col = Number(armHandoffNode.col)
+    const snap = groundBeltLookup.get(`${row},${col}`)
+    const [x, , z] = snap
+      ? shuttleGroundSnapPosition(row, col, snap, spec.cols, spec.rows, 1)
+      : shuttleTrackWorldPosition(row, col, 1, spec.cols, spec.rows)
+    return [x, z] as [number, number]
+  }, [armHandoffNode, groundBeltLookup, spec.cols, spec.rows])
+  const armLiveCargo = useMemo<PickingArmCargo | undefined>(() => {
+    if (!armRuntime?.taskId) return undefined
+    const task = tasks.find((item) => item.id === armRuntime.taskId)
+    if (!task) return undefined
+    const line = task.lines[Math.max(0, task.picked - 1)] ?? task.lines[0]
+    return {
+      toteId: task.id,
+      orderId: task.orderId || task.id,
+      skuId: line?.skuId || 'SKU',
+      pickedQuantity: task.picked || 1,
+    }
+  }, [armRuntime?.taskId, tasks])
+  const armAuthoritativeSignals = useMemo(() => ({
+    cargoToken: armRuntime?.taskId ?? null,
+    pickedGoodsReady: true,
+    outputPositionAvailable: true,
+    legalPickupNode: (layoutPlan?.pickingArm?.pickup.validationStatus ?? 'PASS') !== 'BLOCKED',
+    legalDropoffNode: (layoutPlan?.pickingArm?.dropoff.validationStatus ?? 'PASS') !== 'BLOCKED',
+    authoritativeHandoffCompleted: false,
+  }), [armRuntime?.taskId, layoutPlan])
+  // 机械臂已放到输送线的货箱：最近 ≤4 箱画在放货点带面高度（数据来自后端 armBeltBoxes）。
+  const armBeltVisuals = useMemo(() => {
+    return (armBeltBoxes ?? []).slice(-4).map((box, index) => {
+      const parsed = parseCellId(String(box.cellId))
+      if (!parsed) return null
+      const level = Math.max(1, Number(box.level ?? 2))
+      const beltBase = Number(
+        box.beltHeight ?? (level > 1 ? CONVEYOR_DECK_BASE + (level - 1) * CONVEYOR_DECK_STEP : CONVEYOR_GROUND_BELT_Y),
+      )
+      const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, level, spec.cols, spec.rows)
+      return {
+        key: `arm-belt-${box.placedTick ?? 'box'}-${box.cellId}-${index}`,
+        position: [x, beltBase + 0.16, z] as [number, number, number],
+        size: [CELL * 0.5, CELL * 0.32, CELL * 0.5] as [number, number, number],
+        color: '#f59e0b',
+        emissive: '#b45309',
+      }
+    }).filter((box): box is NonNullable<typeof box> => box !== null)
+  }, [armBeltBoxes, spec.cols, spec.rows])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1636,18 +1727,28 @@ function Simulation3DScene({
         />
       ) : null}
 
-      {pickingArmPreviewVisible && layoutPlan?.pickingArm && activeFloor === '1F' ? (
+      {(pickingArmPreviewVisible || simulationActive) && armLayout && activeFloor === '1F' ? (
         <PickingArmHandoff
           topology={topology}
-          layout={layoutPlan.pickingArm}
-          cargo={pickingArmCargo}
-          preview
+          layout={armLayout}
+          cargo={armLive && armLiveCargo ? armLiveCargo : pickingArmCargo}
+          preview={!armLive}
           previewCycleToken={pickingArmPreviewCycleToken}
           paused={paused}
           speedMultiplier={speedMultiplier}
           resetRequest={pickingArmResetRequest}
+          authoritativeSignals={armLive ? armAuthoritativeSignals : simulationActive ? ARM_IDLE_SIGNALS : undefined}
+          pickupOverrideXZ={armPickupWorld}
+          variant={armLive ? 'live' : simulationActive ? 'idle' : 'preview'}
         />
       ) : null}
+
+      {armBeltVisuals.map((box) => (
+        <mesh key={box.key} position={box.position} castShadow>
+          <boxGeometry args={box.size} />
+          <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />
+        </mesh>
+      ))}
 
       {routePoints.length > 1 ? (
         <Line

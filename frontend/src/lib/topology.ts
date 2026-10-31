@@ -31,6 +31,8 @@ export const OBJECT_LABELS: Record<EditorObjectType, string> = {
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
   shuttle_dock: '四向车出货位',
+  picking_handoff: '机械臂拣货位',
+  picking_arm: '机械臂底座',
 }
 
 export const CELL_LABELS: Record<CellType, string> = {
@@ -46,7 +48,8 @@ export const NODE_LABELS: Record<NodeType, string> = {
   lift_transfer: '升降移载机',
   turn_transfer: '转向移载机',
   shuttle_dock: '四向车出货位',
-  picking_handoff: '机械臂交接处',
+  picking_handoff: '机械臂拣货位',
+  picking_arm: '机械臂底座',
 }
 
 export const ZONE_LABELS: Record<ZoneType, string> = {
@@ -117,6 +120,7 @@ export const NODE_PREFIX: Record<NodeType, string> = {
   turn_transfer: 'turn_transfer',
   shuttle_dock: 'dock',
   picking_handoff: 'handoff',
+  picking_arm: 'arm',
 }
 
 /** 只读展示型（节点需要“贴地”，通常在通行路格上承载）。 */
@@ -124,8 +128,8 @@ export const BUSINESS_NODE_TYPES: ReadonlySet<NodeType> = new Set(['storage'])
 
 export const DEVICE_NODE_TYPES: ReadonlySet<NodeType> = new Set(['ctu_robot', 'shuttle_robot'])
 
-/** 可落在输送带格上的节点（升降移载机 / 转向移载机）。 */
-export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer', 'shuttle_dock'])
+/** 可落在输送带格上的节点（升降移载机 / 转向移载机 / 四向车出货位 / 机械臂拣货位）。 */
+export const CONVEYOR_MOUNTED_NODE_TYPES: ReadonlySet<NodeType> = new Set(['lift_transfer', 'turn_transfer', 'shuttle_dock', 'picking_handoff'])
 
 export const NODE_TOOL: Partial<Record<NodeType, EditorObjectType>> = {
   ctu_robot: 'ctu_robot',
@@ -290,8 +294,8 @@ export function nodeFootprint(
   node: Pick<TopologyNode, 'type' | 'zoneId'>,
 ): number {
   const zoneType = findZoneById(topology, node.zoneId ?? '')?.type
-  // 输送带上的设备（升降移载机 / 转向移载机 / 四向车出货位）固定 2×2，与输送带块同口径
-  if (node.type === 'lift_transfer' || node.type === 'turn_transfer' || node.type === 'shuttle_dock') {
+  // 输送带上的设备（闸口/缓存位/移载机）固定 2×2，与输送带块同口径
+  if (node.type === 'lift_transfer' || node.type === 'turn_transfer' || node.type === 'shuttle_dock' || node.type === 'picking_handoff') {
     return 2
   }
   // 库位 / 四向车：四向车库位(托盘) 2×2，CTU 料箱位 1×1
@@ -790,6 +794,7 @@ const NODE_ZONE_AFFINITY: Record<NodeType, ReadonlySet<ZoneType>> = {
   turn_transfer: new Set<ZoneType>(),
   shuttle_dock: new Set<ZoneType>(),
   picking_handoff: new Set<ZoneType>(),
+  picking_arm: new Set<ZoneType>(),
 }
 
 export function zoneRefForNodeType(
@@ -1152,6 +1157,13 @@ export function placeNode(
       return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
     }
   }
+  // 机械臂拣货位只能放在地面输送线上：四向车在此停靠等待机械臂取货。
+  if (type === 'picking_handoff') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '机械臂拣货位只能放在地面输送线上（四向车在此停靠等待机械臂取货）。' }
+    }
+  }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐
   if (CONVEYOR_MOUNTED_NODE_TYPES.has(type)) {
     const hit = findCell(topology, row, col, floor)
@@ -1271,6 +1283,13 @@ export function moveNode(
     const hit = findCell(topology, row, col, floor)
     if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
       return { topology, message: '出货位只能放在地面输送线上（四向车仅沿巷道、升降通道和地面输送线移动）。' }
+    }
+  }
+  // 机械臂拣货位只能放在地面输送线上：四向车在此停靠等待机械臂取货。
+  if (node.type === 'picking_handoff') {
+    const hit = findCell(topology, row, col, floor)
+    if (!hit || hit.type !== 'conveyor' || !hit.conveyorGround) {
+      return { topology, message: '机械臂拣货位只能放在地面输送线上（四向车在此停靠等待机械臂取货）。' }
     }
   }
   // 输送带上的设备（闸口/缓存位/移载机）吸附到所在 2×2 块锚点，与输送带块同格对齐

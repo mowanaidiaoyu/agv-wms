@@ -9,7 +9,7 @@ ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
 CellType = Literal["road", "blocked", "conveyor"]
 ConveyorDirection = Literal["right", "left", "up", "down"]
 ConveyorSide = Literal["north", "east", "south", "west"]
-NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer", "shuttle_dock", "picking_handoff"]
+NodeType = Literal["storage", "ctu_robot", "shuttle_robot", "lift_transfer", "turn_transfer", "shuttle_dock", "picking_handoff", "picking_arm"]
 SimulationStatus = Literal["idle", "running", "paused", "stopped", "completed"]
 
 
