@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -210,8 +211,9 @@ def test_pause_resume_stop_and_reset_lifecycle(monkeypatch) -> None:
             await asyncio.sleep(0.001)
         resumed_tick = runtime.state["tick"]
 
-        service.stop(runtime.run_id)
-        await runtime.task_handle
+        await service.stop(runtime.run_id)
+        with contextlib.suppress(asyncio.CancelledError):
+            await runtime.task_handle
         await asyncio.sleep(0.005)
         assert runtime.state["tick"] == resumed_tick
         assert runtime.state["status"] == "stopped"

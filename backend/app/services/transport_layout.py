@@ -1626,8 +1626,8 @@ def build_transport_layout_plan(
         _issue(
             "PICKING_ARM_HANDOFF_PENDING_G3",
             "The picking arm is a proposed visual handoff. No authoritative picked-goods, output-space or completion event exists yet.",
-            "proposed-picking-arm-r91-c54",
-            "cell-r86-c50",
+            "proposed-picking-arm-r88-c49",
+            "cell-r84-c50",
             evidence=["Animation completion must not mutate inventory, delivered quantity or order status."],
             severity="WARNING",
         ),
@@ -1636,17 +1636,6 @@ def build_transport_layout_plan(
             "The pickup cell is real, but no formal pick_station or breakpack event routes picked order goods to it.",
             "MISSING:breakpack_exit",
             "cell-r92-c48",
-            severity="WARNING",
-        ),
-        _issue(
-            "PICKING_ARM_POST_TURN_DIRECTION_OVERRIDE",
-            "After turn_transfer-15 the requested route advances row 86 to row 108 at col 60, while formal conveyorDirection remains right.",
-            "turn_transfer-15",
-            "cell-r108-c60",
-            evidence=[
-                "Preview topology movement: down (row+); user-visible camera direction: right.",
-                "The override remains proposed/PARTIAL and does not modify the formal topology.",
-            ],
             severity="WARNING",
         ),
     ]

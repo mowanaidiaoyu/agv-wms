@@ -493,4 +493,175 @@ class TransportLayoutPlanResponse(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
+
+# ============================================================
+# Right-warehouse handoff / order fulfillment / general simulation
+# (merged from dev/c-pyc-new-arm-20261029)
+# ============================================================
+ArmPreviewStatus = Literal["PASS", "PARTIAL", "BLOCKED"]
+
+
+class RightWarehouseMergePoint(BaseModel):
+    mergePointId: str
+    topologyNodeId: str
+    row: int
+    col: int
+    level: int = Field(ge=1)
+    capacity: int = Field(ge=1)
+    occupiedCargoIds: list[str] = Field(default_factory=list)
+    acceptedCargoIds: list[str] = Field(default_factory=list)
+    status: Literal["available", "waiting", "full", "blocked"] = "available"
+    acceptedWarehouse: Literal["right"] = "right"
+    cargoOrderIds: dict[str, str] = Field(default_factory=dict)
+
+
+
+
+
+class PickingArmTransportCargo(BaseModel):
+    orderId: str
+    cargoId: str
+    skuId: str
+    quantityCases: int = Field(gt=0)
+    unitsPerCase: int = Field(gt=0)
+    quantityBase: int = Field(gt=0)
+    sourceLocationId: str
+    currentNodeId: str
+    targetMergePointId: str
+    transportStatus: Literal[
+        "queued",
+        "arm_transfer",
+        "conveyor_moving",
+        "waiting_at_merge",
+        "arrived",
+        "rejected",
+    ]
+    sourceWarehouse: Literal["right"] = "right"
+
+    @model_validator(mode="after")
+    def validate_quantity_contract(self) -> "PickingArmTransportCargo":
+        if self.quantityBase != self.quantityCases * self.unitsPerCase:
+            raise ValueError("quantityBase must equal quantityCases * unitsPerCase")
+        return self
+
+
+
+
+
+class SimulationTestStartRequest(BaseModel):
+    topologyId: str = Field(min_length=1)
+    topologyRevision: str = Field(min_length=1)
+    scenarioId: str = Field(min_length=1)
+
+
+
+
+
+class SimulationTestControlResponse(SimulationControlResponse):
+    runMode: Literal["simulation_test"]
+    scenarioId: str
+
+
+
+
+
+class SimulationInventoryOverride(BaseModel):
+    inventoryRecordId: str = Field(min_length=1)
+    quantityCases: int = Field(ge=0, le=1_000_000)
+
+
+
+
+
+class GeneralSimulationPlanRequest(BaseModel):
+    topologyId: str = Field(min_length=1)
+    topologyRevision: str = Field(min_length=1)
+    profileId: str = Field(min_length=1)
+    orders: list[SimulationOrderInput] = Field(min_length=1)
+    inventoryOverrides: list[SimulationInventoryOverride] = Field(default_factory=list)
+
+
+
+
+
+class GeneralSimulationControlResponse(SimulationControlResponse):
+    runMode: Literal["simulation"]
+    profileId: str
+
+
+
+
+
+class RightCasePreparationTask(BaseModel):
+    orderId: str
+    taskId: str
+    cargoId: str
+    skuId: str
+    sourceWarehouse: Literal["right"]
+    sourceLocationId: str
+    destinationHandoffId: str
+    quantityCases: int = Field(gt=0)
+    quantityBase: int = Field(gt=0)
+    status: Literal["waiting_pick"]
+    authoritative: Literal[False] = False
+
+
+
+
+
+class LeftBreakPackPreparationTask(BaseModel):
+    orderId: str
+    taskId: str
+    skuId: str
+    sourceWarehouse: Literal["left"]
+    sourceLocationId: str
+    sourceQuantityBase: int = Field(gt=0)
+    pickQuantityBase: int = Field(gt=0)
+    returnQuantityBase: int = Field(ge=0)
+    status: Literal["waiting_split"]
+    authoritative: Literal[False] = False
+
+
+
+
+
+class OrderLineAllocation(BaseModel):
+    orderId: str
+    lineId: str
+    skuId: str
+    quantityBase: int = Field(gt=0)
+    unitsPerCase: int = Field(gt=0)
+    rightQuantityCases: int = Field(ge=0)
+    rightQuantityBase: int = Field(ge=0)
+    leftSourceCases: int = Field(ge=0)
+    leftSourceQuantityBase: int = Field(ge=0)
+    leftPickQuantityBase: int = Field(ge=0)
+    leftReturnQuantityBase: int = Field(ge=0)
+    allocationStatus: Literal["ready", "shortage"]
+    shortageQuantityBase: int = Field(ge=0)
+    inventorySufficient: bool
+    packagingSource: str
+    packagingVerificationStatus: str
+    rightTasks: list[RightCasePreparationTask] = Field(default_factory=list)
+    leftTasks: list[LeftBreakPackPreparationTask] = Field(default_factory=list)
+
+
+
+
+
+class OrderFulfillmentPlanResponse(BaseModel):
+    orderId: str
+    allocationStatus: Literal["ready", "shortage"]
+    allocations: list[OrderLineAllocation]
+    tasks: list[dict[str, Any]]
+    inventoryMutated: Literal[False] = False
+    inventoryReserved: Literal[False] = False
+    previewCargoAccepted: Literal[False] = False
+    canDeclareCompleted: Literal[False] = False
+    requestFingerprint: str
+
+
+
+
+
 TopologyPayload.model_rebuild()

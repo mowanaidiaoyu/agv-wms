@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "1.0",
+  "profileId": "general-order-simulation",
+  "name": "通用订单仿真库存",
+  "dataSource": "simulation",
+  "isolationMode": "run_local_snapshot",
+  "topologyId": "topology-6ceb4920",
+  "topologyRevision": "2.0.0:772d71a08e9a5658",
+  "rightHandoffTemplateScenarioId": "right-left-110-case-test",
+  "inventory": [
+    {
+      "inventoryRecordId": "sim-right-13448419-l2-r96-c31",
+      "sourceWarehouse": "right",
+      "sourceLocationId": "SIM-BIN-L2-r96-c31",
+      "locationType": "shuttle_storage",
+      "skuId": "13448419-4.0-4.0",
+      "quantityCases": 20,
+      "dataSource": "simulation",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "trackNodeId": "L2-r96-c31",
+        "cellId": "cell-r96-c31",
+        "row": 96,
+        "col": 31,
+        "level": 2,
+        "pickupExitTrackNodeId": "L1-r96-c21"
+      }
+    },
+    {
+      "inventoryRecordId": "sim-left-13448419-storage-01-l1",
+      "sourceWarehouse": "left",
+      "sourceLocationId": "storage-01:L1",
+      "locationType": "ctu_storage",
+      "skuId": "13448419-4.0-4.0",
+      "quantityCases": 20,
+      "dataSource": "simulation",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "topologyNodeId": "storage-01",
+        "cellId": "cell-r0-c6",
+        "row": 0,
+        "col": 6,
+        "layer": 1
+      }
+    },
+    {
+      "inventoryRecordId": "sim-right-13495233-l2-r96-c31",
+      "sourceWarehouse": "right",
+      "sourceLocationId": "SIM-BIN-L2-r96-c31",
+      "locationType": "shuttle_storage",
+      "skuId": "13495233-15.0-15.0",
+      "quantityCases": 20,
+      "dataSource": "simulation",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "trackNodeId": "L2-r96-c31",
+        "cellId": "cell-r96-c31",
+        "row": 96,
+        "col": 31,
+        "level": 2,
+        "pickupExitTrackNodeId": "L1-r96-c21"
+      }
+    },
+    {
+      "inventoryRecordId": "sim-left-13495233-storage-01-l1",
+      "sourceWarehouse": "left",
+      "sourceLocationId": "storage-01:L1",
+      "locationType": "ctu_storage",
+      "skuId": "13495233-15.0-15.0",
+      "quantityCases": 20,
+      "dataSource": "simulation",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "topologyNodeId": "storage-01",
+        "cellId": "cell-r0-c6",
+        "row": 0,
+        "col": 6,
+        "layer": 1
+      }
+    }
+  ],
+  "businessGuards": {
+    "mutateFormalInventory": false,
+    "mutateTopology": false,
+    "mutateOtherOrders": false,
+    "previewCargoAccepted": false,
+    "canDeclareCompleted": false,
+    "repeatRunsShareInventory": false,
+    "resetStrategy": "discard_run_local_snapshot"
+  }
+}

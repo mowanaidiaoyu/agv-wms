@@ -562,6 +562,8 @@ export interface SimulationTask {
   /** 人工拣货位入口格（拓扑有 pick_station 时才有） */
   pickStationCellId?: string | null
   pickStationZoneId?: string | null
+  /** 机械臂交接任务：四向车在拣货位等待机械臂抓取放带，不自行上带交付 */
+  armHandoff?: boolean
   /** 放置区入口格（拣货结束后把拣出货物放到 drop_zone 时才有） */
   dropZoneCellId?: string | null
   dropZoneZoneId?: string | null

@@ -259,18 +259,24 @@ export function PickingArmHandoff({
       } else if (stateRef.current.totePlacement === 'gripper') {
         tote.position.set(pose.target[0], pose.target[1] - 0.36, pose.target[2])
       } else if (stateRef.current.totePlacement === 'output') {
-        const distance = stateRef.current.conveyorDistance
-        const segment = conveyorRoute.segments.find((item) => distance <= item.start + item.length + 1e-9)
-        if (segment && segment.length > 0) {
-          const progress = Math.max(0, Math.min(1, (distance - segment.start) / segment.length))
-          tote.position.set(
-            segment.from[0] + (segment.to[0] - segment.from[0]) * progress,
-            segment.from[1] + (segment.to[1] - segment.from[1]) * progress,
-            segment.from[2] + (segment.to[2] - segment.from[2]) * progress,
-          )
+        // live 模式：放箱后流动交给 armBeltRoutes（含随机分流），这里不再重复滑行；
+        // preview 模式保留完整滑行演示。
+        if (preview) {
+          const distance = stateRef.current.conveyorDistance
+          const segment = conveyorRoute.segments.find((item) => distance <= item.start + item.length + 1e-9)
+          if (segment && segment.length > 0) {
+            const progress = Math.max(0, Math.min(1, (distance - segment.start) / segment.length))
+            tote.position.set(
+              segment.from[0] + (segment.to[0] - segment.from[0]) * progress,
+              segment.from[1] + (segment.to[1] - segment.from[1]) * progress,
+              segment.from[2] + (segment.to[2] - segment.from[2]) * progress,
+            )
+          } else {
+            const endpoint = conveyorRoute.routePoints[conveyorRoute.routePoints.length - 1] ?? dropoff
+            tote.position.set(endpoint[0], endpoint[1], endpoint[2])
+          }
         } else {
-          const endpoint = conveyorRoute.routePoints[conveyorRoute.routePoints.length - 1] ?? dropoff
-          tote.position.set(endpoint[0], endpoint[1], endpoint[2])
+          tote.visible = false
         }
       }
     }

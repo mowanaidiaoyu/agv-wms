@@ -354,6 +354,22 @@ const DELIVERY_RISE_SECONDS = 0.8
 const DELIVERY_SPEED = 1.8
 const DELIVERY_DWELL_SECONDS = 1.2
 const DELIVERY_FADE_SECONDS = 0.3
+/** 机械臂放箱流动：格子方向 → 行列增量（与后端 direction_delta 同口径）。 */
+const ARM_BELT_DIR_DELTA: Record<string, [number, number]> = {
+  right: [0, 1],
+  left: [0, -1],
+  up: [-1, 0],
+  down: [1, 0],
+}
+/** 机械臂放箱流动的稳定伪随机：同一箱每次渲染走同一分支。 */
+function armBeltBranchSeed(box: { cellId?: string; placedTick?: number }): number {
+  const text = `${box.cellId ?? ''}:${box.placedTick ?? 0}`
+  let hash = 0
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0
+  }
+  return Math.abs(hash)
+}
 
 /**
  * 交付到输送线出入口的货箱：从带面下方升到滚筒上，模拟「货物从输送线下方进入」，
@@ -848,12 +864,6 @@ function ShuttleLiftView({
           />
         </mesh>
       </SmoothLiftCab>
-      <Html position={[0, SHUTTLE_RACK_BASE_Y + height + 0.75, 0]} center zIndexRange={[27, 17]}>
-        <div className={`simulation-scene-label shuttle-lift-label ${active ? 'active' : ''}`}>
-          <b>{lift.label}</b>
-          <span>{active ? activeTask?.phaseLabel : 'L1～L4'}</span>
-        </div>
-      </Html>
     </group>
   )
 }
@@ -1042,25 +1052,121 @@ function Simulation3DScene({
     legalDropoffNode: (layoutPlan?.pickingArm?.dropoff.validationStatus ?? 'PASS') !== 'BLOCKED',
     authoritativeHandoffCompleted: false,
   }), [armRuntime?.taskId, layoutPlan])
-  // 机械臂已放到输送线的货箱：最近 ≤4 箱画在放货点带面高度（数据来自后端 armBeltBoxes）。
-  const armBeltVisuals = useMemo(() => {
-    return (armBeltBoxes ?? []).slice(-4).map((box, index) => {
-      const parsed = parseCellId(String(box.cellId))
-      if (!parsed) return null
-      const level = Math.max(1, Number(box.level ?? 2))
-      const beltBase = Number(
-        box.beltHeight ?? (level > 1 ? CONVEYOR_DECK_BASE + (level - 1) * CONVEYOR_DECK_STEP : CONVEYOR_GROUND_BELT_Y),
-      )
-      const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, level, spec.cols, spec.rows)
-      return {
-        key: `arm-belt-${box.placedTick ?? 'box'}-${box.cellId}-${index}`,
-        position: [x, beltBase + 0.16, z] as [number, number, number],
-        size: [CELL * 0.5, CELL * 0.32, CELL * 0.5] as [number, number, number],
-        color: '#f59e0b',
-        emissive: '#b45309',
+  // 机械臂放到输送线的货箱：从放货点沿输送线流动（横线 → 干线 → 随机分支出货块末端淡出）。
+  // 分支口判定：干线 down 格的东侧连续两格存在且第三格方向 right（出货块入口）。
+  const { rows: armBeltGridRows, cols: armBeltGridCols } = topology.grid
+  const armBeltRoutes = useMemo(() => {
+    const gridRows = armBeltGridRows
+    const gridCols = armBeltGridCols
+    const cellByPos = new Map(
+      topology.cells
+        .filter((cell) => cell.type === 'conveyor')
+        .map((cell) => [`${cell.floor ?? '1F'}:${cell.row}:${cell.col}`, cell]),
+    )
+    // 后端 armBeltBoxes.cellId 是拓扑格 id（cell-rXX-cYY），按 id 索引。
+    const cellById = new Map(
+      topology.cells
+        .filter((cell) => cell.type === 'conveyor')
+        .map((cell) => [String(cell.id), cell]),
+    )
+    const floorOf = (cell: (typeof topology.cells)[number]) => cell.floor ?? '1F'
+    const anchorKeyOf = (cell: (typeof topology.cells)[number]) => {
+      const anchor = cell.conveyorAnchor ?? { row: cell.row, col: cell.col }
+      return `${floorOf(cell)}:${anchor.row}:${anchor.col}`
+    }
+    const centerOf = (
+      cell: (typeof topology.cells)[number],
+      y: number,
+    ): [number, number, number] => [
+      worldX(cell.col, gridCols) + CELL / 2,
+      y,
+      worldZ(cell.row, gridRows) - CELL / 2,
+    ]
+    const eastOf = (cell: (typeof topology.cells)[number], step = 1) =>
+      cellByPos.get(`${floorOf(cell)}:${cell.row}:${cell.col + step}`)
+
+    // 收集主线沿途的分支行：down 格东侧 (r,61) 存在、(r,62) 是 2×2 出货块锚点
+    // （conveyorAnchor 等于自身坐标），排除横线残余段与块内第二行。
+    const branchRows: number[] = []
+    // 主线起点取任意一箱的放货格（同一放货点），扫描全主线收集分支行。
+    const anyBox = (armBeltBoxes ?? [])[0]
+    const scanStart = anyBox
+      ? cellById.get(String(anyBox.cellId))
+      : undefined
+    if (scanStart) {
+      let cursor: (typeof topology.cells)[number] | undefined = scanStart
+      let guard = 0
+      while (cursor && guard < 400) {
+        guard += 1
+        const [dr, dc] = ARM_BELT_DIR_DELTA[cursor.conveyorDirection ?? 'right'] ?? [0, 1]
+        if ((cursor.conveyorDirection ?? 'right') === 'down') {
+          const east1 = eastOf(cursor)
+          const east2 = eastOf(cursor, 2)
+          const east2Anchor = east2?.conveyorAnchor
+          if (
+            east1
+            && east2
+            && east2Anchor
+            && Number(east2Anchor.row) === Number(east2.row)
+            && Number(east2Anchor.col) === Number(east2.col)
+            && (east2.conveyorDirection ?? 'right') === 'right'
+          ) {
+            branchRows.push(cursor.row)
+          }
+        }
+        cursor = cellByPos.get(`${floorOf(cursor)}:${cursor.row + dr}:${cursor.col + dc}`)
       }
-    }).filter((box): box is NonNullable<typeof box> => box !== null)
-  }, [armBeltBoxes, spec.cols, spec.rows])
+    }
+
+    const blockLookup = new Map<string, string>()
+    const boxes: { key: string; path: [number, number, number][]; color: string }[] = []
+    for (const [index, box] of (armBeltBoxes ?? []).slice(-4).entries()) {
+      const startCell = cellById.get(String(box.cellId))
+      if (!startCell) continue
+      const y = Number(box.beltHeight ?? 3.0) + 0.16
+      const branchRow =
+        branchRows.length > 0 ? branchRows[armBeltBranchSeed(box) % branchRows.length] : null
+      const points: [number, number, number][] = []
+      const routeCells: (typeof topology.cells)[number][] = []
+      let cursor: (typeof topology.cells)[number] | undefined = startCell
+      let guard = 0
+      let branched = false
+      while (cursor && guard < 400) {
+        guard += 1
+        points.push(centerOf(cursor, y))
+        routeCells.push(cursor)
+        if (
+          !branched &&
+          branchRow !== null &&
+          cursor.row === branchRow &&
+          (cursor.conveyorDirection ?? 'right') === 'down'
+        ) {
+          // 到达分流行：强制向东逐格走出货块，直到末端。
+          branched = true
+          let east: (typeof topology.cells)[number] | undefined = cursor
+          while (east) {
+            east = eastOf(east)
+            if (!east) break
+            points.push(centerOf(east, y))
+            routeCells.push(east)
+          }
+          break
+        }
+        const [dr, dc] = ARM_BELT_DIR_DELTA[cursor.conveyorDirection ?? 'right'] ?? [0, 1]
+        cursor = cellByPos.get(`${floorOf(cursor)}:${cursor.row + dr}:${cursor.col + dc}`)
+      }
+      if (points.length < 2) continue
+      for (const cell of routeCells) {
+        blockLookup.set(`${cell.row}:${cell.col}`, anchorKeyOf(cell))
+      }
+      boxes.push({
+        key: `arm-belt-${box.placedTick ?? 'box'}-${box.cellId}-${index}`,
+        path: points,
+        color: '#f59e0b',
+      })
+    }
+    return { boxes, blockLookup }
+  }, [armBeltBoxes, topology.cells, armBeltGridRows, armBeltGridCols])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1294,6 +1400,10 @@ function Simulation3DScene({
       }
 
       const robot = task.assignedRobotId ? robotsById.get(task.assignedRobotId) : undefined
+      // 机械臂交接任务：箱子渲染交给 armBeltRoutes（放箱后沿输送线流动），
+      // 这里不再播放「地面线交付」动画——否则车一到拣货位/任务一完成
+      // 就会出现箱子自行流出消失，与机械臂取放时序打架。
+      if (task.armHandoff) continue
       if (hasPickStation && robot?.type !== 'shuttle') {
         if (!pickFlowPhases.has(task.phase)) continue
       } else {
@@ -1743,11 +1853,19 @@ function Simulation3DScene({
         />
       ) : null}
 
-      {armBeltVisuals.map((box) => (
-        <mesh key={box.key} position={box.position} castShadow>
-          <boxGeometry args={box.size} />
-          <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />
-        </mesh>
+      {armBeltRoutes.boxes.map((box) => (
+        <DeliveredBox
+          key={box.key}
+          position={box.path[0]}
+          color={box.color}
+          path={box.path}
+          blockLookup={armBeltRoutes.blockLookup}
+          activeBlocks={activeBlocksRef}
+          cols={topology.grid.cols}
+          rows={topology.grid.rows}
+          hold={false}
+          skipRise
+        />
       ))}
 
       {routePoints.length > 1 ? (
@@ -1771,25 +1889,6 @@ function Simulation3DScene({
               : '出库交付点'}
         />
       ) : null}
-
-      {topology.nodes
-        .filter((node) => node.type === 'picking_handoff')
-        .map((node) => {
-          const row = Number(node.row)
-          const col = Number(node.col)
-          const snap = groundBeltLookup.get(`${row},${col}`)
-          const [x, gy, z] = snap
-            ? shuttleGroundSnapPosition(row, col, snap, spec.cols, spec.rows, 1)
-            : shuttleTrackWorldPosition(row, col, 1, spec.cols, spec.rows)
-          return (
-            <Html key={node.id} position={[x, gy + 1.45, z]} center zIndexRange={[28, 18]}>
-              <div className="simulation-scene-label picking-handoff-label">
-                <b>{node.label || '机械臂拣货位'}</b>
-                <span>四向车停止等待 · 卸完货才离开</span>
-              </div>
-            </Html>
-          )
-        })}
 
       {robots.map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'

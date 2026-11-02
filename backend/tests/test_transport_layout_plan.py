@@ -22,7 +22,7 @@ def plan(topology: dict):
 
 def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:760d47b9c5c88579"
+    assert plan.topologyRevision == "2.0.0:772d71a08e9a5658"
     assert plan.overallStatus == "PARTIAL"
     assert plan.summary["formalTopologyMutated"] is False
 
@@ -160,18 +160,18 @@ def test_plan_generation_does_not_mutate_formal_topology(topology: dict) -> None
     assert "transportNetwork" not in topology
 
 
-def test_picking_arm_uses_user_confirmed_installation_and_row86_dropoff(
+def test_picking_arm_uses_user_confirmed_installation_and_row84_dropoff(
     topology: dict, plan
 ) -> None:
     arm = plan.pickingArm
     assert arm is not None
-    assert (arm.installation.row, arm.installation.col, arm.installation.level) == (91, 54, 1)
+    assert (arm.installation.row, arm.installation.col, arm.installation.level) == (88, 49, 1)
     assert not any(
-        int(cell["row"]) == 91 and int(cell["col"]) == 54
+        int(cell["row"]) == 88 and int(cell["col"]) == 49
         for cell in topology["cells"]
     )
     assert not any(
-        int(node["row"]) == 91 and int(node["col"]) == 54
+        int(node["row"]) == 88 and int(node["col"]) == 49
         for node in topology["nodes"]
     )
     drop_cell = next(cell for cell in topology["cells"] if cell["id"] == arm.dropoff.topologyCellId)
@@ -180,7 +180,7 @@ def test_picking_arm_uses_user_confirmed_installation_and_row86_dropoff(
     assert pickup_cell["type"] == "conveyor"
     assert pickup_cell["conveyorGround"] is True
     assert pickup_cell["conveyorDirection"] == "right"
-    assert drop_cell["id"] == "cell-r86-c50"
+    assert drop_cell["id"] == "cell-r84-c50"
     assert drop_cell["type"] == "conveyor"
     assert drop_cell["conveyorDirection"] == "right"
     assert drop_cell["levels"] == 2
@@ -194,11 +194,10 @@ def test_picking_arm_is_preview_only_and_has_real_directed_downstream(
     assert arm.pickup.provenance == "topology"
     assert arm.dropoff.provenance == "topology"
     assert arm.canDeclareDelivery is False
-    # 用户在编辑器删除了错误的 row-86 段（c51..c59，含 turn_transfer-15）：
-    # 放货点 c50 仍在，但下游衔接格缺失 → 下游如实 BLOCKED，等待重绘。
-    assert arm.downstreamCellId == "cell-r86-c51"
-    assert arm.downstreamStatus == "BLOCKED"
-    assert not any(cell["id"] == arm.downstreamCellId for cell in topology["cells"])
+    # 放货点改到 row84 块锚点 (84,50) 后：下游 c51 存在且方向 right，衔接恢复 PASS。
+    assert arm.downstreamCellId == "cell-r84-c51"
+    assert arm.downstreamStatus == "PASS"
+    assert any(cell["id"] == arm.downstreamCellId for cell in topology["cells"])
     assert arm.liftBId == "shuttle-lift-b"
     assert arm.liftBClearanceCells == pytest.approx(8.60)
     assert arm.workRadius == pytest.approx(7.9)
@@ -210,7 +209,8 @@ def test_picking_arm_is_preview_only_and_has_real_directed_downstream(
     assert "PICKING_ARM_HANDOFF_PENDING_G3" in issue_codes
     assert "PICKING_ARM_PICK_SOURCE_UNCONFIRMED" in issue_codes
     assert "PICKING_ARM_TARGET_LINE_TRANSFER_UNAPPROVED" not in issue_codes
-    assert "PICKING_ARM_POST_TURN_DIRECTION_OVERRIDE" in issue_codes
+    # 旧的单段 route 声明（turn_transfer-15 / row86 段）已随放货点迁移一并移除。
+    assert "PICKING_ARM_POST_TURN_DIRECTION_OVERRIDE" not in issue_codes
 
 
 def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(plan) -> None:
@@ -230,22 +230,25 @@ def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(p
     assert "PICKING_ARM_KINEMATICS_UNDERSIZED" not in issue_codes
 
 
-def test_picking_arm_preview_path_stops_at_c50_until_segment_redrawn(plan) -> None:
+def test_picking_arm_preview_path_runs_from_row84_to_trunk_end(plan) -> None:
     arm = plan.pickingArm
     assert arm is not None
-    # 用户删除 c51..c59 后，预览路径从放货点 c50 出发立即受阻：只含起点一格。
-    assert [step.cellId for step in arm.previewConveyorPath] == ["cell-r86-c50"]
+    # 放货点 (84,50) → row84 横线 → turn_transfer-21 拐下 → col60 干线贯通到 r119 末端。
+    steps = [step.cellId for step in arm.previewConveyorPath]
+    assert steps[0] == "cell-r84-c50"
+    assert steps[-1] == "cell-r119-c60"
+    assert len(steps) == 46
     assert all(step.position.level == 2 for step in arm.previewConveyorPath)
     assert all(step.beltHeight == pytest.approx(3.0) for step in arm.previewConveyorPath)
-    assert all(step.direction == "right" for step in arm.previewConveyorPath)
-    assert arm.previewEndpointId == "cell-r86-c50"
-    assert arm.previewPathStatus == "BLOCKED"
-    assert "r86,c51" in arm.previewStopReason
-    assert arm.previewTransferDeviceId == "turn_transfer-15"
-    # 用户以 c60 的显式甲板（lower north→south outbound）替代原转向设备；
-    # turn_transfer-15 节点已随错误线一并删除，路线声明保留为重绘参考。
+    assert arm.previewEndpointId == "cell-r119-c60"
+    assert arm.previewPathStatus == "PASS"
+    assert arm.previewTransferDeviceId is None
+    # 旧路线声明的 turn_transfer-15 已删除；新拐点由 (84,60) 的 turn_transfer-21 承接。
     assert not any(node["id"] == "turn_transfer-15" for node in topology_fixture()["nodes"])
-    assert arm.previewTransferStatus == "PARTIAL"
+    assert any(
+        node["id"] == "turn_transfer-21" and node["row"] == 84 and node["col"] == 60
+        for node in topology_fixture()["nodes"]
+    )
 
 
 def topology_fixture():

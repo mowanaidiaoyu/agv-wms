@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import logging
 import random
 import uuid
@@ -14,7 +15,17 @@ from fastapi import WebSocket
 from ..core.repository import Repository
 from .assignment import assign_tasks
 from .conveyor import compile_conveyor_graph, nearest_lift_id, route_from_block, route_from_cell
-from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes
+from .fulfillment_data import (
+    validate_general_simulation_orders,
+    validate_simulation_test_scenario,
+)
+from .order_fulfillment import (
+    PackagingSpecificationError,
+    plan_orders_fulfillment,
+    topology_inventory_balances,
+)
+from .fulfillment_data import catalog_with_packaging
+from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes, load_catalog
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -31,6 +42,13 @@ from .pathfinding import (
     shortest_path_shuttle,
     shuttle_rack_slots,
     shuttle_servable_slots,
+)
+from .right_handoff import (
+    FULFILLMENT_SIMULATION_RUN_MODES,
+    GENERAL_SIMULATION_RUN_MODE,
+    SIMULATION_TEST_RUN_MODE,
+    build_simulation_test_state,
+    step_simulation_test_state,
 )
 from .simulation_config import build_simulation_config
 from .transport_layout import _load_raw_plan
@@ -99,6 +117,13 @@ class RunRuntime:
     conveyor_graph: dict[str, Any] = field(default_factory=dict)
     # 机械臂交接目标（交接处格 + 放货点带面）；None 表示未启用机械臂交接
     arm_handoff: dict[str, Any] | None = None
+    # 运行控制租约（run-recovery）：多后端实例间的运行所有权
+    control_lease_renewed_at: float = 0.0
+    pending_business_events: list[dict[str, Any]] = field(default_factory=list)
+
+
+class RunControlConflict(ValueError):
+    """The requested lifecycle transition cannot safely own the Run."""
 
 
 class WebSocketHub:
@@ -139,10 +164,420 @@ class WebSocketHub:
 
 
 class SimulationService:
-    def __init__(self, repo: Repository) -> None:
+    def __init__(
+        self,
+        repo: Repository,
+        instance_id: str | None = None,
+        control_lease_seconds: float = 15.0,
+    ) -> None:
         self.repo = repo
         self.hub = WebSocketHub()
         self.runtimes: dict[str, RunRuntime] = {}
+        # 运行控制租约身份：每个后端进程唯一，用于多实例间的运行所有权仲裁
+        self.instance_id = instance_id or uuid.uuid4().hex
+        self.control_lease_seconds = float(control_lease_seconds)
+
+
+    # ============================================================
+    # 运行控制租约（run-recovery，自 dev/c-pyc-new-arm-20261029 移植）
+    # ============================================================
+    def _claim_run_control(self, runtime: RunRuntime) -> bool:
+        claim = getattr(self.repo, "claim_run_control", None)
+        if not callable(claim):
+            return True
+        claimed = bool(
+            claim(runtime.run_id, self.instance_id, self.control_lease_seconds)
+        )
+        if claimed:
+            runtime.control_lease_renewed_at = time.monotonic()
+        return claimed
+
+    def _ensure_run_control(self, runtime: RunRuntime, *, force: bool = False) -> None:
+        renew = getattr(self.repo, "renew_run_control", None)
+        if not callable(renew):
+            return
+        renewal_interval = max(0.25, self.control_lease_seconds / 3)
+        if not force and time.monotonic() - runtime.control_lease_renewed_at < renewal_interval:
+            return
+        if renew(runtime.run_id, self.instance_id, self.control_lease_seconds):
+            runtime.control_lease_renewed_at = time.monotonic()
+            return
+        if self._claim_run_control(runtime):
+            return
+        raise RunControlConflict("Run is controlled by another live backend instance")
+
+    @staticmethod
+    def _simulation_test_order_state(
+        scenario_audit: dict[str, Any],
+        *,
+        order: dict[str, Any] | None = None,
+        plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        order = deepcopy(order or scenario_audit["order"])
+        plan = deepcopy(plan or scenario_audit["plan"])
+        requested = sum(int(line.get("quantityBase") or 0) for line in order.get("lines", []))
+        run_mode = str(scenario_audit.get("runMode") or SIMULATION_TEST_RUN_MODE)
+        data_source = str(scenario_audit.get("dataSource") or "simulation_test")
+        return {
+            **order,
+            "runMode": run_mode,
+            "dataSource": data_source,
+            "taskIds": [task["taskId"] for task in plan["tasks"]],
+            "totalTasks": len(plan["tasks"]),
+            "completedTasks": 0,
+            "progress": 0,
+            "status": "executing",
+            "statusLabel": f"{run_mode} 订单任务已准备，等待统一 Tick 推进",
+            "missingQuantity": 0,
+            "startedTick": 0,
+            "completedTick": None,
+            "fulfillmentPlan": plan,
+            "decomposition": {
+                "stage": "executing",
+                "requestedQuantity": requested,
+                "allocatedQuantity": requested,
+                "missingQuantity": 0,
+                "taskCount": len(plan["tasks"]),
+                "assignedTaskCount": 0,
+                "activeVehicleIds": [],
+                "vehicleCapacity": 1,
+                "strategy": run_mode,
+                "maxParallelCtu": 1,
+            },
+        }
+
+    def _build_simulation_test_runtime(
+        self,
+        run_id: str,
+        topology: dict[str, Any],
+        scenario_audit: dict[str, Any],
+    ) -> RunRuntime:
+        config = build_simulation_config(topology)
+        runtime = self._create_runtime(
+            run_id,
+            topology,
+            config,
+            seed_default_tasks=False,
+        )
+        simulation_test = build_simulation_test_state(topology, scenario_audit, run_id)
+        run_mode = str(scenario_audit.get("runMode") or SIMULATION_TEST_RUN_MODE)
+        data_source = str(scenario_audit.get("dataSource") or "simulation_test")
+        audit_orders = scenario_audit.get("orders") or [scenario_audit["order"]]
+        audit_plans = scenario_audit.get("plans") or [scenario_audit["plan"]]
+        runtime.state.update({
+            "runMode": run_mode,
+            "scenarioId": scenario_audit["scenarioId"],
+            "profileId": scenario_audit.get("profileId"),
+            "topologyRevision": scenario_audit["topologyRevision"],
+            "dataSource": data_source,
+            "simulationStateAuthoritative": True,
+            "simulationTest": simulation_test,
+            "simulationAuditInput": {
+                "profileId": scenario_audit.get("profileId"),
+                "orders": deepcopy(audit_orders),
+                "inventoryOverrides": [
+                    {
+                        "inventoryRecordId": item["inventoryRecordId"],
+                        "quantityCases": item["quantityCases"],
+                    }
+                    for item in scenario_audit.get("inventory", [])
+                ],
+            },
+            "inventory": [],
+            "tasks": [],
+            "fulfillmentTasks": deepcopy(scenario_audit["plan"]["tasks"]),
+            "orders": [
+                self._simulation_test_order_state(
+                    scenario_audit,
+                    order=order,
+                    plan=next(item for item in audit_plans if item["orderId"] == order["id"]),
+                )
+                for order in audit_orders
+            ],
+            "orderDriven": True,
+        })
+        shuttle = simulation_test["shuttle"]
+        position = shuttle["currentPosition"]
+        shuttle_robot = next(
+            (item for item in runtime.state["robots"] if item.get("id") == shuttle["deviceId"]),
+            None,
+        )
+        if shuttle_robot is None:
+            raise ValueError(f"Simulation-test shuttle device is missing: {shuttle['deviceId']}")
+        shuttle_robot.update({
+            "currentNode": position["nodeId"],
+            "currentCellId": f"cell-r{position['row']}-c{position['col']}",
+            "homeCellId": f"cell-r{position['row']}-c{position['col']}",
+            "currentRow": position["row"],
+            "currentCol": position["col"],
+            "currentLayer": position["level"],
+            "capacity": 1,
+            "simulationOnly": True,
+            "dataSource": data_source,
+        })
+        left_flow = simulation_test.get("leftFlow")
+        left_ctu = left_flow["ctu"] if left_flow is not None else None
+        left_robot = next(
+            (item for item in runtime.state["robots"] if left_ctu and item.get("id") == left_ctu["deviceId"]),
+            None,
+        )
+        if left_ctu is not None and (left_robot is None or left_robot.get("type") != "ctu"):
+            raise ValueError(f"Simulation-test CTU device is missing: {left_ctu['deviceId']}")
+        if left_ctu is not None and left_robot is not None:
+            left_position = left_ctu["currentPosition"]
+            left_robot.update({
+                "currentNode": left_position["nodeId"],
+                "currentCellId": left_position["nodeId"],
+                "currentFloor": left_position.get("floor", "1F"),
+                "currentRow": left_position["row"],
+                "currentCol": left_position["col"],
+                "currentLayer": 1,
+                "capacity": 1,
+                "simulationOnly": True,
+                "dataSource": data_source,
+            })
+        task_count = len(scenario_audit["plan"]["tasks"])
+        runtime.metrics.update({
+            "pendingTasks": task_count,
+            "completedTasks": 0,
+            "simulationTestWaitingArmCases": 0,
+            "simulationTestMergeArrivedCases": 0,
+        })
+        runtime.initial_state = deepcopy(runtime.state)
+        runtime.initial_metrics = deepcopy(runtime.metrics)
+        return runtime
+
+    async def start_simulation_test(
+        self,
+        topology: dict[str, Any],
+        scenario_audit: dict[str, Any],
+    ) -> dict[str, Any]:
+        if scenario_audit.get("dataSource") != "simulation_test":
+            raise ValueError("Only a validated simulation_test scenario may use this endpoint")
+        if scenario_audit.get("topologyRevision") != topology_revision(topology):
+            raise ValueError("Simulation-test topology revision mismatch")
+        run_id = f"run-test-{uuid.uuid4().hex[:8]}"
+        runtime = self._build_simulation_test_runtime(run_id, topology, scenario_audit)
+        self.runtimes[run_id] = runtime
+        self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
+        if not self._claim_run_control(runtime):
+            self.runtimes.pop(run_id, None)
+            raise RunControlConflict("Run control lease could not be acquired")
+        self._persist(runtime)
+        runtime.task_handle = asyncio.create_task(self._loop(runtime))
+        return {
+            "runId": run_id,
+            "status": "running",
+            "runMode": SIMULATION_TEST_RUN_MODE,
+            "scenarioId": scenario_audit["scenarioId"],
+        }
+
+    def _prepare_base_quantity_orders(
+        self,
+        topology: dict[str, Any],
+        orders: list[dict[str, Any]],
+        inventory_balances: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Attach non-executable fulfillment plans to the existing order model."""
+        plans = plan_orders_fulfillment(
+            orders,
+            catalog_with_packaging(load_catalog()),
+            inventory_balances if inventory_balances is not None else topology_inventory_balances(topology),
+        )
+        order_states: list[dict[str, Any]] = []
+        preparation_tasks: list[dict[str, Any]] = []
+        for order, plan in zip(orders, plans, strict=True):
+            ready = plan["allocationStatus"] == "ready"
+            task_ids = [task["taskId"] for task in plan["tasks"]]
+            requested = sum(int(line.get("quantityBase") or 0) for line in order.get("lines", []))
+            allocated = sum(
+                int(item["quantityBase"]) - int(item["shortageQuantityBase"])
+                for item in plan["allocations"]
+            )
+            runtime_lines = []
+            allocations_by_line = {item["lineId"]: item for item in plan["allocations"]}
+            for line in order.get("lines", []):
+                allocation = allocations_by_line[str(line.get("id"))]
+                runtime_lines.append({
+                    **line,
+                    "unitsPerCase": allocation["unitsPerCase"],
+                    "allocatedBase": allocation["quantityBase"] - allocation["shortageQuantityBase"],
+                    "pickedBase": 0,
+                })
+            order_states.append({
+                **order,
+                "lines": runtime_lines,
+                "taskIds": task_ids,
+                "totalTasks": len(task_ids),
+                "completedTasks": 0,
+                "progress": 0,
+                "status": "waiting_dispatch" if ready else "shortage",
+                "statusLabel": "任务已拆分，等待权威取货" if ready else "库存不足，等待人工处理",
+                "missingQuantity": requested - allocated,
+                "startedTick": None,
+                "completedTick": None,
+                "fulfillmentPlan": plan,
+                "decomposition": {
+                    "stage": "tasks_prepared" if ready else "shortage",
+                    "requestedQuantity": requested,
+                    "allocatedQuantity": allocated,
+                    "missingQuantity": requested - allocated,
+                    "taskCount": len(task_ids),
+                    "assignedTaskCount": 0,
+                    "activeVehicleIds": [],
+                    "vehicleCapacity": ROBOT_CARRY_CAPACITY["shuttle"],
+                    "strategy": order.get("dispatchMode", "balanced"),
+                    "maxParallelCtu": int(order.get("maxParallelCtu") or 7),
+                },
+            })
+            preparation_tasks.extend(plan["tasks"])
+        return order_states, preparation_tasks
+
+
+    async def start_general_simulation(
+        self,
+        topology: dict[str, Any],
+        scenario_audit: dict[str, Any],
+    ) -> dict[str, Any]:
+        if scenario_audit.get("dataSource") != "simulation":
+            raise ValueError("Only a validated general simulation profile may use this endpoint")
+        if scenario_audit.get("allocationStatus") != "ready":
+            raise ValueError("A shortage plan cannot start a simulation Run")
+        if scenario_audit.get("topologyRevision") != topology_revision(topology):
+            raise ValueError("General simulation topology revision mismatch")
+        run_id = f"run-sim-{uuid.uuid4().hex[:8]}"
+        runtime = self._build_simulation_test_runtime(run_id, topology, scenario_audit)
+        self.runtimes[run_id] = runtime
+        self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
+        if not self._claim_run_control(runtime):
+            self.runtimes.pop(run_id, None)
+            raise RunControlConflict("Run control lease could not be acquired")
+        self._persist(runtime)
+        runtime.task_handle = asyncio.create_task(self._loop(runtime))
+        return {
+            "runId": run_id,
+            "status": "running",
+            "runMode": GENERAL_SIMULATION_RUN_MODE,
+            "profileId": scenario_audit["profileId"],
+        }
+
+    async def recover_simulation_test(self, run_id: str) -> RunRuntime:
+        existing = self.runtimes.get(run_id)
+        if existing is not None:
+            return existing
+        saved = self.repo.get_run(run_id)
+        if not saved:
+            raise KeyError(run_id)
+        state = saved["payload"]
+        if state.get("runMode") not in FULFILLMENT_SIMULATION_RUN_MODES:
+            raise RunControlConflict("Only fulfillment simulation Runs support controlled runtime recovery")
+        topology_record = self.repo.get_topology(str(state.get("topologyId") or ""))
+        if not topology_record:
+            raise RunControlConflict("Simulation-test topology is no longer available")
+        topology = topology_record["payload"]
+        actual_revision = topology_revision(topology)
+        if actual_revision != state.get("topologyRevision"):
+            raise RunControlConflict(
+                f"Persisted Run expects {state.get('topologyRevision')}; current topology is {actual_revision}"
+            )
+        if state.get("runMode") == GENERAL_SIMULATION_RUN_MODE:
+            audit_input = state.get("simulationAuditInput") or {}
+            audit = validate_general_simulation_orders(
+                topology,
+                load_catalog(),
+                str(audit_input.get("profileId") or state.get("profileId") or ""),
+                deepcopy(audit_input.get("orders") or []),
+                deepcopy(audit_input.get("inventoryOverrides") or []),
+                require_ready=True,
+            )
+        else:
+            audit = validate_simulation_test_scenario(
+                topology,
+                load_catalog(),
+                str(state.get("scenarioId") or ""),
+            )
+        fresh = self._build_simulation_test_runtime(run_id, topology, audit)
+        fresh.state = deepcopy(state)
+        fresh.metrics = deepcopy(saved["metrics"])
+        fresh.paused = saved["status"] == "paused"
+        fresh.stopped = saved["status"] in {"stopped", "completed"}
+        fresh.speed_multiplier = int(state.get("speedMultiplier") or DEFAULT_SPEED_MULTIPLIER)
+        if not self._claim_run_control(fresh):
+            raise RunControlConflict("Run is controlled by another live backend instance")
+        self.runtimes[run_id] = fresh
+        if saved["status"] == "running":
+            fresh.task_handle = asyncio.create_task(self._loop(fresh))
+        return fresh
+
+    def _append_simulation_test_events(
+        self,
+        runtime: RunRuntime,
+        events: list[dict[str, Any]],
+    ) -> None:
+        simulation_test = runtime.state["simulationTest"]
+        applied = set(simulation_test.get("appliedEventIds", []))
+        for event in events:
+            event_id = str(event["eventId"])
+            if event_id in applied:
+                continue
+            payload = {"runId": runtime.run_id, **deepcopy(event)}
+            applied.add(event_id)
+            simulation_test.setdefault("events", []).append(payload)
+            simulation_test["events"] = simulation_test["events"][-100:]
+            runtime.pending_business_events.append(payload)
+            runtime.state["eventCount"] = int(runtime.state.get("eventCount", 0)) + 1
+        simulation_test["appliedEventIds"] = sorted(applied)
+
+    @staticmethod
+    def _sync_simulation_test_fulfillment_tasks(runtime: RunRuntime) -> None:
+        by_cargo = {
+            item["cargoId"]: item
+            for item in runtime.state["simulationTest"]["cargo"]
+        }
+        left_by_task = {
+            item["taskId"]: item
+            for item in runtime.state["simulationTest"].get("leftFlows", [])
+        }
+        task_collections = [runtime.state.get("fulfillmentTasks", [])]
+        task_collections.extend(
+            (order.get("fulfillmentPlan") or {}).get("tasks", [])
+            for order in runtime.state.get("orders", [])
+        )
+        for collection in task_collections:
+            for task in collection:
+                cargo = by_cargo.get(task.get("cargoId"))
+                if cargo is not None:
+                    task["status"] = cargo["status"]
+                    task["transportStatus"] = cargo["transportStatus"]
+                    task["currentNodeId"] = cargo["currentNodeId"]
+                left = left_by_task.get(task.get("taskId"))
+                if left is not None:
+                    task["status"] = left["status"]
+
+    @staticmethod
+    def _refresh_simulation_test_metrics(runtime: RunRuntime) -> None:
+        cargo = runtime.state["simulationTest"]["cargo"]
+        waiting_arm = sum(item["status"] == "waiting_arm" for item in cargo)
+        arrived = sum(item["status"] == "merge_arrived" for item in cargo)
+        active = sum(item["status"] not in {"waiting_pick", "waiting_arm", "merge_arrived"} for item in cargo)
+        left_flows = runtime.state["simulationTest"].get("leftFlows") or []
+        left_complete_count = sum(item["status"] == "returned" for item in left_flows)
+        total_cases = len(cargo)
+        runtime.metrics.update({
+            "throughput": 0,
+            "completedTasks": 0,
+            "pendingTasks": (total_cases - arrived) + (len(left_flows) - left_complete_count),
+            "activeRobots": (1 if active else 0) + (
+                0 if not left_flows or all(item["ctu"]["phase"] == "idle" for item in left_flows) else 1
+            ),
+            "simulationTestWaitingArmCases": waiting_arm,
+            "simulationTestMergeArrivedCases": arrived,
+            "conveyorUtilization": sum(
+                value is not None
+                for value in runtime.state["simulationTest"]["conveyor"]["occupiedByBlock"].values()
+            ) / max(1, len(runtime.state["simulationTest"]["conveyor"]["path"])),
+        })
+
 
     async def start(
         self,
@@ -178,13 +613,137 @@ class SimulationService:
         self._persist(runtime)
         return {"runId": run_id, "status": "running"}
 
-    def stop(self, run_id: str) -> dict[str, Any]:
-        runtime = self._require_runtime(run_id)
+    async def stop(self, run_id: str) -> dict[str, Any]:
+        runtime = self.runtimes.get(run_id)
+        if runtime is None:
+            return await self._stop_persisted_run(run_id)
+
+        current_status = str(runtime.state.get("status") or "")
+        if current_status == "stopped":
+            return {"runId": run_id, "status": "stopped"}
+        if current_status == "completed":
+            raise RunControlConflict("Completed Run cannot be stopped")
+
+        previous_stopped = runtime.stopped
+        previous_paused = runtime.paused
+        task_was_active = bool(runtime.task_handle and not runtime.task_handle.done())
         runtime.stopped = True
-        runtime.state["status"] = "stopped"
-        runtime.state["stopReason"] = "user"
-        self._persist(runtime)
+        if task_was_active and runtime.task_handle:
+            runtime.task_handle.cancel()
+            try:
+                await runtime.task_handle
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            saved = self.repo.get_run(run_id) if hasattr(self.repo, "get_run") else None
+            candidate = self._build_stopped_state(runtime.state)
+            if saved is not None and hasattr(self.repo, "stop_run_atomic"):
+                result = self.repo.stop_run_atomic(
+                    run_id,
+                    self.instance_id,
+                    saved["updated_at"],
+                    candidate,
+                    runtime.metrics,
+                )
+                self._raise_for_stop_outcome(result)
+                runtime.state = (result.get("run") or {}).get("payload") or candidate
+            else:
+                # 轻量内存仓库（单元测试用）保持旧持久化契约。
+                runtime.state = candidate
+                self.repo.add_event(
+                    run_id,
+                    runtime.state["tick"],
+                    "simulation_stopped",
+                    {"runId": run_id},
+                )
+                self._persist(runtime)
+            runtime.paused = False
+            runtime.control_lease_renewed_at = 0.0
+        except Exception:
+            runtime.stopped = previous_stopped
+            runtime.paused = previous_paused
+            if task_was_active and not previous_stopped:
+                runtime.task_handle = asyncio.create_task(self._loop(runtime))
+            raise
+
+        await self._broadcast_control_state(runtime)
         return {"runId": run_id, "status": "stopped"}
+
+    async def _stop_persisted_run(self, run_id: str) -> dict[str, Any]:
+        saved = self.repo.get_run(run_id)
+        if not saved:
+            raise KeyError(run_id)
+        status = str(saved.get("status") or saved["payload"].get("status") or "")
+        if status == "stopped":
+            return {"runId": run_id, "status": "stopped"}
+        if status == "completed":
+            raise RunControlConflict("Completed Run cannot be stopped")
+        if status != "paused":
+            raise RunControlConflict(
+                f"Persisted {status or 'unknown'} Run cannot be stopped without live control ownership"
+            )
+
+        candidate = self._build_stopped_state(saved["payload"])
+        result = self.repo.stop_run_atomic(
+            run_id,
+            self.instance_id,
+            saved["updated_at"],
+            candidate,
+            saved["metrics"],
+        )
+        self._raise_for_stop_outcome(result)
+        stopped_run = result.get("run") or {}
+        stopped_state = stopped_run.get("payload") or candidate
+        stopped_metrics = stopped_run.get("metrics") or saved["metrics"]
+        await self._broadcast_persisted_control_state(run_id, stopped_state, stopped_metrics)
+        return {"runId": run_id, "status": "stopped"}
+
+    @staticmethod
+    def _build_stopped_state(state: dict[str, Any]) -> dict[str, Any]:
+        candidate = deepcopy(state)
+        candidate["status"] = "stopped"
+        candidate["stopReason"] = "user"
+        candidate["updatedAt"] = now_dt().isoformat()
+        candidate["eventCount"] = int(candidate.get("eventCount", 0)) + 1
+        return candidate
+
+    @staticmethod
+    def _raise_for_stop_outcome(result: dict[str, Any]) -> None:
+        outcome = result.get("outcome")
+        if outcome in {"stopped", "already_stopped"}:
+            return
+        if outcome == "not_found":
+            raise KeyError("Run not found")
+        if outcome == "completed":
+            raise RunControlConflict("Completed Run cannot be stopped")
+        if outcome == "owned":
+            raise RunControlConflict("Run is controlled by another live backend instance")
+        if outcome == "unowned_running":
+            raise RunControlConflict("Persisted running Run has no verifiable control owner")
+        if outcome == "stale":
+            raise RunControlConflict("Run changed while the stop request was being processed")
+        raise RunControlConflict(f"Run cannot be stopped from status {result.get('status', 'unknown')}")
+
+    async def _broadcast_control_state(self, runtime: RunRuntime) -> None:
+        await self.hub.broadcast(runtime.run_id, {
+            "type": "control_state",
+            "tick": runtime.state.get("tick", 0),
+            "payload": runtime.state,
+        })
+
+    async def _broadcast_persisted_control_state(
+        self,
+        run_id: str,
+        state: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> None:
+        await self.hub.broadcast(run_id, {
+            "type": "control_state",
+            "tick": state.get("tick", 0),
+            "payload": state,
+            "metrics": metrics,
+        })
 
     def set_speed(self, run_id: str, multiplier: int) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
@@ -1824,6 +2383,22 @@ class SimulationService:
         runtime.state["tick"] += 1
         runtime.state["updatedAt"] = now_dt().isoformat()
         tick = runtime.state["tick"]
+        if runtime.state.get("runMode") in FULFILLMENT_SIMULATION_RUN_MODES:
+            events, transport_complete = step_simulation_test_state(runtime.state, tick)
+            self._append_simulation_test_events(runtime, events)
+            self._sync_simulation_test_fulfillment_tasks(runtime)
+            self._refresh_simulation_test_metrics(runtime)
+            if transport_complete:
+                runtime.stopped = True
+                runtime.state["status"] = "stopped"
+                runtime.state["stopReason"] = (
+                    "simulation_test_quantity_accounted"
+                    if runtime.state["simulationTest"].get("leftFlow") is not None
+                    else "simulation_test_merge_arrived"
+                )
+            if persist:
+                self._persist(runtime)
+            return
         self._inject_faults(runtime, tick)
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
@@ -2204,11 +2779,27 @@ class SimulationService:
                 self._advance_robot_phase(runtime, robot, task, occupied_cells)
 
     def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
-        """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
+        """CTU 被堵时绕行：把其它设备当前占用的格与其意图格（path[1]）临时视为障碍，
+        重新算一条到当前目标的路径。
+
+        意图格必须排除：只排当前格时，两台对向车会在同一 tick 各自绕行并恰好
+        换道（r13↔r12），下一 tick 又互相挡住对方的换道路径，形成周期性活锁；
+        排除意图格后，先重路由的车占住优先路线，后重路由的车绕不开就保持等待，
+        头对头自然解开。
+        """
         target = robot.get("targetCellId")
         if not target or target == robot["currentCellId"]:
             return False
         others = {parse_cell_id(cell) for cell in occupied_cells if cell != robot["currentCellId"]}
+        for item in runtime.state["robots"]:
+            if item["id"] == robot["id"] or item.get("type") != "ctu":
+                continue
+            item_path = item.get("path") or []
+            if len(item_path) > 1 and item_path[1] != item["currentCellId"]:
+                try:
+                    others.add(parse_cell_id(item_path[1]))
+                except (TypeError, ValueError):
+                    continue
         path_cells = shortest_path(
             runtime.topology,
             robot["currentCellId"],
@@ -2346,6 +2937,16 @@ class SimulationService:
         if not target:
             return False
         blocked = {parse_cell_id(cell) for cell in occupied_cells}
+        # 回退后的重规划同样排除其它 CTU 的意图格，避免退完又迎面撞上对方绕行路线。
+        for item in runtime.state["robots"]:
+            if item["id"] == robot["id"] or item.get("type") != "ctu":
+                continue
+            item_path = item.get("path") or []
+            if len(item_path) > 1 and item_path[1] != item["currentCellId"]:
+                try:
+                    blocked.add(parse_cell_id(item_path[1]))
+                except (TypeError, ValueError):
+                    continue
         path_cells = shortest_path(
             runtime.topology,
             last,
@@ -3856,4 +4457,27 @@ class SimulationService:
         await self.hub.broadcast(runtime.run_id, {"type": "metrics_snapshot", "tick": tick, "payload": runtime.metrics})
 
     def _persist(self, runtime: RunRuntime) -> None:
+        self._ensure_run_control(runtime)
+        if runtime.state.get("runMode") in FULFILLMENT_SIMULATION_RUN_MODES:
+            atomic = getattr(self.repo, "update_simulation_test_tick", None)
+            pending = deepcopy(runtime.pending_business_events)
+            if callable(atomic):
+                atomic(
+                    runtime.run_id,
+                    runtime.state["status"],
+                    runtime.state,
+                    runtime.metrics,
+                    pending,
+                )
+            else:
+                self.repo.update_run(runtime.run_id, runtime.state["status"], runtime.state, runtime.metrics)
+                for event in pending:
+                    self.repo.add_event(
+                        runtime.run_id,
+                        int(event["tick"]),
+                        str(event["eventType"]),
+                        event,
+                    )
+            runtime.pending_business_events.clear()
+            return
         self.repo.update_run(runtime.run_id, runtime.state["status"], runtime.state, runtime.metrics)

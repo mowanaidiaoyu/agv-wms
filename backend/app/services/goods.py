@@ -10,6 +10,8 @@ from .pathfinding import cell_id, cell_position, node_position
 # 固定库存 seed：3D 编辑器预览的「货」与仿真里 CTU 取到的「货」保持一致，
 # 与场景 seed（每次运行不同）解耦。
 INVENTORY_SEED = 20261016
+# 库存数据来源标记：当前库存由商品目录确定性播种，非正式账面库存。
+SIMULATION_INVENTORY_SOURCE = "simulation_catalog_seed"
 # 镜像 simulation.CTU_RACK_LAYERS，避免 goods -> simulation 的循环导入。
 CTU_LAYERS = 17
 # 四向车库货道深度：每条货道最多 3 箱（depth=1 外层靠巷道面，深处箱被外层箱挡住）。
@@ -131,6 +133,8 @@ def build_inventory(
                 "nodeId": node["id"],
                 "cellId": cell_id_for(node),
                 "layer": layer,
+                "dataSource": SIMULATION_INVENTORY_SOURCE,
+                "authoritative": False,
                 "skuId": sku.get("skuId"),
                 "skuName": sku.get("name"),
                 "largeCategory": sku.get("largeCategory"),

@@ -2,18 +2,19 @@
   "planId": "g1b1-topology-6ceb4920-handoff-layout-v1",
   "schemaVersion": "1.0.0",
   "topologyId": "topology-6ceb4920",
-  "topologyRevision": "2.0.0:760d47b9c5c88579",
+  "topologyRevision": "2.0.0:772d71a08e9a5658",
   "overallStatus": "PARTIAL",
   "recommendedOptionId": "scheme-a-height-transfer",
   "pickingArmPreview": {
-    "armId": "proposed-picking-arm-r91-c54",
-    "validationStatus": "PARTIAL",
+    "armId": "proposed-picking-arm-r88-c49",
+    "validationStatus": "PASS",
     "installation": {
-      "row": 91,
-      "col": 54,
+      "row": 88,
+      "col": 49,
       "level": 1,
       "mountHeight": 0.0,
-      "workRadius": 7.9
+      "workRadius": 7.9,
+      "note": "Relocated from (91,54): the new row84 dropoff (84,50) is 8.06 cells from the old base, beyond workRadius 7.9. (88,49) covers pickup (92,48) and dropoff (84,50) at 4.12 cells each."
     },
     "kinematics": {
       "upperArmLength": 4.0,
@@ -41,9 +42,9 @@
       "note": "This is the real right-running ground conveyor terminal adjacent to the unchanged arm position; c49 is absent."
     },
     "dropoff": {
-      "nodeId": "existing-conveyor-cell-r86-c50",
-      "topologyCellId": "cell-r86-c50",
-      "row": 86,
+      "nodeId": "existing-conveyor-cell-r84-c50",
+      "topologyCellId": "cell-r84-c50",
+      "row": 84,
       "col": 50,
       "level": 2,
       "deckIndex": 2,
@@ -51,7 +52,7 @@
       "direction": "right",
       "provenance": "topology",
       "validationStatus": "PASS",
-      "note": "User-confirmed L2 dropoff. Cargo moves directly right along row86 from c50."
+      "note": "User-confirmed L2 dropoff at row84 block anchor (84,50). Cargo runs right along row84, turns down at turn_transfer-21 into the col60 trunk, then branches right into the five output blocks at rows 102/106/110/114/118."
     },
     "liftClearance": {
       "liftId": "shuttle-lift-b",
@@ -60,20 +61,11 @@
       "minimumPlanarDistanceCells": 8.6
     },
     "downstream": {
-      "nextRequiredCellId": "cell-r86-c51",
-      "validationStatus": "BLOCKED",
-      "reason": "User removed the L2 conveyor segment cell-r86-c51..c59 (the wrong row-86 run) in the topology editor. The dropoff cell-r86-c50 itself remains; the arm preview works, but the cargo handoff stays BLOCKED until a replacement connecting segment is drawn."
+      "nextRequiredCellId": "cell-r84-c51",
+      "validationStatus": "PASS",
+      "reason": "cell-r84-c51 exists with direction right and belt height 3.0 at L2; the row84 run continues to the col60 trunk junction."
     },
     "previewTransfer": null,
-    "previewRoute": {
-      "turnDeviceId": "turn_transfer-15",
-      "turnCellId": "cell-r86-c60",
-      "endCellId": "cell-r108-c60",
-      "topologyDirection": "down",
-      "screenDirection": "right",
-      "validationStatus": "PARTIAL",
-      "note": "User-confirmed route: c50..c60 on row86, then turn at turn_transfer-15 and advance row+ along col60 to r108. Formal post-turn cell directions still say right."
-    },
     "actionSequence": [
       "idle",
       "approach",

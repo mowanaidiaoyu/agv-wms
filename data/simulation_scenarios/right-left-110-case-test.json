@@ -1,0 +1,196 @@
+{
+  "schemaVersion": "1.0",
+  "scenarioId": "right-left-110-case-test",
+  "name": "right-left-110-case-test",
+  "dataSource": "simulation_test",
+  "isolationMode": "run_local_snapshot",
+  "topologyId": "topology-6ceb4920",
+  "topologyRevision": "2.0.0:772d71a08e9a5658",
+  "skuId": "13448419-4.0-4.0",
+  "packaging": {
+    "unitsPerCase": 20,
+    "packagingSource": "PYC-F2-DATA/right-left-110-case-test/user-authorized-test-contract",
+    "verificationStatus": "simulation_test_confirmed",
+    "scope": "simulation_test"
+  },
+  "order": {
+    "id": "ORD-RIGHT-LEFT-110-TEST",
+    "priority": "normal",
+    "dispatchMode": "balanced",
+    "maxParallelCtu": 7,
+    "targetStation": "simulation-test-merge",
+    "createdAt": "2026-10-29T00:00:00+08:00",
+    "lines": [
+      {
+        "id": "line-right-left-110",
+        "skuId": "13448419-4.0-4.0",
+        "skuName": "simulation_test catalog SKU 13448419-4.0-4.0",
+        "quantityBase": 110,
+        "unitsPerCase": 20
+      }
+    ]
+  },
+  "inventory": [
+    {
+      "inventoryRecordId": "simtest-right-13448419-l2-r96-c31",
+      "sourceWarehouse": "right",
+      "sourceLocationId": "SIM-BIN-L2-r96-c31",
+      "locationType": "shuttle_storage",
+      "skuId": "13448419-4.0-4.0",
+      "quantityCases": 5,
+      "dataSource": "simulation_test",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "trackNodeId": "L2-r96-c31",
+        "cellId": "cell-r96-c31",
+        "row": 96,
+        "col": 31,
+        "level": 2,
+        "pickupExitTrackNodeId": "L1-r96-c21"
+      }
+    },
+    {
+      "inventoryRecordId": "simtest-left-13448419-storage-01-l1",
+      "sourceWarehouse": "left",
+      "sourceLocationId": "storage-01:L1",
+      "locationType": "ctu_storage",
+      "skuId": "13448419-4.0-4.0",
+      "quantityCases": 1,
+      "dataSource": "simulation_test",
+      "verificationStatus": "scenario_verified",
+      "topologyMapping": {
+        "topologyNodeId": "storage-01",
+        "cellId": "cell-r0-c6",
+        "row": 0,
+        "col": 6,
+        "layer": 1
+      }
+    }
+  ],
+  "expectedAllocation": {
+    "rightQuantityCases": 5,
+    "rightQuantityBase": 100,
+    "leftSourceCases": 1,
+    "leftSourceQuantityBase": 20,
+    "leftPickQuantityBase": 10,
+    "leftReturnQuantityBase": 10
+  },
+  "rightHandoff": {
+    "formalRouteStatus": "BLOCKED",
+    "simulationRouteStatus": "PASS_SIMULATION_ONLY",
+    "sourceTrackNodeId": "L2-r96-c31",
+    "provenLiftExitTrackNodeId": "L1-r96-c21",
+    "handoffTrackNodeId": "L1-r96-c27",
+    "armReceiveNodeId": "cell-r92-c48",
+    "armReceiveConveyorBlockId": "1F:92:47:lower",
+    "existingDockAssessment": {
+      "deviceId": "dock-01",
+      "validationStatus": "blocked",
+      "reason": "dock-01 at r74,c17 is not connected to the right ShuttleGraph and is not an inventory location."
+    },
+    "facilities": [
+      {
+        "deviceId": "simtest-shuttle-conveyor-dock-r96-c27",
+        "deviceType": "shuttle_conveyor_dock",
+        "inputNodeId": "L1-r96-c27",
+        "outputNodeId": "cell-r94-c27",
+        "sourceLevel": 1,
+        "targetLevel": 1,
+        "capacity": 1,
+        "transferDuration": 2.0,
+        "dataSource": "simulation_test",
+        "validationStatus": "simulation_only",
+        "geometry": {
+          "floor": "1F",
+          "beltHeight": 0.6,
+          "pathCells": [
+            {"row": 96, "col": 27},
+            {"row": 95, "col": 27},
+            {"row": 94, "col": 27}
+          ],
+          "worldPoints": [
+            {"x": -22.0, "y": 0.6, "z": 11.0},
+            {"x": -22.0, "y": 0.6, "z": 13.0}
+          ],
+          "visualStyle": "amber_dashed_guarded_transfer"
+        }
+      },
+      {
+        "deviceId": "simtest-powered-infeed-r94-c27",
+        "deviceType": "powered_roller_infeed",
+        "inputNodeId": "cell-r94-c27",
+        "outputNodeId": "cell-r92-c27",
+        "sourceLevel": 1,
+        "targetLevel": 1,
+        "capacity": 1,
+        "transferDuration": 3.0,
+        "dataSource": "simulation_test",
+        "validationStatus": "simulation_only",
+        "geometry": {
+          "floor": "1F",
+          "beltHeight": 0.6,
+          "pathCells": [
+            {"row": 94, "col": 27},
+            {"row": 93, "col": 27},
+            {"row": 92, "col": 27}
+          ],
+          "worldPoints": [
+            {"x": -22.0, "y": 0.6, "z": 13.0},
+            {"x": -22.0, "y": 0.6, "z": 15.0}
+          ],
+          "visualStyle": "amber_powered_roller"
+        }
+      },
+      {
+        "deviceId": "simtest-turn-transfer-25-direction-overlay",
+        "deviceType": "turn_transfer_direction_overlay",
+        "inputNodeId": "cell-r92-c27",
+        "outputNodeId": "cell-r92-c29",
+        "sourceLevel": 1,
+        "targetLevel": 1,
+        "capacity": 1,
+        "transferDuration": 1.5,
+        "dataSource": "simulation_test",
+        "validationStatus": "simulation_only",
+        "existingTopologyDeviceId": "turn_transfer-25",
+        "inputSide": "south",
+        "outputSide": "east",
+        "geometry": {
+          "floor": "1F",
+          "beltHeight": 0.6,
+          "pathCells": [
+            {"row": 92, "col": 27},
+            {"row": 92, "col": 28},
+            {"row": 92, "col": 29}
+          ],
+          "worldPoints": [
+            {"x": -22.0, "y": 0.6, "z": 15.0},
+            {"x": -20.0, "y": 0.6, "z": 15.0}
+          ],
+          "visualStyle": "amber_turn_overlay"
+        }
+      }
+    ],
+    "authority": {
+      "stateOwner": "SimulationService",
+      "requiresUnifiedTick": true,
+      "previewSignalsAccepted": false,
+      "animationCanCompleteBusinessTask": false
+    }
+  },
+  "businessGuards": {
+    "mutateFormalInventory": false,
+    "mutateTopology": false,
+    "mutateOtherOrders": false,
+    "previewCargoAccepted": false,
+    "canDeclareCompleted": false,
+    "repeatRunsShareInventory": false,
+    "resetStrategy": "discard_run_local_snapshot"
+  },
+  "knownPhysicalGaps": [
+    "No authoritative ShuttleGraph-to-dock handoff maps the L1 right-warehouse track to the picking-arm receive conveyor.",
+    "turn_transfer-25 exists at r92,c27 but has no formal south-to-east direction contract.",
+    "No authoritative event moves a right cargo from the shuttle location to cell-r92-c48.",
+    "No formal left break-pack station transaction or return-to-storage event exists."
+  ]
+}

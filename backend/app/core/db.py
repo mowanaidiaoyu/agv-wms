@@ -51,6 +51,13 @@ def init_db() -> None:
               payload TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS simulation_run_leases (
+              run_id TEXT PRIMARY KEY,
+              owner_id TEXT NOT NULL,
+              heartbeat_at REAL NOT NULL,
+              expires_at REAL NOT NULL
+            );
             """
         )
         run_columns = {row[1] for row in conn.execute("PRAGMA table_info(simulation_runs)")}
