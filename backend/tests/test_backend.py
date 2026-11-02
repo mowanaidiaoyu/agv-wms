@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from copy import deepcopy
 
 from fastapi.testclient import TestClient
