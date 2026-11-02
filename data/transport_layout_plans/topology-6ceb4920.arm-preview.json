@@ -1,0 +1,104 @@
+{
+  "planId": "pyc-new-arm-preview-v1",
+  "schemaVersion": "1.1.0",
+  "topologyId": "topology-6ceb4920",
+  "topologyRevision": "2.0.0:01845f1f27d1f457",
+  "pickingArmPreview": {
+    "armId": "proposed-picking-arm-r91-c54",
+    "installation": {
+      "floor": "1F",
+      "row": 91,
+      "col": 54,
+      "level": 1,
+      "mountHeight": 0.0,
+      "workRadius": 7.9
+    },
+    "kinematics": {
+      "upperArmLength": 4.0,
+      "forearmLength": 3.9,
+      "shoulderHeight": 4.0,
+      "baseRadius": 0.68,
+      "upperArmThickness": 0.42,
+      "forearmThickness": 0.38,
+      "jointRadius": 0.32,
+      "gripperScale": 1.45,
+      "safeTravelHeight": 6.3,
+      "linkCollisionRadius": 0.24
+    },
+    "pickup": {
+      "nodeId": "existing-ground-conveyor-cell-r92-c48",
+      "topologyCellId": "cell-r92-c48",
+      "floor": "1F",
+      "row": 92,
+      "col": 48,
+      "level": 1,
+      "deckIndex": 1,
+      "beltHeight": 0.6,
+      "direction": "right",
+      "note": "Real right-running ground conveyor pickup point."
+    },
+    "dropoff": {
+      "nodeId": "existing-conveyor-cell-r86-c50",
+      "topologyCellId": "cell-r86-c50",
+      "floor": "1F",
+      "row": 86,
+      "col": 50,
+      "level": 2,
+      "deckIndex": 2,
+      "beltHeight": 3.0,
+      "direction": "right",
+      "note": "Real L2 dropoff; cargo continues only along formal topology directions."
+    },
+    "liftClearance": {
+      "liftId": "shuttle-lift-b",
+      "row": 98,
+      "col": 49,
+      "minimumPlanarDistanceCells": 8.6
+    },
+    "downstream": {
+      "nextRequiredCellId": "cell-r86-c51"
+    },
+    "previewRoute": {
+      "mode": "topology_upper_deck_to_right_merge_point",
+      "expectedEndpointId": "cell-r108-c68",
+      "requiredWaypoints": [
+        {"row": 86, "col": 50},
+        {"row": 86, "col": 60, "transferDeviceId": "turn_transfer-15"},
+        {"row": 108, "col": 60, "transferDeviceId": "turn_transfer-13"},
+        {"row": 108, "col": 66},
+        {"row": 108, "col": 68, "topologyNodeId": "lift_transfer-09"}
+      ]
+    },
+    "mergePoint": {
+      "mergePointId": "right-order-merge-r108-c68",
+      "topologyNodeId": "lift_transfer-09",
+      "row": 108,
+      "col": 68,
+      "level": 2,
+      "capacity": 1,
+      "acceptedWarehouse": "right"
+    },
+    "actionSequence": [
+      "idle",
+      "approach",
+      "grip",
+      "lift",
+      "rotate",
+      "place",
+      "release",
+      "return_home"
+    ],
+    "requiredAuthoritativeSignals": [
+      "pickedGoodsReady",
+      "outputPositionAvailable",
+      "handoffAccepted",
+      "handoffCompleted"
+    ],
+    "evidence": [
+      "The installation, pickup and dropoff use topology-grid coordinates.",
+      "The enlarged arm kinematics retain the source collision-clearance fix.",
+      "The preview path follows real upper-deck Conveyor cells through turn_transfer-15 and turn_transfer-13 to lift_transfer-09.",
+      "Animation completion cannot mutate inventory, delivered quantity or order state."
+    ]
+  }
+}

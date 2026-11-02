@@ -185,7 +185,11 @@ def test_goods_inventory_endpoint():
     assert response.status_code == 200
     body = response.json()
     assert body["topologyId"] == "goods-topology"
+    assert body["dataSource"] == "simulation_catalog_seed"
+    assert body["authoritative"] is False
     assert len(body["slots"]) == 34
+    assert all(slot["dataSource"] == "simulation_catalog_seed" for slot in body["slots"])
+    assert all(slot["authoritative"] is False for slot in body["slots"])
 
 
 def test_goods_inventory_endpoint_missing_topology():

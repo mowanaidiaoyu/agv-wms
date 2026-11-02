@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from app.schemas import TopologyPayload
 from app.services.goods import build_inventory
 from app.services.simulation import (
     DEFAULT_SPEED_MULTIPLIER,
@@ -52,7 +53,8 @@ class MemoryRepository:
 
 
 def _topology() -> dict[str, Any]:
-    return json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
+    raw = json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
+    return TopologyPayload.model_validate(raw).model_dump(by_alias=True)
 
 
 def _order(topology: dict[str, Any]) -> dict[str, Any]:

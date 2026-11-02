@@ -22,6 +22,7 @@ export function mergeSimulationTick(
   previous: SimulationState | null,
   payload: Record<string, unknown>,
 ): SimulationState | null {
+  if (previous && !shouldApplySimulationFrame(previous, payload)) return previous
   const inventoryDelta = Array.isArray(payload.inventoryDelta) ? payload.inventoryDelta : []
   const previousInventory = previous?.inventory ?? []
   const nextInventory = Array.isArray(payload.inventory)
@@ -53,6 +54,26 @@ export function mergeSimulationTick(
     createdAt: merged.createdAt ?? '',
     updatedAt: merged.updatedAt ?? '',
   } as SimulationState
+}
+
+function resetGenerationOf(value: unknown): number {
+  if (!isRecord(value) || !isRecord(value.simulationTest)) return 0
+  const generation = value.simulationTest.resetGeneration
+  return typeof generation === 'number' ? generation : 0
+}
+
+/**
+ * Reject delayed WebSocket frames. A lower Tick is legal only when an
+ * authoritative reset increments resetGeneration; a different full Run ID
+ * starts a fresh timeline.
+ */
+export function shouldApplySimulationFrame(
+  previous: SimulationState,
+  payload: Record<string, unknown>,
+): boolean {
+  if (typeof payload.id === 'string' && payload.id !== previous.id) return true
+  if (typeof payload.tick !== 'number' || payload.tick >= previous.tick) return true
+  return resetGenerationOf(payload) > resetGenerationOf(previous)
 }
 
 /**
@@ -107,6 +128,7 @@ export function useSimulationSocket(runId: string) {
       socket.close()
     }
     socket.onmessage = (message) => {
+      if (!active) return
       const event = parseSimulationSocketEvent(message.data)
       if (!event) {
         console.warn('忽略无法解析的仿真 WebSocket 消息')

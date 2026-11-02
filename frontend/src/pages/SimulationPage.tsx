@@ -34,7 +34,7 @@ import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSi
 import { api } from '../lib/api'
 import { createDemoOrders } from '../lib/orders'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput } from '../types'
+import type { ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput, SimulationState } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
@@ -52,6 +52,7 @@ const robotTypeLabels = {
 type DetailTab = 'metrics' | 'devices' | 'tasks' | 'alerts'
 type WorkspaceTab = 'orders' | 'shuttle' | 'transfer' | 'inventory'
 type RunControlAction = 'pause' | 'resume' | 'stop' | 'reset'
+const GENERAL_SIMULATION_PROFILE_ID = 'general-order-simulation'
 
 const runControlProgressLabels: Record<RunControlAction, string> = {
   pause: '暂停中…',
@@ -79,6 +80,126 @@ function LiveEventCount({ persistedCount }: { persistedCount?: number }) {
   return <strong>{persistedCount ?? socketWindowCount}</strong>
 }
 
+function SimulationTestRunPanel({
+  state,
+  busyAction,
+  onPause,
+  onResume,
+  onStop,
+  onReset,
+  onSpeed,
+  showDebugLabels,
+  onToggleDebugLabels,
+}: {
+  state: SimulationState
+  busyAction: RunControlAction | null
+  onPause: () => void
+  onResume: () => void
+  onStop: () => void
+  onReset: () => void
+  onSpeed: (speed: 1 | 2 | 4) => void
+  showDebugLabels: boolean
+  onToggleDebugLabels: () => void
+}) {
+  const test = state.simulationTest
+  if (!test) return null
+  const infeedCargo = test.cargo.find((cargo) => cargo.status === 'waiting_arm')
+  const upstreamStatuses = new Set([
+    'waiting_pick', 'shuttle_picking', 'shuttle_transporting', 'lift_waiting',
+    'lift_moving', 'shuttle_to_handoff', 'waiting_dock', 'dock_transferring',
+    'conveyor_transporting',
+  ])
+  const upstream = test.cargo.filter((cargo) => upstreamStatuses.has(cargo.status)).length
+  const arrived = test.mergePoint.acceptedCount
+  const recentEvents = [...test.events].slice(-8).reverse()
+  const occupiedFacilities = test.facilities.filter((facility) => facility.occupiedCargoIds.length)
+  const left = test.leftFlow
+  const leftFlows = test.leftFlows ?? (left ? [left] : [])
+  const leftPicked = leftFlows.reduce((sum, item) => sum + item.ledger.pickedQuantityBase, 0)
+  const leftReturned = leftFlows.reduce((sum, item) => sum + item.ledger.returnedQuantityBase, 0)
+  const leftSource = leftFlows.reduce((sum, item) => sum + item.ledger.initialSourceQuantityBase, 0)
+  const legacyTestRun = state.runMode === 'simulation_test'
+  const runTitle = state.runMode === 'simulation' ? '通用订单仿真' : '110件订单仿真测试'
+  return (
+    <aside className="simulation-test-run-panel" aria-label={`${runTitle}运行状态`}>
+      <header>
+        <div>
+          <strong>{runTitle}</strong>
+          <span>{state.id} · Tick {state.tick}</span>
+        </div>
+        <b>{state.runMode}</b>
+      </header>
+      <p className="simulation-test-authority-note">
+        服务器统一 Tick 为本测试 Run 的状态权威；正式物理路线仍为 BLOCKED，100件到达接货位不代表已出库。
+      </p>
+      <div className="simulation-test-run-controls">
+        <button type="button" onClick={onPause} disabled={state.status !== 'running' || Boolean(busyAction)}><Pause size={14} />暂停</button>
+        <button type="button" onClick={onResume} disabled={state.status !== 'paused' || Boolean(busyAction)}><Play size={14} />继续</button>
+        <button type="button" onClick={onStop} disabled={['stopped', 'completed'].includes(state.status) || Boolean(busyAction)}><Square size={14} />停止</button>
+        <button type="button" onClick={onReset} disabled={Boolean(busyAction)}><RotateCcw size={14} />重置</button>
+        {([1, 2, 4] as const).map((speed) => (
+          <button
+            key={speed}
+            type="button"
+            className={state.speedMultiplier === speed ? 'active' : ''}
+            onClick={() => onSpeed(speed)}
+            disabled={['stopped', 'completed'].includes(state.status)}
+          >{speed}×</button>
+        ))}
+        <button type="button" className={showDebugLabels ? 'active' : ''} onClick={onToggleDebugLabels}>
+          {showDebugLabels ? '隐藏调试设施与Shuttle轨迹' : '显示调试设施与Shuttle轨迹'}
+        </button>
+      </div>
+      <dl className="simulation-test-summary-grid">
+        {left ? (
+          <>
+            <div><dt>左侧 CTU</dt><dd>{left.ctu.deviceId} · {left.ctu.phase}</dd></div>
+            <div><dt>拆零工位</dt><dd>{left.station.phase} · {left.station.occupiedCargoIds.length + left.station.reservedCargoIds.length}/1</dd></div>
+            <div><dt>左侧取货</dt><dd>{left.ledger.initialSourceQuantityBase - left.ledger.sourceQuantityBase} / {left.ledger.initialSourceQuantityBase} 件</dd></div>
+            <div><dt>左侧已拣</dt><dd>{left.ledger.pickedQuantityBase} / {left.pickQuantityBase ?? test.order.leftPickQuantityBase} 件</dd></div>
+            <div><dt>左侧已回库</dt><dd>{left.ledger.returnedQuantityBase} / {left.returnQuantityBase ?? test.order.leftReturnQuantityBase} 件 · {left.partialCase?.caseType ?? '待拆零'}</dd></div>
+          </>
+        ) : null}
+        <div><dt>右侧已汇集</dt><dd>{test.order.rightMergeAcceptedQuantityBase ?? 0} / {test.order.rightQuantityBase} 件</dd></div>
+        <div><dt>数量核对</dt><dd>{test.order.quantityAccounted ?? 0} / {test.order.quantityBase} 件 · {legacyTestRun ? (left?.quantityAudit.sourceConserved ? '20=10+10' : '处理中') : leftSource ? `${leftSource}=${leftPicked}+${leftReturned}` : '仅右仓'}</dd></div>
+        <div><dt>正式物理交付</dt><dd>{test.order.physicalDeliveryConfirmed ? '已确认' : 'BLOCKED'}</dd></div>
+        <div><dt>订单总量</dt><dd>{test.order.quantityBase}件</dd></div>
+        <div><dt>右侧货箱</dt><dd>{test.cargo.length}箱 / {test.order.rightQuantityBase}件</dd></div>
+        <div><dt>机械臂状态</dt><dd>{test.arm.phase}</dd></div>
+        <div><dt>当前接货位</dt><dd>{infeedCargo?.cargoId ?? '空闲'} · {test.armInfeed.occupiedCargoIds.length}/1</dd></div>
+        <div><dt>上游排队</dt><dd>{upstream}箱</dd></div>
+        <div><dt>汇集点已接收</dt><dd>{arrived}/{test.cargo.length}箱</dd></div>
+        <div><dt>左侧任务</dt><dd>{left ? (legacyTestRun ? `${left.status} · 取货20 / 拣选${left.ledger.pickedQuantityBase} / 回库${left.ledger.returnedQuantityBase}` : `${left.status} · ${leftFlows.length} 箱 · 拣选${leftPicked} / 回库${leftReturned}`) : `${test.inventory.left.status} · 无左侧任务`}</dd></div>
+        <div><dt>订单状态</dt><dd>{test.order.status} · 不可完成</dd></div>
+      </dl>
+      <div className="simulation-test-resource-strip">
+        {left ? <span>CTU：{left.ctu.activeCargoId ?? '空闲'}</span> : null}
+        {left ? <span>拆零工位：{[...left.station.occupiedCargoIds, ...left.station.reservedCargoIds].join(', ') || '空闲'}</span> : null}
+        <span>Shuttle：{test.shuttle.occupiedCargoIds.join(', ') || '空闲'}</span>
+        <span>Lift-A：{test.lift.occupiedCargoIds.join(', ') || '空闲'}</span>
+        <span>接驳：{occupiedFacilities.map((facility) => `${facility.deviceId}=${facility.occupiedCargoIds[0]}`).join('；') || '空闲'}</span>
+      </div>
+      <div className="simulation-test-cargo-list">
+        {test.cargo.map((cargo) => (
+          <span key={cargo.cargoId}><b>{cargo.cargoId}</b><small>{cargo.status} · {cargo.currentNodeId}</small></span>
+        ))}
+      </div>
+      {left ? (
+        <div className="simulation-test-cargo-list">
+          <span><b>{left.partialCase?.cargoId ?? left.cargo.cargoId}</b><small>{left.status} · {(left.partialCase ?? left.cargo).currentNodeId}</small></span>
+        </div>
+      ) : null}
+      <div className="simulation-test-events">
+        <strong>最近的权威运输事件</strong>
+        {recentEvents.length ? recentEvents.map((event) => (
+          <span key={event.eventId}>T{event.tick} · {event.eventType} · {event.cargoId}</span>
+        )) : <span>等待服务器推进第一条事件…</span>}
+      </div>
+      <small>{test.syntheticTimingDisclosure}</small>
+    </aside>
+  )
+}
+
 export function SimulationPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -96,14 +217,21 @@ export function SimulationPage() {
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [testScenarioStarting, setTestScenarioStarting] = useState(false)
+  const [showSimulationDebugLabels, setShowSimulationDebugLabels] = useState(false)
   const [controlAction, setControlAction] = useState<RunControlAction | null>(null)
   const [controlNotice, setControlNotice] = useState('')
   const [completingPicking, setCompletingPicking] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
+  const [testScenarioSelected, setTestScenarioSelected] = useState(false)
   const [ordersCollapsed, setOrdersCollapsed] = useState(false)
   const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
+  const [simulationInventoryOverrides, setSimulationInventoryOverrides] = useState<Array<{
+    inventoryRecordId: string
+    quantityCases: number
+  }>>([])
   const [removingOrderId, setRemovingOrderId] = useState('')
   const [localTransfers, setLocalTransfers] = useState<ShuttleTransferInput[]>([])
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('orders')
@@ -111,6 +239,8 @@ export function SimulationPage() {
   const [selectedRobotId, setSelectedRobotId] = useState('')
   const [followSelectedRobot, setFollowSelectedRobot] = useState(false)
   const [showInventoryBoxes, setShowInventoryBoxes] = useState(false)
+  const [pickingArmFocused, setPickingArmFocused] = useState(false)
+  const [pickingArmFocusRequest, setPickingArmFocusRequest] = useState(0)
   const [focusRequest, setFocusRequest] = useState(0)
   const [pickupNotice, setPickupNotice] = useState<{
     id: string
@@ -162,6 +292,12 @@ export function SimulationPage() {
     enabled: Boolean(resolvedTopologyId),
     retry: false,
   })
+  const transportLayoutQuery = useQuery({
+    queryKey: ['transport-layout-plan', resolvedTopologyId],
+    queryFn: () => api.getTransportLayoutPlan(resolvedTopologyId),
+    enabled: Boolean(resolvedTopologyId),
+    retry: false,
+  })
   useEffect(() => {
     if (resolvedTopologyId && resolvedTopologyId !== selectedTopologyId) {
       setSelectedTopologyId(resolvedTopologyId)
@@ -175,7 +311,6 @@ export function SimulationPage() {
     : undefined
   const topologyIdForBoard = currentState?.topologyId || resolvedTopologyId
   const currentTopology = availableTopologies.find((item) => item.id === resolvedTopologyId)
-
   useEffect(() => {
     if (candidateState?.topologyId && resolvedTopologyId && candidateState.topologyId !== resolvedTopologyId) {
       resetRun()
@@ -190,6 +325,7 @@ export function SimulationPage() {
     observedPickedRef.current.clear()
     setPickupNotice(null)
     setFollowSelectedRobot(false)
+    setShowSimulationDebugLabels(false)
   }, [selectedRunId])
 
   useEffect(() => {
@@ -230,6 +366,41 @@ export function SimulationPage() {
     queryFn: () => api.getTopology(topologyIdForBoard),
     enabled: Boolean(topologyIdForBoard),
   })
+  const fulfillmentTestScenarioQuery = useQuery({
+    queryKey: ['fulfillment-test-scenario', topologyIdForBoard, 'right-left-110-case-test'],
+    queryFn: () => api.getFulfillmentTestScenario(topologyIdForBoard, 'right-left-110-case-test'),
+    enabled: Boolean((testScenarioSelected || currentState?.runMode === 'simulation_test') && topologyIdForBoard),
+    retry: false,
+  })
+  const simulationProfileQuery = useQuery({
+    queryKey: ['simulation-inventory-profile', topologyIdForBoard, GENERAL_SIMULATION_PROFILE_ID],
+    queryFn: () => api.getSimulationInventoryProfile(topologyIdForBoard, GENERAL_SIMULATION_PROFILE_ID),
+    enabled: Boolean(topologyIdForBoard),
+    retry: false,
+  })
+  useEffect(() => {
+    const profile = simulationProfileQuery.data
+    if (!profile) return
+    setSimulationInventoryOverrides((current) => current.length ? current : profile.inventory.map((item) => ({
+      inventoryRecordId: item.inventoryRecordId,
+      quantityCases: item.quantityCases,
+    })))
+  }, [simulationProfileQuery.data])
+  const orderCatalog = useMemo(() => {
+    const packagingBySku = new Map(
+      (simulationProfileQuery.data?.packaging ?? []).map((item) => [item.skuId, item]),
+    )
+    return (catalogQuery.data?.skus ?? []).map((sku) => {
+      const packaging = packagingBySku.get(sku.skuId)
+      return packaging ? {
+        ...sku,
+        unitsPerCase: packaging.unitsPerCase,
+        packagingSource: packaging.packagingSource,
+        verificationStatus: packaging.verificationStatus,
+        packagingScope: packaging.scope,
+      } : sku
+    })
+  }, [catalogQuery.data?.skus, simulationProfileQuery.data?.packaging])
   const floors = topologyQuery.data?.payload.meta?.floors?.length ? topologyQuery.data.payload.meta.floors : ['1F']
   const topologyLoadError = topologiesQuery.isError
     ? '拓扑列表加载失败，请检查后端连接后重试。'
@@ -287,7 +458,24 @@ export function SimulationPage() {
         return
       }
       resetRun()
-      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers)
+      const hasBaseOrders = localOrders.some((order) => order.lines.some((line) => line.quantityBase != null))
+      const hasLegacyOrders = localOrders.some((order) => order.lines.some((line) => line.quantity != null))
+      if (hasBaseOrders && (hasLegacyOrders || localTransfers.length)) {
+        throw new Error('通用基础件数订单不能与旧版按箱订单或独立跨层任务混在同一个 Run。')
+      }
+      const profile = simulationProfileQuery.data
+      if (hasBaseOrders && !profile) {
+        throw new Error('通用仿真库存配置不可用，不能把基础件数订单按旧版 Run 启动。')
+      }
+      const result = hasBaseOrders
+        ? await api.startGeneralSimulation(
+            resolvedTopologyId,
+            profile?.topologyRevision ?? '',
+            GENERAL_SIMULATION_PROFILE_ID,
+            localOrders,
+            simulationInventoryOverrides,
+          )
+        : await api.startSimulation(resolvedTopologyId, localOrders, localTransfers)
       if (!result.runId || result.status !== 'running') {
         throw new Error('后端未返回有效的运行实例。')
       }
@@ -301,6 +489,50 @@ export function SimulationPage() {
       setStartError(error instanceof Error ? error.message : '启动仿真失败')
     } finally {
       setStarting(false)
+    }
+  }
+
+  async function startTestSimulation() {
+    if (testScenarioStarting) return
+    setStartError('')
+    setControlNotice('')
+    const scenario = fulfillmentTestScenarioQuery.data
+    if (!scenario) {
+      setStartError('测试场景尚未完成审计加载，不能启动。')
+      return
+    }
+    if (isRunActive) {
+      setStartError('当前已有活动 Run；请先正常停止后再启动独立 simulation_test。')
+      return
+    }
+    if (scenario.topologyId !== resolvedTopologyId) {
+      setStartError('测试场景 topologyId 与当前页面不一致。')
+      return
+    }
+    try {
+      setTestScenarioStarting(true)
+      resetRun()
+      const result = await api.startFulfillmentTestSimulation(
+        scenario.topologyId,
+        scenario.topologyRevision,
+        scenario.scenarioId,
+      )
+      if (!result.runId || result.status !== 'running' || result.runMode !== 'simulation_test') {
+        throw new Error('后端未返回有效的 simulation_test Run。')
+      }
+      setSelectedRunId(result.runId)
+      const nextState = await api.getSimulationState(result.runId)
+      if (nextState.runMode !== 'simulation_test' || nextState.scenarioId !== scenario.scenarioId) {
+        throw new Error('后端回读的 Run 与所选测试场景不一致。')
+      }
+      setLiveState(nextState)
+      setOrderComposerOpen(false)
+      setSelectedOrderId(nextState.orders?.[0]?.id ?? '')
+      await queryClient.invalidateQueries({ queryKey: ['runs'] })
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : '启动测试仿真失败')
+    } finally {
+      setTestScenarioStarting(false)
     }
   }
 
@@ -318,7 +550,8 @@ export function SimulationPage() {
   }
 
   async function syncRun(action: 'pause' | 'resume' | 'stop') {
-    if (!selectedRunId || controlAction) return
+    if (!selectedRunId) return
+    if (controlAction) return
     setStartError('')
     setControlNotice('')
     setControlAction(action)
@@ -475,6 +708,7 @@ export function SimulationPage() {
     ? '仿真因任务失败停止。请在运行详情中检查任务失败原因与告警。'
     : ''
   const speedMultiplier = currentState?.speedMultiplier ?? 2
+  const scenePaused = currentState?.status === 'paused'
 
   return (
     <div className="simulation-workbench">
@@ -526,11 +760,11 @@ export function SimulationPage() {
             {starting ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             {starting ? '启动中…' : isRunning ? '运行中' : '启动'}
           </button>
-          <button className="ghost-button" onClick={() => void syncRun('pause')} disabled={!selectedRunId || currentState?.status !== 'running' || Boolean(controlAction)} type="button">
+          <button className="ghost-button" onClick={() => void syncRun('pause')} disabled={currentState?.status !== 'running' || Boolean(controlAction)} type="button">
             {controlAction === 'pause' ? <Loader2 className="spin" size={16} /> : <Pause size={16} />}
             {controlAction === 'pause' ? '暂停中…' : '暂停'}
           </button>
-          <button className="ghost-button" onClick={() => void syncRun('resume')} disabled={!selectedRunId || currentState?.status !== 'paused' || Boolean(controlAction)} type="button">
+          <button className="ghost-button" onClick={() => void syncRun('resume')} disabled={currentState?.status !== 'paused' || Boolean(controlAction)} type="button">
             {controlAction === 'resume' ? <Loader2 className="spin" size={16} /> : <Play size={16} />}
             {controlAction === 'resume' ? '继续中…' : '继续'}
           </button>
@@ -619,6 +853,20 @@ export function SimulationPage() {
           </div>
         ) : null}
 
+        {['simulation_test', 'simulation'].includes(currentState?.runMode ?? '') && currentState?.simulationTest ? (
+          <SimulationTestRunPanel
+            state={currentState}
+            busyAction={controlAction}
+            onPause={() => { void syncRun('pause') }}
+            onResume={() => { void syncRun('resume') }}
+            onStop={() => { void syncRun('stop') }}
+            onReset={() => { void resetRunState() }}
+            onSpeed={(speed) => { void changeSpeed(speed) }}
+            showDebugLabels={showSimulationDebugLabels}
+            onToggleDebugLabels={() => setShowSimulationDebugLabels((visible) => !visible)}
+          />
+        ) : null}
+
         {topologyQuery.data?.payload ? (
           <>
             <div className="topology-floor-switcher simulation-floor-switcher" aria-label="simulation-floor-switcher">
@@ -639,6 +887,22 @@ export function SimulationPage() {
                 onClick={() => setShowInventoryBoxes((visible) => !visible)}
               >
                 彩色库存
+              </button>
+              <button
+                className={`ghost-button topology-floor-chip ${pickingArmFocused ? 'topology-floor-chip-active' : ''}`}
+                type="button"
+                aria-label="聚焦机械臂"
+                aria-pressed={pickingArmFocused}
+                disabled={!transportLayoutQuery.data?.pickingArm}
+                title={transportLayoutQuery.isError
+                  ? '机械臂安装配置与当前 topology revision 不兼容'
+                  : '聚焦机械臂、接货线和上层 Conveyor；不会启动独立动画'}
+                onClick={() => {
+                  setPickingArmFocused(true)
+                  setPickingArmFocusRequest((request) => request + 1)
+                }}
+              >
+                聚焦机械臂
               </button>
             </div>
 
@@ -684,6 +948,34 @@ export function SimulationPage() {
               </div>
             ) : null}
 
+            {pickingArmFocused && transportLayoutQuery.data?.pickingArm ? (
+              <aside className="simulation-arm-preview-panel" aria-label="机械臂状态面板">
+                <header>
+                  <div>
+                    <strong>人工拣选出口机械臂</strong>
+                    <span>{transportLayoutQuery.data.pickingArm.armId}</span>
+                  </div>
+                  <b>{transportLayoutQuery.data.pickingArm.previewPathStatus}</b>
+                </header>
+                <p>机械臂常驻于统一 3D 场景；simulation_test 动作仅由服务器权威 Tick 推进。</p>
+                <dl>
+                  <div><dt>当前阶段</dt><dd>{currentState?.simulationTest?.arm.phase ?? 'idle'}</dd></div>
+                  <div><dt>当前货箱</dt><dd>{currentState?.simulationTest?.arm.activeCargoId ?? '无'}</dd></div>
+                  <div><dt>当前接货位</dt><dd>{currentState?.simulationTest?.armInfeed.occupiedCargoIds[0] ?? '空闲'} · {currentState?.simulationTest?.armInfeed.occupiedCargoIds.length ?? 0}/1</dd></div>
+                  <div><dt>上游排队</dt><dd>{currentState?.simulationTest ? currentState.simulationTest.cargo.filter((item) => !['waiting_arm', 'arm_processing', 'merge_conveyor_transporting', 'merge_arrived'].includes(item.status)).length : 0} 箱</dd></div>
+                  <div><dt>下游已交接</dt><dd>{currentState?.simulationTest?.arm.completedCargoIds.length ?? 0} 箱</dd></div>
+                  <div><dt>汇集点累计</dt><dd>{currentState?.simulationTest?.mergePoint.acceptedCount ?? 0} 箱</dd></div>
+                  <div><dt>安装</dt><dd>r{transportLayoutQuery.data.pickingArm.installation.row}, c{transportLayoutQuery.data.pickingArm.installation.col}</dd></div>
+                  <div><dt>接货</dt><dd>{transportLayoutQuery.data.pickingArm.pickup.topologyCellId}</dd></div>
+                  <div><dt>放货</dt><dd>{transportLayoutQuery.data.pickingArm.dropoff.topologyCellId}</dd></div>
+                  <div><dt>终点</dt><dd>{transportLayoutQuery.data.pickingArm.previewEndpointId}</dd></div>
+                  <div><dt>汇集点</dt><dd>{transportLayoutQuery.data.pickingArm.mergePoint.mergePointId} · r{transportLayoutQuery.data.pickingArm.mergePoint.row}, c{transportLayoutQuery.data.pickingArm.mergePoint.col}</dd></div>
+                  <div><dt>路径</dt><dd>{transportLayoutQuery.data.pickingArm.previewConveyorPath.length} 个真实 Conveyor 节点</dd></div>
+                </dl>
+                <small>相机聚焦不改变机械臂状态；暂停、继续、倍速和重置只作用于当前后端 Run。</small>
+              </aside>
+            ) : null}
+
             <div className="simulation-3d-viewport simulation-main-viewport">
               <SimulationSceneBoundary key={topologyQuery.data.payload.id}>
                 <Suspense
@@ -706,8 +998,23 @@ export function SimulationPage() {
                     selectedRobotId={selectedRobotId}
                     followSelectedRobot={followSelectedRobot}
                     onSelectRobot={(id) => setSelectedRobotId(id)}
-                    paused={currentState?.status === 'paused'}
+                    paused={scenePaused}
                     transitionDuration={currentState?.tickIntervalSeconds ?? 0.3}
+                    pickingArmLayoutPlan={transportLayoutQuery.data}
+                    pickingArmFocused={pickingArmFocused}
+                    pickingArmFocusRequest={pickingArmFocusRequest}
+                    simulationMotionEpoch={`${currentState?.id ?? 'no-run'}:${currentState?.simulationTest?.resetGeneration ?? 0}`}
+                    simulationTestHandoff={currentState?.simulationTest?.handoffContract
+                      ?? ((testScenarioSelected || currentState?.runMode === 'simulation_test')
+                        ? fulfillmentTestScenarioQuery.data?.rightHandoff
+                        : undefined)}
+                    simulationTestCargo={['simulation_test', 'simulation'].includes(currentState?.runMode ?? '')
+                       ? currentState?.simulationTest?.cargo
+                      : undefined}
+                    simulationTestState={['simulation_test', 'simulation'].includes(currentState?.runMode ?? '')
+                       ? currentState?.simulationTest
+                      : undefined}
+                    showSimulationDebugLabels={showSimulationDebugLabels}
                   />
                 </Suspense>
               </SimulationSceneBoundary>
@@ -876,17 +1183,42 @@ export function SimulationPage() {
         ) : null}
         <OrderComposer
           open={orderComposerOpen}
-          catalog={catalogQuery.data?.skus ?? []}
+          catalog={orderCatalog}
           catalogError={catalogQuery.isError
             ? (catalogQuery.error instanceof Error ? catalogQuery.error.message : '未知错误')
             : ''}
           onRetryCatalog={() => { void catalogQuery.refetch() }}
+          testScenario={testScenarioSelected ? fulfillmentTestScenarioQuery.data : undefined}
+          testScenarioLoading={testScenarioSelected && fulfillmentTestScenarioQuery.isLoading}
+          testScenarioError={testScenarioSelected && fulfillmentTestScenarioQuery.isError
+            ? (fulfillmentTestScenarioQuery.error instanceof Error ? fulfillmentTestScenarioQuery.error.message : '未知错误')
+            : ''}
+          onSelectTestScenario={() => {
+            if (testScenarioSelected) {
+              void fulfillmentTestScenarioQuery.refetch()
+            } else {
+              setTestScenarioSelected(true)
+            }
+          }}
+          onStartTestScenario={startTestSimulation}
+          testScenarioStarting={testScenarioStarting}
+          testScenarioStartDisabled={isRunActive}
+          simulationProfile={simulationProfileQuery.data}
+          inventoryOverrides={simulationInventoryOverrides}
+          onInventoryOverride={(inventoryRecordId, quantityCases) => {
+            setSimulationInventoryOverrides((current) => current.map((item) => (
+              item.inventoryRecordId === inventoryRecordId ? { ...item, quantityCases } : item
+            )))
+          }}
           onClose={() => setOrderComposerOpen(false)}
           onSubmit={async (order) => {
             if (selectedRunId && !currentState) {
               throw new Error('正在同步仿真状态，请稍后再提交订单。')
             }
             if (selectedRunId && currentState && ['running', 'paused'].includes(currentState.status)) {
+              if (currentState.runMode === 'simulation') {
+                throw new Error('通用仿真 Run 启动后库存快照已冻结；请停止后把新订单加入下一次 Run。')
+              }
               const nextState = await api.insertSimulationOrder(selectedRunId, order)
               setLiveState(nextState)
               setSelectedOrderId(order.id)
@@ -894,7 +1226,44 @@ export function SimulationPage() {
               setControlNotice(`订单 ${order.id} 已插入当前仿真并进入调度。`)
               return
             }
-            setLocalOrders((orders) => [order, ...orders])
+            const isBaseQuantityOrder = order.lines.some((line) => line.quantityBase != null)
+            if (isBaseQuantityOrder) {
+              const profile = simulationProfileQuery.data
+              if (!profile) {
+                const fulfillmentPlan = await api.planOrderFulfillment(resolvedTopologyId, order)
+                setLocalOrders((orders) => [{ ...order, fulfillmentPlan }, ...orders])
+                setSelectedOrderId(order.id)
+                setOrderComposerOpen(false)
+                return
+              }
+              const nonDemoLegacyOrders = localOrders.filter((item) => (
+                !item.id.startsWith('ORD-DEMO-')
+                && item.lines.some((line) => line.quantity != null)
+              ))
+              if (nonDemoLegacyOrders.length) {
+                throw new Error('请先移除旧版按箱订单；通用基础件数订单需要独立 Run。')
+              }
+              // The built-in demo drafts are discovery aids, not user orders. Drop
+              // them when the first explicit base-unit order is planned.
+              const nextOrders = [
+                order,
+                ...localOrders.filter((item) => item.lines.every((line) => line.quantityBase != null)),
+              ]
+              const audit = await api.planGeneralSimulation(
+                resolvedTopologyId,
+                profile.topologyRevision,
+                profile.profileId,
+                nextOrders,
+                simulationInventoryOverrides,
+              )
+              const planByOrder = new Map(audit.plans.map((plan) => [plan.orderId, plan]))
+              setLocalOrders(nextOrders.map((item) => ({
+                ...item,
+                fulfillmentPlan: planByOrder.get(item.id),
+              })))
+            } else {
+              setLocalOrders((orders) => [order, ...orders])
+            }
             setSelectedOrderId(order.id)
             setOrderComposerOpen(false)
           }}

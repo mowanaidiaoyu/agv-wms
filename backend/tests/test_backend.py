@@ -230,6 +230,22 @@ def test_topology_roundtrip():
     assert result.json()["payload"]["name"] == "Test Grid Topology"
 
 
+def test_topology_get_preserves_utf8_device_labels() -> None:
+    topology = deepcopy(TOPOLOGY)
+    topology["id"] = "utf8-topology"
+    topology["name"] = "中文拓扑"
+    topology["nodes"][0]["label"] = "转向移载机-15"
+
+    saved = client.post("/api/v1/topologies", json=topology)
+    fetched = client.get("/api/v1/topologies/utf8-topology")
+
+    assert saved.status_code == 200
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "application/json; charset=utf-8"
+    assert fetched.json()["payload"]["nodes"][0]["label"] == "转向移载机-15"
+    assert "转向移载机-15".encode("utf-8") in fetched.content
+
+
 def test_topology_delete():
     topology = {**TOPOLOGY, "id": "delete-topology", "name": "Delete Grid Topology"}
     response = client.post("/api/v1/topologies", json=topology)
@@ -1481,8 +1497,11 @@ def test_pick_station_without_drop_zone_skips_place_goods():
     assert task["placedGoods"] == []
 
 
-def test_complete_picking_finishes_picking_immediately():
+def test_complete_picking_finishes_picking_immediately(monkeypatch):
     service = _service()
+    # Unit-test the phase transition without touching the shared SQLite or
+    # requiring a process-control lease for this synthetic in-memory Run.
+    monkeypatch.setattr(service, "_persist", lambda _runtime: None)
     runtime = service._create_runtime("test-complete-picking", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
     task, robot, _ = _picking_task(service, runtime, phase="picking")
     task["pickStationZoneId"] = "zone-pick"

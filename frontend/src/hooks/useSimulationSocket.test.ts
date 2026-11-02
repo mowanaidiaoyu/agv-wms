@@ -6,6 +6,7 @@ import {
   mergeSimulationTick,
   parseSimulationSocketEvent,
   selectSimulationStateSource,
+  shouldApplySimulationFrame,
   useSimulationSocket,
 } from './useSimulationSocket'
 
@@ -55,6 +56,48 @@ describe('simulation socket compatibility', () => {
     const tick3 = mergeSimulationTick(tick2, { tick: 3, updatedAt: 'tick-3' })
 
     expect(tick3).toMatchObject({ tick: 3, updatedAt: 'tick-3', inventory: [] })
+  })
+
+  it('rejects delayed frames but accepts an authoritative reset generation', () => {
+    const current = {
+      ...legacyState,
+      tick: 12,
+      simulationTest: { resetGeneration: 2 },
+    } as unknown as SimulationState
+
+    expect(shouldApplySimulationFrame(current, {
+      tick: 11, simulationTest: { resetGeneration: 2 },
+    })).toBe(false)
+    expect(mergeSimulationTick(current, {
+      tick: 11, updatedAt: 'stale', simulationTest: { resetGeneration: 2 },
+    })).toBe(current)
+    expect(shouldApplySimulationFrame(current, {
+      tick: 0, simulationTest: { resetGeneration: 3 },
+    })).toBe(true)
+    expect(mergeSimulationTick(current, {
+      tick: 0, updatedAt: 'reset', simulationTest: { resetGeneration: 3 },
+    })).toMatchObject({ tick: 0, updatedAt: 'reset' })
+  })
+
+  it('replaces simulation_test cargo with the latest authoritative tick snapshot', () => {
+    const previous = {
+      ...legacyState,
+      runMode: 'simulation_test',
+      scenarioId: 'right-left-110-case-test',
+      simulationTest: {
+        cargo: [{ cargoId: 'cargo-1', status: 'waiting_pick' }],
+      },
+    } as unknown as SimulationState
+    const merged = mergeSimulationTick(previous, {
+      tick: 2,
+      simulationTest: {
+        cargo: [{ cargoId: 'cargo-1', status: 'shuttle_transporting' }],
+      },
+    })
+
+    expect(merged?.simulationTest?.cargo).toEqual([
+      { cargoId: 'cargo-1', status: 'shuttle_transporting' },
+    ])
   })
 
   it('uses polled state after disconnect so stale live state cannot mask later ticks', () => {

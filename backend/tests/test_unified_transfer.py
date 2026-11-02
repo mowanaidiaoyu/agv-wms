@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.schemas import SimulationStartRequest
+from app.schemas import SimulationStartRequest, TopologyPayload
+from app.services.shuttle_topology import topology_revision
 from app.services.unified_transfer import (
     apply_drop,
     apply_pick,
@@ -18,7 +19,8 @@ TOPOLOGY_PATH = Path(__file__).resolve().parents[2] / "data" / "topology_666.jso
 
 
 def _topology() -> dict:
-    return json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
+    raw = json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
+    return TopologyPayload.model_validate(raw).model_dump(by_alias=True)
 
 
 def _request(**overrides) -> dict:
@@ -68,7 +70,7 @@ def test_pyc_topology_uses_validated_c_shuttle_graph_contract() -> None:
     contract = shuttle_contract(_topology())
 
     assert contract["topologyId"] == "topology-6ceb4920"
-    assert contract["topologyRevision"] == "2.0.0:fe9fd41bf5cec86b"
+    assert contract["topologyRevision"] == topology_revision(_topology())
     assert contract["planningEnabled"] is True
     assert {lift["lift_id"] for lift in contract["lifts"]} == {
         "shuttle-lift-a",

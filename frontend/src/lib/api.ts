@@ -1,6 +1,11 @@
 import type {
   GoodsInventory,
   GoodsCatalog,
+  OrderFulfillmentPlan,
+  PackagingSpecificationRegistry,
+  FulfillmentTestScenarioAudit,
+  GeneralSimulationAudit,
+  SimulationInventoryProfile,
   SimulationOrderInput,
   ShuttleContract,
   ShuttlePlan,
@@ -10,6 +15,7 @@ import type {
   SimulationTask,
   StoredRecord,
   TopologyPayload,
+  TransportLayoutPlan,
 } from '../types'
 
 const API_BASE = 'http://127.0.0.1:8000/api/v1'
@@ -83,6 +89,9 @@ export const api = {
   getTopology(topologyId: string) {
     return request<StoredRecord<TopologyPayload>>(`/topologies/${topologyId}`)
   },
+  getTransportLayoutPlan(topologyId: string) {
+    return request<TransportLayoutPlan>(`/topologies/${topologyId}/transport-layout-plan`)
+  },
   saveTopology(payload: TopologyPayload) {
     return request<StoredRecord<TopologyPayload>>(`/topologies${payload.id ? '' : ''}`, {
       method: 'POST',
@@ -103,6 +112,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ topologyId, orders, transfers }),
     })
+  },
+  startFulfillmentTestSimulation(topologyId: string, topologyRevision: string, scenarioId: string) {
+    return request<{ runId: string; status: string; runMode: 'simulation_test'; scenarioId: string }>(
+      `/simulations/test-scenarios/${scenarioId}/start`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ topologyId, topologyRevision, scenarioId }),
+      },
+    )
   },
   insertSimulationOrder(runId: string, order: SimulationOrderInput) {
     return request<SimulationState>(`/simulations/${runId}/orders`, {
@@ -168,6 +186,52 @@ export const api = {
   },
   getGoodsCatalog() {
     return request<GoodsCatalog>('/goods/catalog')
+  },
+  getPackagingSpecifications() {
+    return request<PackagingSpecificationRegistry>('/goods/packaging-specs')
+  },
+  getFulfillmentTestScenario(topologyId: string, scenarioId: string) {
+    return request<FulfillmentTestScenarioAudit>(
+      `/topologies/${topologyId}/fulfillment-test-scenarios/${scenarioId}`,
+    )
+  },
+  getSimulationInventoryProfile(topologyId: string, profileId: string) {
+    return request<SimulationInventoryProfile>(
+      `/topologies/${topologyId}/simulation-inventory-profiles/${profileId}`,
+    )
+  },
+  planGeneralSimulation(
+    topologyId: string,
+    topologyRevision: string,
+    profileId: string,
+    orders: SimulationOrderInput[],
+    inventoryOverrides: Array<{ inventoryRecordId: string; quantityCases: number }>,
+  ) {
+    return request<GeneralSimulationAudit>(`/topologies/${topologyId}/general-simulation-plan`, {
+      method: 'POST',
+      body: JSON.stringify({ topologyId, topologyRevision, profileId, orders, inventoryOverrides }),
+    })
+  },
+  startGeneralSimulation(
+    topologyId: string,
+    topologyRevision: string,
+    profileId: string,
+    orders: SimulationOrderInput[],
+    inventoryOverrides: Array<{ inventoryRecordId: string; quantityCases: number }>,
+  ) {
+    return request<{ runId: string; status: string; runMode: 'simulation'; profileId: string }>(
+      '/simulations/general/start',
+      {
+        method: 'POST',
+        body: JSON.stringify({ topologyId, topologyRevision, profileId, orders, inventoryOverrides }),
+      },
+    )
+  },
+  planOrderFulfillment(topologyId: string, order: SimulationOrderInput) {
+    return request<OrderFulfillmentPlan>(`/topologies/${topologyId}/order-fulfillment-plan`, {
+      method: 'POST',
+      body: JSON.stringify(order),
+    })
   },
   updateShuttleDock(
     runId: string,

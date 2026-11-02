@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0",
+  "records": [
+    {
+      "skuId": "13448419-4.0-4.0",
+      "unitsPerCase": 20,
+      "baseUom": "piece",
+      "caseUom": "case",
+      "packagingSource": "PYC-F2-DATA/right-left-110-case-test/user-authorized-test-contract",
+      "verificationStatus": "simulation_test_confirmed",
+      "dataScope": "simulation_test",
+      "scope": "simulation_test",
+      "scenarioId": "right-left-110-case-test",
+      "verifiedAt": "2026-10-29T00:00:00+08:00",
+      "notes": "Only valid inside the isolated 110-base-unit simulation test. This is not a formal product-master packaging claim."
+    },
+    {
+      "skuId": "13448419-4.0-4.0",
+      "unitsPerCase": 20,
+      "baseUom": "piece",
+      "caseUom": "case",
+      "packagingSource": "PYC-G1/general-order-simulation/explicit-simulation-configuration",
+      "verificationStatus": "simulation_configured",
+      "dataScope": "simulation",
+      "scope": "simulation",
+      "profileId": "general-order-simulation",
+      "verifiedAt": "2026-10-31T00:00:00+08:00",
+      "notes": "Explicit simulation-only packaging configuration; not a formal product-master claim."
+    },
+    {
+      "skuId": "13495233-15.0-15.0",
+      "unitsPerCase": 12,
+      "baseUom": "piece",
+      "caseUom": "case",
+      "packagingSource": "PYC-G1/general-order-simulation/explicit-simulation-configuration",
+      "verificationStatus": "simulation_configured",
+      "dataScope": "simulation",
+      "scope": "simulation",
+      "profileId": "general-order-simulation",
+      "verifiedAt": "2026-10-31T00:00:00+08:00",
+      "notes": "Explicit simulation-only packaging configuration used to verify non-20 case sizes."
+    }
+  ]
+}

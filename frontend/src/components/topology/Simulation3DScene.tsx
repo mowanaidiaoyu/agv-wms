@@ -1,9 +1,10 @@
-import { memo, useEffect, useMemo, useRef } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Group, MOUSE, Mesh, Vector3 } from 'three'
 import { BatchedTopologyMeshes, GoodsBoxes, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
+import { PickingArmHandoff, type PickingArmCargo } from './PickingArmHandoff'
 import {
   CELL,
   CONVEYOR_DECK_BASE,
@@ -27,12 +28,48 @@ import {
 } from '../../lib/topology3d'
 import { conveyorAnchorOf, conveyorDecksOf, conveyorDirectionFromSide, parseCellId } from '../../lib/topology'
 import { advanceInterpolationElapsed, interpolateScalar, interpolationProgress } from '../../lib/simulationMotion'
+import {
+  advanceSimulationRollerAngle,
+  boundedSimulationTransitionDuration,
+  interpolateSimulationPoint,
+  isSimulationConveyorMotion,
+  SIMULATION_CARGO_BODY_HEIGHT,
+  SIMULATION_CARGO_CENTER_OFFSET_Y,
+  shouldRenderSimulationCargoIndependently,
+  simulationMotionYaw,
+} from '../../lib/simulationTestVisualization'
+import {
+  classifyShuttleTrackSegment,
+  collectConfirmedShuttleWaypoints,
+  frameToShuttleWaypoint,
+  headingAtShuttleFrame,
+  isLegalShuttleTrackSegment,
+  shuttleDirectionLabel,
+  shuttleYawForSegment,
+  type ShuttleTrackSegmentKind,
+  type ShuttleVisualWaypoint,
+} from '../../lib/shuttleTrackMotion'
+import {
+  boundedConveyorCatchUp,
+  collectConfirmedConveyorWaypoints,
+  conveyorSegmentKind,
+  conveyorYawForSegment,
+  groundConveyorWaypoints,
+  upperConveyorWaypoints,
+  validateConveyorWaypointPath,
+  type ConveyorVisualWaypoint,
+} from '../../lib/conveyorTrackMotion'
 import type {
   GoodsSlot,
+  FulfillmentTestScenarioAudit,
   ShuttleContract,
   SimulationRobot,
+  SimulationTestCargoState,
+  SimulationTestLeftFlowState,
+  SimulationTestRunState,
   SimulationTask,
   TopologyPayload,
+  TransportLayoutPlan,
   TransferInventoryBalance,
 } from '../../types'
 
@@ -50,6 +87,207 @@ export type Simulation3DSceneProps = {
   onSelectRobot?: (robotId: string) => void
   paused?: boolean
   transitionDuration?: number
+  pickingArmLayoutPlan?: TransportLayoutPlan
+  simulationTestHandoff?: FulfillmentTestScenarioAudit['rightHandoff']
+  simulationTestCargo?: SimulationTestCargoState[]
+  simulationTestState?: SimulationTestRunState
+  showSimulationDebugLabels?: boolean
+  pickingArmFocused?: boolean
+  pickingArmFocusRequest?: number
+  simulationMotionEpoch?: string
+}
+
+export type PickingArmPreviewLayerProps = {
+  topology: TopologyPayload
+  activeFloor: string
+  layoutPlan?: TransportLayoutPlan
+  visible: boolean
+  cycleToken: string
+  resetRequest: number
+  paused: boolean
+  speedMultiplier: 1 | 2 | 4
+  cargo: PickingArmCargo
+}
+
+/**
+ * Kept as a small exported layer so module-loading tests exercise the real
+ * Simulation3DScene import graph while mounting the arm without WebGL.
+ */
+export function PickingArmPreviewLayer({
+  topology,
+  activeFloor,
+  layoutPlan,
+  visible,
+  cycleToken,
+  resetRequest,
+  paused,
+  speedMultiplier,
+  cargo,
+}: PickingArmPreviewLayerProps) {
+  if (!visible || !layoutPlan?.pickingArm || activeFloor !== '1F') return null
+  return (
+    <PickingArmHandoff
+      topology={topology}
+      layout={layoutPlan.pickingArm}
+      cargo={cargo}
+      preview
+      previewCycleToken={cycleToken}
+      paused={paused}
+      speedMultiplier={speedMultiplier}
+      resetRequest={resetRequest}
+    />
+  )
+}
+
+export function PickingArmAuthoritativeLayer({
+  topology,
+  activeFloor,
+  layoutPlan,
+  simulationTest,
+  paused,
+  transitionDuration = 0.3,
+  highlighted = false,
+}: {
+  topology: TopologyPayload
+  activeFloor: string
+  layoutPlan?: TransportLayoutPlan
+  simulationTest?: SimulationTestRunState
+  paused: boolean
+  transitionDuration?: number
+  highlighted?: boolean
+}) {
+  if (!layoutPlan?.pickingArm || activeFloor !== '1F') return null
+  const activeCargo = simulationTest?.cargo.find(
+    (cargo) => cargo.cargoId === simulationTest.arm.activeCargoId,
+  )
+  const cargo: PickingArmCargo = activeCargo
+    ? {
+        toteId: activeCargo.cargoId,
+        orderId: activeCargo.orderId,
+        skuId: activeCargo.skuId,
+        pickedQuantity: activeCargo.quantityBase,
+      }
+    : {
+        toteId: 'simulation-test-arm-idle',
+        orderId: simulationTest?.order.orderId ?? 'NO-ACTIVE-RUN',
+        skuId: simulationTest?.cargo[0]?.skuId ?? '-',
+        pickedQuantity: 0,
+      }
+  return (
+    <PickingArmHandoff
+      topology={topology}
+      layout={layoutPlan.pickingArm}
+      cargo={cargo}
+      preview={false}
+      previewCycleToken="persistent-picking-arm"
+      paused={paused}
+      speedMultiplier={1}
+      resetRequest={simulationTest?.resetGeneration ?? 0}
+      authoritativeState={simulationTest?.arm}
+      authoritativeTransitionSeconds={transitionDuration}
+      highlighted={highlighted}
+    />
+  )
+}
+
+export function SimulationOnlyHandoffLayer({
+  handoff,
+  showLabels = false,
+}: {
+  handoff?: FulfillmentTestScenarioAudit['rightHandoff']
+  showLabels?: boolean
+}) {
+  if (!handoff || handoff.simulationRouteStatus !== 'PASS_SIMULATION_ONLY') return null
+  return (
+    <group name="simulation-only-right-handoff">
+      {handoff.facilities.map((facility) => {
+        const points = facility.geometry.worldPoints.map((point) => [
+          point.x,
+          point.y + 0.12,
+          point.z,
+        ] as [number, number, number])
+        const marker = points[Math.floor(points.length / 2)]
+        return (
+          <group key={facility.deviceId}>
+            <Line
+              points={points}
+              color="#f59e0b"
+              lineWidth={4}
+              dashed
+              dashScale={3}
+              transparent
+              opacity={0.95}
+              depthTest={false}
+              renderOrder={15}
+            />
+            <mesh position={marker}>
+              <boxGeometry args={[0.34, 0.18, 0.34]} />
+              <meshStandardMaterial color="#f59e0b" emissive="#92400e" emissiveIntensity={0.65} />
+              {showLabels ? (
+                <Html center distanceFactor={20} position={[0, 0.55, 0]}>
+                  <div style={{ color: '#fef3c7', background: 'rgba(120,53,15,.92)', padding: '3px 6px', borderRadius: 5, whiteSpace: 'nowrap', fontSize: 10 }}>
+                    SIMULATION ONLY · {facility.deviceId}
+                  </div>
+                </Html>
+              ) : null}
+            </mesh>
+          </group>
+        )
+      })}
+    </group>
+  )
+}
+
+export function SimulationTestBreakPackLayer({
+  leftFlow,
+  showLabel = false,
+}: {
+  leftFlow?: SimulationTestLeftFlowState
+  showLabel?: boolean
+}) {
+  if (!leftFlow) return null
+  const station = leftFlow.station
+  const ownerIsCtu = Boolean(leftFlow.ctu.activeCargoId)
+  const visualCargo = ownerIsCtu
+    ? null
+    : leftFlow.status === 'returned'
+      ? leftFlow.partialCase
+      : station.occupiedCargoIds.length
+        ? (leftFlow.partialCase ?? leftFlow.cargo)
+        : leftFlow.cargo.status === 'waiting_pick' || leftFlow.cargo.status === 'ctu_picking'
+          ? leftFlow.cargo
+          : null
+  const cargoPosition = visualCargo?.currentPosition
+  const cargoAtStation = Boolean(
+    visualCargo && station.occupiedCargoIds.includes(visualCargo.cargoId),
+  )
+  return (
+    <group name="simulation-test-left-break-pack">
+      <group position={[station.position.worldX, station.position.worldY, station.position.worldZ]}>
+        <mesh position={[0, 0.18, 0]}>
+          <boxGeometry args={[0.9, 0.34, 0.9]} />
+          <meshStandardMaterial color="#0f766e" emissive="#134e4a" emissiveIntensity={0.35} roughness={0.55} />
+        </mesh>
+        <mesh position={[0, 0.62, 0]}>
+          <boxGeometry args={[0.72, 0.08, 0.72]} />
+          <meshStandardMaterial color="#5eead4" emissive="#0f766e" emissiveIntensity={0.25} />
+        </mesh>
+        {showLabel ? (
+          <Html center distanceFactor={18} position={[0, 1.15, 0]}>
+            <div style={{ color: '#ccfbf1', background: 'rgba(15,118,110,.92)', padding: '3px 6px', borderRadius: 5, whiteSpace: 'nowrap', fontSize: 10 }}>
+              simulation_test 拆零工位 · {station.phase}
+            </div>
+          </Html>
+        ) : null}
+      </group>
+      {visualCargo && cargoPosition ? (
+        <mesh position={[cargoPosition.worldX, cargoPosition.worldY + (cargoAtStation ? 0.98 : 0.38), cargoPosition.worldZ]}>
+          <boxGeometry args={[0.62, 0.58, 0.62]} />
+          <meshStandardMaterial color={visualCargo.caseType === 'partial_case' ? '#f59e0b' : '#14b8a6'} emissive="#0f766e" emissiveIntensity={0.2} roughness={0.55} />
+        </mesh>
+      ) : null}
+    </group>
+  )
 }
 
 const SHUTTLE_COLOR = '#c084fc'
@@ -58,13 +296,34 @@ const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
 /** 平滑跟随：机器人组的实际位置朝目标格指数逼近，接近后贴死，避免逐 tick 跳格。 */
-function RobotGroup({ position, children, onClick, paused = false, transitionDuration = 0.3 }: { position: [number, number, number]; children: ReactNode; onClick?: () => void; paused?: boolean; transitionDuration?: number }) {
+function RobotGroup({
+  position,
+  children,
+  onClick,
+  paused = false,
+  transitionDuration = 0.3,
+  orientToMotion = false,
+  activeBlockKeys = [],
+  activeBlocks,
+}: {
+  position: [number, number, number]
+  children: ReactNode
+  onClick?: () => void
+  paused?: boolean
+  transitionDuration?: number
+  orientToMotion?: boolean
+  activeBlockKeys?: string[]
+  activeBlocks?: { current: Map<string, number> }
+}) {
   const groupRef = useRef<Group>(null)
   const current = useRef(new Vector3(position[0], position[1], position[2]))
   const start = useRef(new Vector3(position[0], position[1], position[2]))
   const target = useRef(new Vector3(position[0], position[1], position[2]))
   const elapsed = useRef(transitionDuration)
   const durationRef = useRef(transitionDuration)
+  const currentYaw = useRef(0)
+  const startYaw = useRef(0)
+  const targetYaw = useRef(0)
   const invalidate = useThree((state) => state.invalidate)
   const [x, y, z] = position
 
@@ -73,6 +332,18 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
     if (targetChanged) {
       start.current.copy(current.current)
       elapsed.current = 0
+      if (orientToMotion) {
+        const dx = x - current.current.x
+        const dz = z - current.current.z
+        if (Math.hypot(dx, dz) > 0.0001) {
+          startYaw.current = currentYaw.current
+          targetYaw.current = simulationMotionYaw(
+            startYaw.current,
+            [current.current.x, current.current.y, current.current.z],
+            [x, y, z],
+          )
+        }
+      }
     } else if (durationRef.current !== transitionDuration && elapsed.current < durationRef.current) {
       start.current.copy(current.current)
       elapsed.current = 0
@@ -89,18 +360,511 @@ function RobotGroup({ position, children, onClick, paused = false, transitionDur
       groupRef.current?.position.copy(current.current)
     }
     invalidate()
-  }, [invalidate, paused, transitionDuration, x, y, z])
+  }, [invalidate, orientToMotion, paused, transitionDuration, x, y, z])
 
   useFrame((_, delta) => {
     if (paused) return
     elapsed.current = advanceInterpolationElapsed(elapsed.current, delta, transitionDuration, false)
     const progress = interpolationProgress(elapsed.current, transitionDuration)
-    const cur = current.current.lerpVectors(start.current, target.current, progress)
+    const cur = interpolateSimulationPoint(
+      [start.current.x, start.current.y, start.current.z],
+      [target.current.x, target.current.y, target.current.z],
+      progress,
+    )
+    current.current.set(...cur)
+    if (orientToMotion) {
+      currentYaw.current = startYaw.current + (targetYaw.current - startYaw.current) * progress
+    }
+    if (progress < 1 && activeBlocks) {
+      const now = performance.now()
+      for (const key of activeBlockKeys) activeBlocks.current.set(key, now)
+    }
     if (progress < 1) invalidate()
-    if (groupRef.current) groupRef.current.position.copy(cur)
+    if (groupRef.current) {
+      groupRef.current.position.copy(current.current)
+      if (orientToMotion) groupRef.current.rotation.y = currentYaw.current
+    }
   })
 
   return <group ref={groupRef} position={current.current} onClick={(event) => { event.stopPropagation(); onClick?.() }}>{children}</group>
+}
+
+type ShuttleTrackMotion = {
+  kind: 'turn' | 'move'
+  elapsed: number
+  duration: number
+  start: Vector3
+  target: Vector3
+  startYaw: number
+  targetYaw: number
+  waypoint: ShuttleVisualWaypoint
+  segmentKind: ShuttleTrackSegmentKind
+}
+
+/**
+ * Shuttle-only visual player. It consumes every confirmed ShuttleGraph frame
+ * in order, turns at the shared node, then starts the next cardinal edge.
+ * Missing websocket snapshots therefore add queued waypoints instead of a
+ * straight-line shortcut across a corner.
+ */
+function ShuttleTrackGroup({
+  position,
+  frames,
+  routeIndex,
+  routeKey,
+  children,
+  onClick,
+  paused,
+  transitionDuration,
+  debug = false,
+  cargoOwner = 'none',
+  liftId = 'none',
+}: {
+  position: [number, number, number]
+  frames: NonNullable<SimulationTestRunState['shuttle']['outboundFrames']>
+  routeIndex: number
+  routeKey: string
+  children: ReactNode
+  onClick?: () => void
+  paused: boolean
+  transitionDuration: number
+  debug?: boolean
+  cargoOwner?: string
+  liftId?: string
+}) {
+  const groupRef = useRef<Group>(null)
+  const current = useRef(new Vector3(...position))
+  const currentYaw = useRef(headingAtShuttleFrame(frames, routeIndex))
+  const queue = useRef<ShuttleVisualWaypoint[]>([])
+  const motion = useRef<ShuttleTrackMotion | null>(null)
+  const authority = useRef<{ routeKey: string; routeIndex: number } | null>(null)
+  const debugWorldRef = useRef<HTMLSpanElement>(null)
+  const debugYawRef = useRef<HTMLSpanElement>(null)
+  const invalidate = useThree((state) => state.invalidate)
+  const [debugState, setDebugState] = useState({
+    fromNodeId: frames[routeIndex]?.nodeId ?? 'unknown',
+    toNodeId: frames[routeIndex]?.nodeId ?? 'unknown',
+    direction: 'stopped',
+    yaw: currentYaw.current,
+    segmentKind: 'stationary' as ShuttleTrackSegmentKind,
+  })
+
+  useEffect(() => {
+    const previous = authority.current
+    if (!previous) {
+      authority.current = { routeKey, routeIndex }
+      current.current.set(...position)
+      currentYaw.current = headingAtShuttleFrame(frames, routeIndex, currentYaw.current)
+      groupRef.current?.position.copy(current.current)
+      groupRef.current?.rotation.set(0, currentYaw.current, 0)
+      invalidate()
+      return
+    }
+    if (previous.routeKey !== routeKey) {
+      // Finish every already-confirmed waypoint from the old route before
+      // entering the return/outbound route. Clearing here would reconnect the
+      // current mid-edge position directly to a later node and recreate the
+      // diagonal shortcut this component exists to prevent.
+      queue.current.push(...collectConfirmedShuttleWaypoints(frames, -1, routeIndex))
+    } else if (routeIndex < previous.routeIndex) {
+      // A real reset remounts this component through simulationMotionEpoch.
+      // A same-epoch index rollback is stale/out-of-order data: keep the
+      // current confirmed queue and wait for a monotonic snapshot.
+      authority.current = { routeKey, routeIndex: previous.routeIndex }
+      return
+    } else if (routeIndex > previous.routeIndex) {
+      queue.current.push(...collectConfirmedShuttleWaypoints(
+        frames, previous.routeIndex, routeIndex,
+      ))
+    }
+    authority.current = { routeKey, routeIndex }
+    invalidate()
+  }, [frames, invalidate, position, routeIndex, routeKey])
+
+  useFrame((_, delta) => {
+    if (paused) return
+    let active = motion.current
+    if (!active) {
+      let waypoint = queue.current[0]
+      while (waypoint && current.current.distanceToSquared(new Vector3(...waypoint.position)) < 1e-10) {
+        queue.current.shift()
+        waypoint = queue.current[0]
+      }
+      if (!waypoint) return
+      const from: [number, number, number] = [current.current.x, current.current.y, current.current.z]
+      const segmentKind = classifyShuttleTrackSegment(from, waypoint.position)
+      if (!isLegalShuttleTrackSegment(segmentKind)) {
+        queue.current = []
+        setDebugState({
+          fromNodeId: debugState.toNodeId,
+          toNodeId: waypoint.nodeId,
+          direction: segmentKind,
+          yaw: currentYaw.current,
+          segmentKind,
+        })
+        invalidate()
+        return
+      }
+      const targetYaw = shuttleYawForSegment(currentYaw.current, from, waypoint.position)
+      const turnDelta = Math.abs(targetYaw - currentYaw.current)
+      if ((segmentKind === 'row' || segmentKind === 'column') && turnDelta > 0.001) {
+        active = {
+          kind: 'turn', elapsed: 0,
+          duration: Math.max(0.08, Math.min(0.24, transitionDuration * 0.35)),
+          start: current.current.clone(), target: current.current.clone(),
+          startYaw: currentYaw.current, targetYaw, waypoint, segmentKind,
+        }
+      } else {
+        queue.current.shift()
+        active = {
+          kind: 'move', elapsed: 0, duration: transitionDuration,
+          start: current.current.clone(), target: new Vector3(...waypoint.position),
+          startYaw: currentYaw.current, targetYaw, waypoint, segmentKind,
+        }
+      }
+      motion.current = active
+      setDebugState({
+        fromNodeId: debugState.toNodeId,
+        toNodeId: waypoint.nodeId,
+        direction: shuttleDirectionLabel(segmentKind, targetYaw),
+        yaw: targetYaw,
+        segmentKind,
+      })
+    }
+
+    active.elapsed = Math.min(active.duration, active.elapsed + delta)
+    const progress = interpolationProgress(active.elapsed, active.duration)
+    if (active.kind === 'turn') {
+      currentYaw.current = active.startYaw + (active.targetYaw - active.startYaw) * progress
+    } else {
+      const next = interpolateSimulationPoint(
+        [active.start.x, active.start.y, active.start.z],
+        [active.target.x, active.target.y, active.target.z],
+        progress,
+      )
+      current.current.set(...next)
+      currentYaw.current = active.targetYaw
+    }
+    if (groupRef.current) {
+      groupRef.current.position.copy(current.current)
+      // A Shuttle may yaw only. Explicitly clear pitch/roll every frame.
+      groupRef.current.rotation.set(0, currentYaw.current, 0)
+    }
+    if (debugWorldRef.current) {
+      debugWorldRef.current.textContent = `world (${current.current.x.toFixed(2)}, ${current.current.y.toFixed(2)}, ${current.current.z.toFixed(2)})`
+    }
+    if (debugYawRef.current) {
+      debugYawRef.current.textContent = `${debugState.direction} · yaw ${(currentYaw.current * 180 / Math.PI).toFixed(0)}° · pitch 0° · roll 0°`
+    }
+    invalidate()
+    if (progress >= 1) motion.current = null
+  })
+
+  const debugPoints = useMemo(
+    () => frames.map((frame) => frameToShuttleWaypoint(frame).position),
+    [frames],
+  )
+  return (
+    <>
+      {debug && debugPoints.length > 1 ? (
+        <Line points={debugPoints} color="#38bdf8" lineWidth={1.2} transparent opacity={0.75} />
+      ) : null}
+      <group ref={groupRef} position={current.current} rotation={[0, currentYaw.current, 0]} onClick={(event) => { event.stopPropagation(); onClick?.() }}>
+        {children}
+        {debug ? (
+          <Html center distanceFactor={16} position={[0, 1.7, 0]}>
+            <div className="simulation-scene-label">
+              <b>{debugState.fromNodeId} → {debugState.toNodeId}</b>
+              <span ref={debugYawRef}>{debugState.direction} · yaw {(debugState.yaw * 180 / Math.PI).toFixed(0)}° · pitch 0° · roll 0°</span>
+              <span ref={debugWorldRef}>world ({current.current.x.toFixed(2)}, {current.current.y.toFixed(2)}, {current.current.z.toFixed(2)})</span>
+              <span>level {frames[routeIndex]?.position.level ?? '-'} · lift {liftId}</span>
+              <span>cargo owner {cargoOwner}</span>
+            </div>
+          </Html>
+        ) : null}
+      </group>
+    </>
+  )
+}
+
+type ConveyorTrackMotion = {
+  kind: 'turn' | 'move'
+  elapsed: number
+  duration: number
+  start: Vector3
+  target: Vector3
+  startYaw: number
+  targetYaw: number
+  waypoint: ConveyorVisualWaypoint
+  fromNodeId: string
+}
+
+const MAX_CONVEYOR_VISUAL_QUEUE = 96
+
+/** Visual-only player for an already-authorized Conveyor path/index. */
+function ConveyorCargoTrackGroup({
+  position,
+  path,
+  pathIndex,
+  routeKey,
+  children,
+  paused,
+  transitionDuration,
+  conveyorBlockByNode,
+  activeBlocks,
+  debug = false,
+}: {
+  position: [number, number, number]
+  path: ConveyorVisualWaypoint[]
+  pathIndex: number
+  routeKey: string
+  children: ReactNode
+  paused: boolean
+  transitionDuration: number
+  conveyorBlockByNode: Map<string, string>
+  activeBlocks?: { current: Map<string, number> }
+  debug?: boolean
+}) {
+  const groupRef = useRef<Group>(null)
+  const current = useRef(new Vector3(...position))
+  const currentYaw = useRef(0)
+  const currentNodeId = useRef(path[pathIndex]?.nodeId ?? 'unknown')
+  const queue = useRef<ConveyorVisualWaypoint[]>([])
+  const motion = useRef<ConveyorTrackMotion | null>(null)
+  const durationRef = useRef(transitionDuration)
+  const authority = useRef<{ routeKey: string; pathIndex: number } | null>(null)
+  const invalidate = useThree((state) => state.invalidate)
+  const validation = useMemo(() => validateConveyorWaypointPath(path), [path])
+
+  useEffect(() => {
+    const active = motion.current
+    if (active && durationRef.current !== transitionDuration) {
+      const progress = active.duration <= 0 ? 1 : active.elapsed / active.duration
+      const nextDuration = active.kind === 'turn'
+        ? Math.max(0.06, Math.min(0.18, transitionDuration * 0.28))
+        : Math.max(0.06, transitionDuration / boundedConveyorCatchUp(queue.current.length))
+      active.duration = nextDuration
+      active.elapsed = Math.min(nextDuration, progress * nextDuration)
+    }
+    durationRef.current = transitionDuration
+    invalidate()
+  }, [invalidate, transitionDuration])
+
+  useEffect(() => {
+    const previous = authority.current
+    if (!previous) {
+      authority.current = { routeKey, pathIndex }
+      current.current.set(...position)
+      const from = path[Math.max(0, pathIndex - 1)]?.position
+      const to = path[pathIndex]?.position
+      if (from && to) currentYaw.current = conveyorYawForSegment(0, from, to)
+      groupRef.current?.position.copy(current.current)
+      groupRef.current?.rotation.set(0, currentYaw.current, 0)
+      invalidate()
+      return
+    }
+    if (validation.status === 'BLOCKED') return
+    if (previous.routeKey !== routeKey) {
+      queue.current.push(...collectConfirmedConveyorWaypoints(path, -1, pathIndex))
+    } else if (pathIndex < previous.pathIndex) {
+      // resetGeneration remounts this component; a same-epoch rollback is stale.
+      authority.current = { routeKey, pathIndex: previous.pathIndex }
+      return
+    } else if (pathIndex > previous.pathIndex) {
+      queue.current.push(...collectConfirmedConveyorWaypoints(
+        path, previous.pathIndex, pathIndex,
+      ))
+    }
+    if (queue.current.length > MAX_CONVEYOR_VISUAL_QUEUE) {
+      // Never drop an intermediate corner. Freeze at the last legal point and
+      // wait for a reset/new Run rather than teleporting to catch up.
+      queue.current = queue.current.slice(0, MAX_CONVEYOR_VISUAL_QUEUE)
+    }
+    authority.current = { routeKey, pathIndex }
+    invalidate()
+  }, [invalidate, path, pathIndex, position, routeKey, validation.status])
+
+  useFrame((_, delta) => {
+    if (paused || validation.status === 'BLOCKED') return
+    let active = motion.current
+    if (!active) {
+      let waypoint = queue.current[0]
+      while (waypoint && current.current.distanceToSquared(new Vector3(...waypoint.position)) < 1e-10) {
+        queue.current.shift()
+        waypoint = queue.current[0]
+      }
+      if (!waypoint) return
+      const from: [number, number, number] = [current.current.x, current.current.y, current.current.z]
+      const kind = conveyorSegmentKind(from, waypoint.position)
+      if (!isLegalShuttleTrackSegment(kind) || kind === 'lift') {
+        queue.current = []
+        return
+      }
+      const targetYaw = conveyorYawForSegment(currentYaw.current, from, waypoint.position)
+      const turnDelta = Math.abs(targetYaw - currentYaw.current)
+      if ((kind === 'row' || kind === 'column') && turnDelta > 0.001) {
+        active = {
+          kind: 'turn', elapsed: 0,
+          duration: Math.max(0.06, Math.min(0.18, transitionDuration * 0.28)),
+          start: current.current.clone(), target: current.current.clone(),
+          startYaw: currentYaw.current, targetYaw, waypoint,
+          fromNodeId: currentNodeId.current,
+        }
+      } else {
+        queue.current.shift()
+        const catchUp = boundedConveyorCatchUp(queue.current.length)
+        active = {
+          kind: 'move', elapsed: 0,
+          duration: Math.max(0.06, transitionDuration / catchUp),
+          start: current.current.clone(), target: new Vector3(...waypoint.position),
+          startYaw: currentYaw.current, targetYaw, waypoint,
+          fromNodeId: currentNodeId.current,
+        }
+      }
+      motion.current = active
+    }
+    active.elapsed = Math.min(active.duration, active.elapsed + delta)
+    const progress = interpolationProgress(active.elapsed, active.duration)
+    if (activeBlocks) {
+      const now = performance.now()
+      const fromBlock = conveyorBlockByNode.get(active.fromNodeId)
+      const toBlock = conveyorBlockByNode.get(active.waypoint.nodeId)
+      if (fromBlock) activeBlocks.current.set(fromBlock, now)
+      if (toBlock) activeBlocks.current.set(toBlock, now)
+    }
+    if (active.kind === 'turn') {
+      currentYaw.current = active.startYaw + (active.targetYaw - active.startYaw) * progress
+    } else {
+      const next = interpolateSimulationPoint(
+        [active.start.x, active.start.y, active.start.z],
+        [active.target.x, active.target.y, active.target.z],
+        progress,
+      )
+      current.current.set(...next)
+      currentYaw.current = active.targetYaw
+    }
+    if (groupRef.current) {
+      groupRef.current.position.copy(current.current)
+      groupRef.current.rotation.set(0, currentYaw.current, 0)
+    }
+    invalidate()
+    if (progress >= 1) {
+      if (active.kind === 'move') currentNodeId.current = active.waypoint.nodeId
+      motion.current = null
+    }
+  })
+
+  return (
+    <>
+      {debug && path.length > 1 ? (
+        <Line points={path.map((item) => item.position)} color="#22d3ee" lineWidth={1} transparent opacity={0.55} />
+      ) : null}
+      <group ref={groupRef} position={current.current} rotation={[0, currentYaw.current, 0]}>
+        {children}
+      </group>
+    </>
+  )
+}
+
+export function AuthoritativeSimulationCargoLayer({
+  cargo,
+  armActiveCargoId,
+  paused,
+  transitionDuration,
+  motionEpoch = 'simulation-test',
+  conveyorBlockByNode = new Map(),
+  activeBlocks,
+  groundConveyorPath = [],
+  upperConveyorPath = [],
+  showTrackDebug = false,
+}: {
+  cargo: SimulationTestCargoState[]
+  armActiveCargoId?: string | null
+  paused: boolean
+  transitionDuration: number
+  motionEpoch?: string
+  conveyorBlockByNode?: Map<string, string>
+  activeBlocks?: { current: Map<string, number> }
+  groundConveyorPath?: ConveyorVisualWaypoint[]
+  upperConveyorPath?: ConveyorVisualWaypoint[]
+  showTrackDebug?: boolean
+}) {
+  return (
+    <group name="authoritative-simulation-test-cargo">
+      {cargo.filter((item) => shouldRenderSimulationCargoIndependently(item, armActiveCargoId)).map((item, index) => {
+        const position: [number, number, number] = [
+          item.currentPosition.worldX,
+          item.currentPosition.worldY,
+          item.currentPosition.worldZ,
+        ]
+        const color = ['#38bdf8', '#22d3ee', '#2dd4bf', '#a3e635', '#facc15'][index % 5]
+        const cargoVisual = (
+          <>
+            <mesh position={[0, SIMULATION_CARGO_CENTER_OFFSET_Y, 0]}>
+              <boxGeometry args={[0.62, SIMULATION_CARGO_BODY_HEIGHT, 0.62]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.16} roughness={0.55} />
+            </mesh>
+            {item.status === 'waiting_arm' ? (
+              <Html center distanceFactor={18} position={[0, 0.95, 0]}>
+                <div style={{ color: '#dbeafe', background: 'rgba(3,105,161,.9)', padding: '2px 5px', borderRadius: 4, whiteSpace: 'nowrap', fontSize: 9 }}>
+                  {item.cargoId} · waiting_arm
+                </div>
+              </Html>
+            ) : null}
+          </>
+        )
+        const groundIndex = item.status === 'conveyor_transporting' ? item.conveyorIndex : null
+        const upperIndex = item.status === 'merge_conveyor_transporting' ? item.mergeConveyorIndex : null
+        if (typeof groundIndex === 'number' && groundConveyorPath.length) {
+          return (
+            <ConveyorCargoTrackGroup
+              key={`${motionEpoch}:${item.cargoId}:ground`}
+              position={position}
+              path={groundConveyorPath}
+              pathIndex={groundIndex}
+              routeKey={`${motionEpoch}:${item.cargoId}:ground`}
+              paused={paused}
+              transitionDuration={transitionDuration}
+              conveyorBlockByNode={conveyorBlockByNode}
+              activeBlocks={activeBlocks}
+              debug={showTrackDebug}
+            >
+              {cargoVisual}
+            </ConveyorCargoTrackGroup>
+          )
+        }
+        if (typeof upperIndex === 'number' && upperConveyorPath.length) {
+          return (
+            <ConveyorCargoTrackGroup
+              key={`${motionEpoch}:${item.cargoId}:upper`}
+              position={position}
+              path={upperConveyorPath}
+              pathIndex={upperIndex}
+              routeKey={`${motionEpoch}:${item.cargoId}:upper`}
+              paused={paused}
+              transitionDuration={transitionDuration}
+              conveyorBlockByNode={conveyorBlockByNode}
+              activeBlocks={activeBlocks}
+              debug={showTrackDebug}
+            >
+              {cargoVisual}
+            </ConveyorCargoTrackGroup>
+          )
+        }
+        return (
+          <RobotGroup
+            key={`${motionEpoch}:${item.cargoId}:free`}
+            position={position}
+            paused={paused}
+            transitionDuration={transitionDuration}
+            orientToMotion={isSimulationConveyorMotion(item.status)}
+          >
+            {cargoVisual}
+          </RobotGroup>
+        )
+      })}
+    </group>
+  )
 }
 
 /**
@@ -257,7 +1021,7 @@ function CtuCart({
 }
 
 /** 四向车：2×2 车体。局部坐标，原点=格中心贴地。 */
-function ShuttleCart() {
+function ShuttleCart({ carrying }: { carrying?: GoodsSlot & { cargoId?: string } }) {
   const w = CELL * 2 * 0.88
   return (
     <group position={[0, 0.42, 0]}>
@@ -267,8 +1031,24 @@ function ShuttleCart() {
       </mesh>
       <mesh position={[0, 0.46, 0]}>
         <boxGeometry args={[w * 0.58, 0.12, w * 0.58]} />
-        <meshStandardMaterial color="#f5d0fe" emissive="#c026d3" emissiveIntensity={0.8} roughness={0.3} />
+        <meshStandardMaterial color="#94a3b8" emissive="#334155" emissiveIntensity={0.35} roughness={0.3} />
       </mesh>
+      <mesh position={[0, 0.03, w / 2 + 0.035]} name="shuttle-local-forward-indicator">
+        <boxGeometry args={[w * 0.52, 0.16, 0.07]} />
+        <meshStandardMaterial color="#38bdf8" emissive="#0369a1" emissiveIntensity={0.8} roughness={0.35} />
+      </mesh>
+      {carrying ? (
+        <group name={`shuttle-bound-cargo-${carrying.cargoId ?? carrying.skuId}`} position={[0, 0.92, 0]}>
+          <mesh>
+            <boxGeometry args={[0.64, 0.5, 0.58]} />
+            <meshStandardMaterial color="#e2e8f0" emissive="#1d4ed8" emissiveIntensity={0.18} roughness={0.55} />
+          </mesh>
+          <mesh position={[0, 0.02, 0.296]}>
+            <boxGeometry args={[0.5, 0.16, 0.012]} />
+            <meshStandardMaterial color="#2563eb" emissive="#1d4ed8" emissiveIntensity={0.22} />
+          </mesh>
+        </group>
+      ) : null}
       <pointLight color="#e879f9" intensity={1.8} distance={7} decay={2} />
     </group>
   )
@@ -410,6 +1190,8 @@ function SpinningRollerBlock({
   rows,
   floorY,
   activeBlocks,
+  paused = false,
+  speedMultiplier = 1,
 }: {
   block: {
     key: string
@@ -424,9 +1206,11 @@ function SpinningRollerBlock({
   rows: number
   floorY: number
   activeBlocks: { current: Map<string, number> }
+  paused?: boolean
+  speedMultiplier?: number
 }) {
   const groupRef = useRef<Group>(null)
-  const rollerRefs = useRef<(Mesh | null)[]>([])
+  const rollerRefs = useRef<(Group | null)[]>([])
   const angleRef = useRef(0)
   const invalidate = useThree((state) => state.invalidate)
   const beltW = CELL * 2 * 0.98
@@ -459,9 +1243,11 @@ function SpinningRollerBlock({
     if (!group) return
     const lastActive = activeBlocks.current.get(block.key) ?? 0
     const active = performance.now() - lastActive < ROLLER_ACTIVE_WINDOW_MS
-    group.visible = active
-    if (!active) return
-    angleRef.current += delta * ROLLER_SPIN_SPEED
+    if (!paused) group.visible = active
+    if (!active || paused) return
+    angleRef.current = advanceSimulationRollerAngle(
+      angleRef.current, delta, block.direction, active, paused, ROLLER_SPIN_SPEED * speedMultiplier,
+    )
     for (const roller of rollerRefs.current) {
       if (roller) roller.rotation.y = angleRef.current
     }
@@ -476,14 +1262,16 @@ function SpinningRollerBlock({
           position={roller.position}
           rotation={roller.axis === 'x' ? [0, 0, Math.PI / 2] : [Math.PI / 2, 0, 0]}
         >
-          <mesh
-            ref={(mesh) => {
-              rollerRefs.current[index] = mesh
-            }}
-          >
-            <cylinderGeometry args={[rollerR, rollerR, beltW - 0.18, 12]} />
-            <meshStandardMaterial color="#b8c4d0" roughness={0.35} metalness={0.65} />
-          </mesh>
+          <group ref={(group) => { rollerRefs.current[index] = group }}>
+            <mesh>
+              <cylinderGeometry args={[rollerR, rollerR, beltW - 0.18, 12]} />
+              <meshStandardMaterial color="#b8c4d0" roughness={0.35} metalness={0.65} />
+            </mesh>
+            <mesh position={[rollerR * 0.82, 0, 0]}>
+              <boxGeometry args={[rollerR * 0.22, beltW - 0.2, rollerR * 0.22]} />
+              <meshStandardMaterial color="#0f172a" roughness={0.5} metalness={0.3} />
+            </mesh>
+          </group>
         </group>
       ))}
     </group>
@@ -733,6 +1521,8 @@ function ShuttleLiftView({
   rows,
   activeRobot,
   activeTask,
+  simulationTestActive = false,
+  simulationTestPhase,
   paused,
   transitionDuration,
 }: {
@@ -741,12 +1531,16 @@ function ShuttleLiftView({
   rows: number
   activeRobot?: SimulationRobot
   activeTask?: SimulationTask
+  simulationTestActive?: boolean
+  simulationTestPhase?: string
   paused: boolean
   transitionDuration: number
 }) {
   const height = ZONE_LEVEL_HEIGHT.shuttle * 4
-  const active = activeTask?.plan?.chosen_lift === lift.lift_id
-    && ['enter_lift', 'lift_moving', 'exit_lift'].includes(activeTask.phase)
+  const active = simulationTestActive || (
+    activeTask?.plan?.chosen_lift === lift.lift_id
+      && ['enter_lift', 'lift_moving', 'exit_lift'].includes(activeTask.phase)
+  )
   const [x, trackY, z] = shuttleTrackWorldPosition(
     lift.row,
     lift.col,
@@ -776,7 +1570,7 @@ function ShuttleLiftView({
       <Html position={[0, SHUTTLE_RACK_BASE_Y + height + 0.75, 0]} center zIndexRange={[27, 17]}>
         <div className={`simulation-scene-label shuttle-lift-label ${active ? 'active' : ''}`}>
           <b>{lift.label}</b>
-          <span>{active ? activeTask?.phaseLabel : 'L1～L4'}</span>
+          <span>{simulationTestActive ? `simulation_test · ${simulationTestPhase}` : active ? activeTask?.phaseLabel : 'L1～L4'}</span>
         </div>
       </Html>
     </group>
@@ -818,11 +1612,77 @@ function Simulation3DScene({
   onSelectRobot,
   paused = false,
   transitionDuration = 0.3,
+  pickingArmLayoutPlan,
+  simulationTestHandoff,
+  simulationTestCargo = [],
+  simulationTestState,
+  showSimulationDebugLabels = false,
+  pickingArmFocused = false,
+  pickingArmFocusRequest = 0,
+  simulationMotionEpoch = 'simulation-test-idle',
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
+  const simulationConveyorVisuals = useMemo(() => {
+    const blocks = new Map<string, {
+      key: string
+      row: number
+      col: number
+      floor: string
+      direction: [number, number]
+      levels: number
+      ground: boolean
+    }>()
+    const blockByNode = new Map<string, string>()
+    const groundPath = simulationTestState?.conveyor.path ?? []
+    const parseGround = (nodeId: string) => {
+      const [floor, row, col] = nodeId.split(':')
+      return { floor, row: Number(row), col: Number(col) }
+    }
+    groundPath.forEach((nodeId, index) => {
+      const current = parseGround(nodeId)
+      const adjacent = parseGround(groundPath[Math.min(index + 1, groundPath.length - 1)] ?? nodeId)
+      const fallback = parseGround(groundPath[Math.max(0, index - 1)] ?? nodeId)
+      const dx = adjacent.col - current.col || current.col - fallback.col
+      const dz = adjacent.row - current.row || current.row - fallback.row
+      const key = `${current.floor}:${current.row}:${current.col}:lower`
+      blocks.set(key, {
+        key, row: current.row, col: current.col, floor: current.floor,
+        direction: [Math.sign(dx), Math.sign(dz)], levels: 1, ground: true,
+      })
+      blockByNode.set(nodeId, key)
+    })
+
+    const upperPath = simulationTestState?.mergeConveyor.path ?? []
+    upperPath.forEach((step, index) => {
+      const cell = topology.cells.find((item) => item.id === step.nodeId)
+      if (!cell) return
+      const anchor = conveyorAnchorOf(cell)
+      const next = upperPath[Math.min(index + 1, upperPath.length - 1)] ?? step
+      const previous = upperPath[Math.max(0, index - 1)] ?? step
+      const dx = Number(next.col) - Number(step.col) || Number(step.col) - Number(previous.col)
+      const dz = Number(next.row) - Number(step.row) || Number(step.row) - Number(previous.row)
+      const floor = cell.floor ?? '1F'
+      const key = `${floor}:${anchor.row}:${anchor.col}:upper`
+      if (!blocks.has(key)) {
+        blocks.set(key, {
+          key, row: anchor.row, col: anchor.col, floor,
+          direction: [Math.sign(dx), Math.sign(dz)],
+          levels: Math.max(2, cell.levels ?? 2), ground: false,
+        })
+      }
+      blockByNode.set(step.nodeId, key)
+    })
+    return { blocks: [...blocks.values()], blockByNode }
+  }, [simulationTestState?.conveyor.path, simulationTestState?.mergeConveyor.path, topology])
+  const simulationConveyorPaths = useMemo(() => ({
+    ground: simulationTestState ? groundConveyorWaypoints(simulationTestState.conveyor) : [],
+    upper: simulationTestState ? upperConveyorWaypoints(simulationTestState.mergeConveyor.path) : [],
+  }), [simulationTestState])
+  const visualTransitionDuration = boundedSimulationTransitionDuration(transitionDuration)
+  const visualSpeedMultiplier = Math.min(4, Math.max(1, 0.6 / Math.max(0.001, transitionDuration)))
 
   // 实时机器人替换静态设备节点（robot.id == 拓扑 device node id），避免重复绘制。
   const liveRobotIdSignature = robots.map((robot) => robot.id).sort().join('|')
@@ -1287,7 +2147,7 @@ function Simulation3DScene({
       })
     }
     return { boxes, blocks: [...blockMap.values()], blockLookup, dropGoods }
-  }, [robots, spec, tasks, topology.cells, topology.grid, topology.nodes, topology.zones])
+  }, [robots, spec, tasks, topology])
 
 
   // 取货高亮：机器人当前处于 CTU 取货阶段时，高亮其当前取货行对应的商品箱。
@@ -1424,6 +2284,21 @@ function Simulation3DScene({
           rows={topology.grid.rows}
           floorY={Math.max(0, spec.floors.indexOf(block.floor)) * FLOOR_HEIGHT}
           activeBlocks={activeBlocksRef}
+          paused={paused}
+          speedMultiplier={visualSpeedMultiplier}
+        />
+      ))}
+
+      {simulationConveyorVisuals.blocks.map((block) => (
+        <SpinningRollerBlock
+          key={`simulation-test-${block.key}`}
+          block={block}
+          cols={topology.grid.cols}
+          rows={topology.grid.rows}
+          floorY={Math.max(0, spec.floors.indexOf(block.floor)) * FLOOR_HEIGHT}
+          activeBlocks={activeBlocksRef}
+          paused={paused}
+          speedMultiplier={visualSpeedMultiplier}
         />
       ))}
 
@@ -1462,6 +2337,11 @@ function Simulation3DScene({
       {shuttleLifts.map((lift) => {
         const task = transferTaskByLift.get(lift.lift_id)
         const robot = task?.assignedRobotId ? robots.find((item) => item.id === task.assignedRobotId) : undefined
+        const simulationTestLiftActive = simulationTestState?.lift.deviceId === lift.lift_id
+          && simulationTestState.lift.occupiedCargoIds.length > 0
+        const simulationTestRobot = simulationTestLiftActive
+          ? robots.find((item) => item.id === simulationTestState.shuttle.deviceId)
+          : undefined
         return (
           <ShuttleLiftView
             key={lift.lift_id}
@@ -1469,12 +2349,49 @@ function Simulation3DScene({
             cols={spec.cols}
             rows={spec.rows}
             activeTask={task}
-            activeRobot={robot}
+            activeRobot={simulationTestRobot ?? robot}
+            simulationTestActive={simulationTestLiftActive}
+            simulationTestPhase={simulationTestState?.cargo.find(
+              (cargo) => cargo.cargoId === simulationTestState.lift.occupiedCargoIds[0],
+            )?.status}
             paused={paused}
-            transitionDuration={transitionDuration}
+            transitionDuration={visualTransitionDuration}
           />
         )
       })}
+
+      <PickingArmAuthoritativeLayer
+        topology={topology}
+        activeFloor={activeFloor}
+        layoutPlan={pickingArmLayoutPlan}
+        simulationTest={simulationTestState}
+        paused={paused}
+        transitionDuration={visualTransitionDuration}
+        highlighted={pickingArmFocused}
+      />
+
+      <SimulationOnlyHandoffLayer
+        handoff={simulationTestHandoff}
+        showLabels={showSimulationDebugLabels}
+      />
+
+      <SimulationTestBreakPackLayer
+        leftFlow={simulationTestState?.leftFlow}
+        showLabel={showSimulationDebugLabels}
+      />
+
+      <AuthoritativeSimulationCargoLayer
+        cargo={simulationTestCargo}
+        armActiveCargoId={simulationTestState?.arm.activeCargoId}
+        paused={paused}
+        transitionDuration={visualTransitionDuration}
+        motionEpoch={simulationMotionEpoch}
+        conveyorBlockByNode={simulationConveyorVisuals.blockByNode}
+        activeBlocks={activeBlocksRef}
+        groundConveyorPath={simulationConveyorPaths.ground}
+        upperConveyorPath={simulationConveyorPaths.upper}
+        showTrackDebug={showSimulationDebugLabels}
+      />
 
       {routePoints.length > 1 ? (
         <Line
@@ -1515,17 +2432,86 @@ function Simulation3DScene({
             spec.cols,
             spec.rows,
           )
-        return (
-          <RobotGroup key={robot.id} position={position} onClick={() => onSelectRobot?.(robot.id)} paused={paused} transitionDuration={transitionDuration}>
+        const robotVisual = (
+          <>
             {robot.type === 'ctu' ? (
               <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} paused={paused} />
-            ) : <ShuttleCart />}
+            ) : <ShuttleCart carrying={robot.carrying?.[0]} />}
             {robot.id === (selectedRobotId || focusRobot?.id) ? (
               <RobotFocusMarker
                 robotId={robot.id}
                 phase={`${robot.phaseLabel || focusTask?.phaseLabel || '执行任务'} · ${robot.load}/${robot.capacity} 箱`}
               />
             ) : null}
+          </>
+        )
+        const isAuthoritativeTestShuttle = robot.type === 'shuttle'
+          && simulationTestState?.shuttle.deviceId === robot.id
+          && simulationTestState.shuttle.outboundFrames?.length
+          && simulationTestState.shuttle.returnFrames?.length
+        if (isAuthoritativeTestShuttle && simulationTestState) {
+          const returning = simulationTestState.shuttle.phase === 'returning'
+          const frames = returning
+            ? simulationTestState.shuttle.returnFrames!
+            : simulationTestState.shuttle.outboundFrames!
+          return (
+            <ShuttleTrackGroup
+              key={`${simulationMotionEpoch}:${robot.id}`}
+              position={position}
+              frames={frames}
+              routeIndex={simulationTestState.shuttle.routeIndex ?? 0}
+              routeKey={`${simulationMotionEpoch}:${returning ? 'return' : 'outbound'}`}
+              paused={paused}
+              transitionDuration={Math.min(1.2, Math.max(0.08, transitionDuration))}
+              onClick={() => onSelectRobot?.(robot.id)}
+              debug={showSimulationDebugLabels}
+              cargoOwner={(robot.carrying?.[0] as GoodsSlot & { cargoId?: string } | undefined)?.cargoId ?? 'none'}
+              liftId={simulationTestState.lift.occupiedCargoIds.length
+                ? simulationTestState.lift.deviceId
+                : 'none'}
+            >
+              {robotVisual}
+            </ShuttleTrackGroup>
+          )
+        }
+        const leftCtu = simulationTestState?.leftFlow?.ctu
+        const isAuthoritativeTestCtu = robot.type === 'ctu'
+          && leftCtu?.deviceId === robot.id
+        if (isAuthoritativeTestCtu && leftCtu) {
+          const returning = leftCtu.routeName === 'to_storage'
+          const toStation = leftCtu.routeName === 'to_station'
+          const frames = returning
+            ? leftCtu.toStorageFrames
+            : toStation
+              ? leftCtu.toStationFrames
+              : leftCtu.toSourceFrames
+          return (
+            <ShuttleTrackGroup
+              key={`${simulationMotionEpoch}:${robot.id}`}
+              position={position}
+              frames={frames}
+              routeIndex={leftCtu.routeIndex}
+              routeKey={`${simulationMotionEpoch}:ctu:${leftCtu.routeName}`}
+              paused={paused}
+              transitionDuration={Math.min(1.2, Math.max(0.08, transitionDuration))}
+              onClick={() => onSelectRobot?.(robot.id)}
+              debug={showSimulationDebugLabels}
+              cargoOwner={leftCtu.activeCargoId ?? 'none'}
+            >
+              <group rotation={[0, Math.PI, 0]}>{robotVisual}</group>
+            </ShuttleTrackGroup>
+          )
+        }
+        return (
+          <RobotGroup
+            key={`${simulationMotionEpoch}:${robot.id}`}
+            position={position}
+            onClick={() => onSelectRobot?.(robot.id)}
+            paused={paused}
+            transitionDuration={visualTransitionDuration}
+            orientToMotion={robot.type === 'shuttle'}
+          >
+            {robotVisual}
           </RobotGroup>
         )
       })}
@@ -1542,6 +2528,16 @@ function Simulation3DScene({
         mouseButtons={{ LEFT: undefined, MIDDLE: MOUSE.ROTATE, RIGHT: MOUSE.PAN }}
       />
       <CameraTaskFocus target={focusTargetPosition} request={focusRequest} />
+      <CameraTaskFocus
+        target={pickingArmLayoutPlan?.pickingArm && activeFloor === '1F'
+          ? [
+              worldX(pickingArmLayoutPlan.pickingArm.installation.col, spec.cols),
+              3.1,
+              worldZ(pickingArmLayoutPlan.pickingArm.installation.row, spec.rows),
+            ]
+          : null}
+        request={pickingArmFocusRequest}
+      />
       <CameraRobotFollow
         enabled={followSelectedRobot}
         paused={paused}

@@ -6060,6 +6060,8 @@
     },
     {
       "id": "cell-r86-c52",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 52,
@@ -6452,6 +6454,8 @@
     },
     {
       "id": "cell-r86-c50",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 50,
@@ -6732,6 +6736,8 @@
     },
     {
       "id": "cell-r86-c54",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 54,
@@ -6788,6 +6794,8 @@
     },
     {
       "id": "cell-r86-c58",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 58,
@@ -6844,6 +6852,8 @@
     },
     {
       "id": "cell-r86-c56",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 56,
@@ -6956,6 +6966,8 @@
     },
     {
       "id": "cell-r86-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 86,
       "col": 60,
@@ -11114,6 +11126,8 @@
     },
     {
       "id": "cell-r88-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 88,
       "col": 60,
@@ -11170,6 +11184,8 @@
     },
     {
       "id": "cell-r90-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 90,
       "col": 60,
@@ -11226,6 +11242,8 @@
     },
     {
       "id": "cell-r94-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 94,
       "col": 60,
@@ -11282,6 +11300,8 @@
     },
     {
       "id": "cell-r96-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 96,
       "col": 60,
@@ -11338,6 +11358,8 @@
     },
     {
       "id": "cell-r100-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 100,
       "col": 60,
@@ -11394,6 +11416,8 @@
     },
     {
       "id": "cell-r98-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 98,
       "col": 60,
@@ -11450,6 +11474,8 @@
     },
     {
       "id": "cell-r92-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 92,
       "col": 60,
@@ -11506,6 +11532,8 @@
     },
     {
       "id": "cell-r102-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 102,
       "col": 60,
@@ -11982,6 +12010,8 @@
     },
     {
       "id": "cell-r104-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 104,
       "col": 60,
@@ -12150,6 +12180,8 @@
     },
     {
       "id": "cell-r106-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "south", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 106,
       "col": 60,
@@ -12262,6 +12294,8 @@
     },
     {
       "id": "cell-r108-c60",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "north", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 108,
       "col": 60,
@@ -12878,6 +12912,8 @@
     },
     {
       "id": "cell-r108-c62",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 108,
       "col": 62,
@@ -12934,6 +12970,8 @@
     },
     {
       "id": "cell-r108-c64",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 108,
       "col": 64,
@@ -12990,6 +13028,8 @@
     },
     {
       "id": "cell-r108-c66",
+      "conveyorDecks": {"lower": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}, "upper": {"enabled": true, "inputSide": "west", "outputSide": "east", "role": "outbound", "speed": 1.0, "capacity": 1}},
+      "conveyorMode": "independent",
       "floor": "1F",
       "row": 108,
       "col": 66,
@@ -63177,6 +63217,9 @@
     {
       "id": "turn_transfer-13",
       "type": "turn_transfer",
+      "transferDeck": "upper",
+      "transferInputSide": "north",
+      "transferOutputSide": "east",
       "floor": "1F",
       "row": 108,
       "col": 60,
@@ -63187,6 +63230,9 @@
     {
       "id": "turn_transfer-15",
       "type": "turn_transfer",
+      "transferDeck": "upper",
+      "transferInputSide": "west",
+      "transferOutputSide": "south",
       "floor": "1F",
       "row": 86,
       "col": 60,

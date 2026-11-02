@@ -17,6 +17,19 @@ describe('shuttleTrackWorldPosition', () => {
     expect(liftB[2]).toBe(-81)
   })
 
+  it('keeps 2x2 ShuttleGraph anchors on the same track-centre coordinate system', () => {
+    const origin = shuttleTrackWorldPosition(96, 31, 2, 129, 216)
+    const nextRow = shuttleTrackWorldPosition(98, 31, 2, 129, 216)
+    const nextCol = shuttleTrackWorldPosition(96, 33, 2, 129, 216)
+
+    expect(nextRow[0]).toBe(origin[0])
+    expect(nextRow[2] - origin[2]).toBe(-2)
+    expect(nextCol[0] - origin[0]).toBe(2)
+    expect(nextCol[2]).toBe(origin[2])
+    expect(nextRow[1]).toBe(origin[1])
+    expect(nextCol[1]).toBe(origin[1])
+  })
+
   it('renders a turn transfer only on its selected conveyor deck', () => {
     let topology = paintCell(emptyTopology(), 'conveyor', 0, 0).topology
     topology = {

@@ -12,6 +12,7 @@ from .pathfinding import cell_id, cell_position, node_position
 INVENTORY_SEED = 20261016
 # 镜像 simulation.CTU_RACK_LAYERS，避免 goods -> simulation 的循环导入。
 CTU_LAYERS = 17
+SIMULATION_INVENTORY_SOURCE = "simulation_catalog_seed"
 
 # 商品目录静态 JSON（由 scripts/extract_sku_catalog.py 从真实 SKU xlsx 抽取）。
 BACKEND_DIR = Path(__file__).resolve().parents[2]  # web/backend
@@ -119,6 +120,8 @@ def build_inventory(
                 "material": sku.get("material"),
                 "surfaceTreatment": sku.get("surfaceTreatment"),
                 "qty": rng.randint(1, 5),
+                "dataSource": SIMULATION_INVENTORY_SOURCE,
+                "authoritative": False,
             }
         )
     return inventory

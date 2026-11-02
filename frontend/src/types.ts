@@ -124,6 +124,121 @@ export interface TopologyPayload {
   nodes: TopologyNode[]
 }
 
+export type ArmPreviewStatus = 'PASS' | 'PARTIAL' | 'BLOCKED'
+
+export interface LayoutPosition {
+  floor: string
+  row: number
+  col: number
+  level: number
+}
+
+export interface PickingArmEndpoint {
+  nodeId: string
+  topologyCellId: string
+  position: LayoutPosition
+  beltHeight: number
+  deckIndex: number
+  direction: ConveyorDirection
+  provenance: 'topology' | 'proposed'
+  validationStatus: ArmPreviewStatus
+  evidence: string[]
+}
+
+export interface PickingArmConveyorStep {
+  cellId: string
+  position: LayoutPosition
+  direction: ConveyorDirection
+  beltHeight: number
+  deviceIds: string[]
+  transitionToNext: 'conveyor' | 'device_transfer' | 'endpoint'
+  transferDeviceId?: string | null
+  directionSource: 'topology'
+}
+
+export interface RightWarehouseMergePoint {
+  mergePointId: string
+  topologyNodeId: string
+  row: number
+  col: number
+  level: number
+  capacity: number
+  occupiedCargoIds: string[]
+  acceptedCargoIds: string[]
+  status: 'available' | 'waiting' | 'full' | 'blocked'
+  acceptedWarehouse: 'right'
+  cargoOrderIds: Record<string, string>
+}
+
+export interface PickingArmTransportCargo {
+  orderId: string
+  cargoId: string
+  skuId: string
+  quantityCases: number
+  unitsPerCase: number
+  quantityBase: number
+  sourceLocationId: string
+  currentNodeId: string
+  targetMergePointId: string
+  transportStatus: 'queued' | 'arm_transfer' | 'conveyor_moving' | 'waiting_at_merge' | 'arrived' | 'rejected'
+  sourceWarehouse: 'right'
+}
+
+export interface PickingArmKinematics {
+  upperArmLength: number
+  forearmLength: number
+  shoulderHeight: number
+  baseRadius: number
+  upperArmThickness: number
+  forearmThickness: number
+  jointRadius: number
+  gripperScale: number
+  safeTravelHeight: number
+  linkCollisionRadius: number
+}
+
+export interface PickingArmLayout {
+  armId: string
+  status: 'proposed'
+  validationStatus: ArmPreviewStatus
+  installation: LayoutPosition
+  mountHeight: number
+  workRadius: number
+  kinematics: PickingArmKinematics
+  pickup: PickingArmEndpoint
+  dropoff: PickingArmEndpoint
+  liftBId: string
+  liftBPosition: LayoutPosition
+  liftBClearanceCells: number
+  downstreamCellId: string
+  downstreamStatus: ArmPreviewStatus
+  previewConveyorPath: PickingArmConveyorStep[]
+  previewEndpointId: string
+  previewPathStatus: ArmPreviewStatus
+  previewStopReason: string
+  mergePoint: RightWarehouseMergePoint
+  actionSequence: string[]
+  requiredAuthoritativeSignals: string[]
+  canDeclareDelivery: boolean
+  evidence: string[]
+}
+
+export interface TransportLayoutPlan {
+  planId: string
+  schemaVersion: string
+  topologyId: string
+  topologyRevision: string
+  overallStatus: ArmPreviewStatus
+  pickingArm: PickingArmLayout
+  summary: {
+    previewOnly: boolean
+    inventoryMutated: boolean
+    ordersCompleted: boolean
+    formalTopologyMutated: boolean
+    conveyorNodeCount: number
+  }
+}
+
 export interface StoredRecord<T> {
   id: string
   name: string
@@ -443,6 +558,7 @@ export type SimulationOrderStatus =
   | 'returning'
   | 'cancelled'
   | 'completed'
+  | 'shortage'
   | 'exception'
 
 export interface SimulationOrderLineInput {
@@ -450,7 +566,73 @@ export interface SimulationOrderLineInput {
   skuId: string
   skuName: string
   spec?: string | null
-  quantity: number
+  quantity?: number
+  quantityBase?: number
+  unitsPerCase?: number
+}
+
+export interface RightCasePreparationTask {
+  orderId: string
+  taskId: string
+  cargoId: string
+  skuId: string
+  sourceWarehouse: 'right'
+  sourceLocationId: string
+  destinationHandoffId: string
+  quantityCases: number
+  quantityBase: number
+  status: 'waiting_pick' | 'shuttle_picking' | 'shuttle_transporting' | 'lift_waiting' | 'lift_moving' | 'shuttle_to_handoff' | 'waiting_dock' | 'dock_transferring' | 'conveyor_transporting' | 'waiting_arm' | 'arm_processing' | 'merge_conveyor_transporting' | 'merge_arrived' | 'cancelled'
+  authoritative: false
+  currentNodeId?: string
+  currentDeviceId?: string | null
+  simulationStateAuthoritative?: boolean
+  preview?: false
+}
+
+export interface LeftBreakPackPreparationTask {
+  orderId: string
+  taskId: string
+  skuId: string
+  sourceWarehouse: 'left'
+  sourceLocationId: string
+  sourceQuantityBase: number
+  pickQuantityBase: number
+  returnQuantityBase: number
+  status: 'waiting_split' | 'waiting_pick' | 'ctu_picking' | 'ctu_transporting' | 'station_receiving' | 'break_pack_opening' | 'break_pack_picking' | 'break_pack_confirming' | 'waiting_return' | 'ctu_returning' | 'returning_to_storage' | 'returned' | 'cancelled'
+  authoritative: false
+}
+
+export interface OrderLineAllocation {
+  orderId: string
+  lineId: string
+  skuId: string
+  quantityBase: number
+  unitsPerCase: number
+  rightQuantityCases: number
+  rightQuantityBase: number
+  leftSourceCases: number
+  leftSourceQuantityBase: number
+  leftPickQuantityBase: number
+  leftReturnQuantityBase: number
+  allocationStatus: 'ready' | 'shortage'
+  shortageQuantityBase: number
+  inventorySufficient: boolean
+  packagingSource: string
+  packagingVerificationStatus: string
+  rightTasks: RightCasePreparationTask[]
+  leftTasks: LeftBreakPackPreparationTask[]
+}
+
+export interface OrderFulfillmentPlan {
+  orderId: string
+  allocationStatus: 'ready' | 'shortage'
+  allocations: OrderLineAllocation[]
+  tasks: Array<RightCasePreparationTask | LeftBreakPackPreparationTask>
+  inventoryMutated: false
+  inventoryReserved: false
+  previewCargoAccepted: false
+  canDeclareCompleted: false
+  requestFingerprint: string
 }
 
 export interface SimulationOrderInput {
@@ -461,6 +643,7 @@ export interface SimulationOrderInput {
   targetStation: string
   createdAt: string
   lines: SimulationOrderLineInput[]
+  fulfillmentPlan?: OrderFulfillmentPlan
 }
 
 export interface SimulationOrder extends SimulationOrderInput {
@@ -478,7 +661,7 @@ export interface SimulationOrder extends SimulationOrderInput {
   cancelledTick?: number | null
   cancelReason?: string | null
   decomposition?: {
-    stage: 'inventory_matched' | 'tasks_generated' | 'dispatching' | 'executing' | 'returning' | 'cancelled' | 'completed' | 'exception'
+    stage: 'inventory_matched' | 'tasks_generated' | 'tasks_prepared' | 'shortage' | 'dispatching' | 'executing' | 'waiting_handoff' | 'returning' | 'cancelled' | 'completed' | 'exception'
     requestedQuantity: number
     allocatedQuantity: number
     missingQuantity: number
@@ -500,11 +683,171 @@ export interface GoodsCatalogSku {
   material?: string | null
   largeCategory?: string | null
   subclass?: string | null
+  unitsPerCase?: number | null
+  packagingSource?: string | null
+  verificationStatus?: 'verified' | 'human_verified' | 'simulation_test_confirmed' | string | null
+  packagingScope?: 'formal' | 'simulation_test' | string | null
 }
 
 export interface GoodsCatalog {
   version: number
   skus: GoodsCatalogSku[]
+}
+
+export interface PackagingSpecificationRecord {
+  skuId: string
+  unitsPerCase: number
+  packagingSource: string
+  verificationStatus: string
+  scope: 'formal' | 'simulation_test' | 'simulation' | string
+  dataScope?: 'formal' | 'simulation_test' | 'simulation' | string
+  baseUom?: string
+  caseUom?: string
+  scenarioId?: string
+  profileId?: string
+  verifiedAt?: string
+  notes?: string
+}
+
+export interface SimulationInventoryRecord {
+  inventoryRecordId: string
+  sourceWarehouse: 'left' | 'right'
+  sourceLocationId: string
+  locationType: 'ctu_storage' | 'shuttle_storage'
+  skuId: string
+  quantityCases: number
+  dataSource: 'simulation'
+  verificationStatus: string
+  topologyMapping: Record<string, string | number>
+}
+
+export interface SimulationInventoryProfile {
+  schemaVersion: string
+  profileId: string
+  name: string
+  dataSource: 'simulation'
+  isolationMode: 'run_local_snapshot'
+  topologyId: string
+  topologyRevision: string
+  inventory: SimulationInventoryRecord[]
+  packaging: PackagingSpecificationRecord[]
+  formalInventoryMutated: false
+}
+
+export interface GeneralSimulationAudit {
+  profileId: string
+  scenarioId: string
+  status: 'PASS' | 'SHORTAGE'
+  allocationStatus: 'ready' | 'shortage'
+  runMode: 'simulation'
+  dataSource: 'simulation'
+  isolationMode: 'run_local_snapshot'
+  topologyId: string
+  topologyRevision: string
+  supportedSkus: PackagingSpecificationRecord[]
+  inventory: SimulationInventoryRecord[]
+  orders: SimulationOrderInput[]
+  plans: OrderFulfillmentPlan[]
+  plan: OrderFulfillmentPlan
+  formalInventoryMutated: false
+}
+
+export interface PackagingSpecificationRegistry {
+  schemaVersion: string
+  records: PackagingSpecificationRecord[]
+}
+
+export interface FulfillmentTestScenarioAudit {
+  scenarioId: string
+  status: 'PASS' | 'BLOCKED'
+  dataSource: 'simulation_test'
+  isolationMode: 'run_local_snapshot'
+  topologyId: string
+  topologyRevision: string
+  sku: PackagingSpecificationRecord
+  inventory: Array<{
+    inventoryRecordId: string
+    sourceWarehouse: 'left' | 'right'
+    sourceLocationId: string
+    locationType: 'ctu_storage' | 'shuttle_storage'
+    skuId: string
+    quantityCases: number
+    dataSource: 'simulation_test'
+    verificationStatus: string
+    topologyMapping: Record<string, string | number>
+  }>
+  locationEvidence: Record<string, unknown>
+  order: SimulationOrderInput
+  plan: OrderFulfillmentPlan
+  rightHandoff: {
+    formalRouteStatus: 'BLOCKED'
+    simulationRouteStatus: 'PASS_SIMULATION_ONLY'
+    formalBlockers: string[]
+    existingDockAssessment: {
+      deviceId: string
+      validationStatus: 'blocked'
+      reason: string
+    }
+    sourceTrackNodeId: string
+    provenLiftExitTrackNodeId: string
+    handoffTrackNodeId: string
+    armReceiveNodeId: string
+    shuttlePath: string[]
+    egressPath: string[]
+    chosenLift: string
+    conveyorPath: string[]
+    facilities: Array<{
+      deviceId: string
+      deviceType: string
+      inputNodeId: string
+      outputNodeId: string
+      sourceLevel: number
+      targetLevel: number
+      capacity: number
+      transferDuration: number
+      dataSource: 'simulation_test'
+      validationStatus: 'simulation_only'
+      existingTopologyDeviceId?: string
+      inputSide?: string
+      outputSide?: string
+      geometry: {
+        floor: string
+        beltHeight: number
+        pathCells: Array<{ row: number; col: number }>
+        worldPoints: Array<{ x: number; y: number; z: number }>
+        visualStyle: string
+      }
+    }>
+    authority: {
+      stateOwner: 'SimulationService'
+      requiresUnifiedTick: true
+      previewSignalsAccepted: false
+      animationCanCompleteBusinessTask: false
+    }
+    cargo: Array<{
+      cargoId: string
+      orderId: string
+      taskId: string
+      skuId: string
+      quantityCases: number
+      quantityBase: number
+      sourceLocationId: string
+      currentNodeId: string
+      currentDeviceId: string | null
+      destinationNodeId: string
+      status: string
+      dataSource: 'simulation_test'
+      authoritative: false
+      preview: false
+    }>
+    segments: Array<{
+      segmentId: string
+      validationStatus: 'physical_validated' | 'simulation_only' | 'blocked'
+      reason: string
+    }>
+  }
+  businessGuards: Record<string, boolean | string>
+  knownPhysicalGaps: string[]
 }
 
 export interface SimulationAlert {
@@ -535,17 +878,21 @@ export interface GoodsSlot {
   material?: string | null
   surfaceTreatment?: string | null
   qty?: number
+  dataSource?: 'simulation_catalog_seed' | string
+  authoritative?: boolean
 }
 
 export interface GoodsInventory {
   topologyId: string
+  dataSource?: 'simulation_catalog_seed' | string
+  authoritative?: boolean
   slots: GoodsSlot[]
 }
 
 export interface SimulationState {
   id: string
   status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed'
-  stopReason?: 'user' | 'safety_limit' | 'transfer_failed' | 'task_failed' | 'runtime_error' | null
+  stopReason?: 'user' | 'safety_limit' | 'transfer_failed' | 'task_failed' | 'runtime_error' | 'simulation_test_waiting_arm' | 'simulation_test_merge_arrived' | 'simulation_test_quantity_accounted' | null
   runtimeError?: {
     type: string
     message: string
@@ -557,8 +904,14 @@ export interface SimulationState {
   tickIntervalSeconds?: number
   eventCount?: number
   topologyId: string
+  topologyRevision?: string
+  runMode?: 'simulation_test' | string
+  scenarioId?: string
+  dataSource?: 'simulation_test' | string
+  simulationStateAuthoritative?: boolean
   robots: SimulationRobot[]
   tasks: SimulationTask[]
+  fulfillmentTasks?: Array<RightCasePreparationTask | LeftBreakPackPreparationTask>
   orders?: SimulationOrder[]
   inventory?: GoodsSlot[]
   shuttleDocks?: ShuttleDockState[]
@@ -576,6 +929,7 @@ export interface SimulationState {
     phase: string
     goodsCount: number
   }>
+  simulationTest?: SimulationTestRunState
   trafficMonitor?: {
     waitForEdges: Array<{
       waiter: string
@@ -607,6 +961,258 @@ export interface SimulationState {
   }
   createdAt: string
   updatedAt: string
+}
+
+export interface SimulationTestPosition {
+  nodeId: string
+  row?: number | null
+  col?: number | null
+  level: number
+  worldX: number
+  worldY: number
+  worldZ: number
+}
+
+export interface SimulationTestShuttleFrame {
+  cellId: string
+  level: number
+  stage: 'track' | 'enter_lift' | 'lift_moving' | 'exit_lift'
+  nodeId: string
+  position: SimulationTestPosition
+  index: number
+}
+
+export interface SimulationTestCargoState {
+  cargoId: string
+  orderId: string
+  taskId: string
+  skuId: string
+  quantityCases: number
+  quantityBase: number
+  sourceLocationId: string
+  currentNodeId: string
+  currentDeviceId: string | null
+  destinationNodeId: string
+  status: RightCasePreparationTask['status']
+  dataSource: 'simulation_test'
+  authoritative: false
+  preview: false
+  simulationStateAuthoritative: true
+  previousPosition: SimulationTestPosition
+  currentPosition: SimulationTestPosition
+  positionTick: number
+  conveyorIndex?: number | null
+  mergeConveyorIndex?: number | null
+  movementState?: {
+    fromNodeId: string
+    toNodeId: string
+    segmentProgress: number
+    movementDurationSeconds: number
+    transportState: string
+    tick: number
+  }
+  waitingTicks: number
+  blockedReason?: string | null
+}
+
+export interface SimulationTestTransportEvent {
+  runId: string
+  tick: number
+  eventId: string
+  eventType: string
+  orderId: string
+  taskId: string
+  cargoId: string
+  fromNodeId: string | null
+  toNodeId: string | null
+  deviceId: string | null
+  quantityBase: number
+  dataSource: 'simulation_test'
+}
+
+export interface SimulationTestLeftCargoState {
+  cargoId: string
+  parentCargoId?: string
+  orderId: string
+  taskId: string
+  skuId: string
+  quantityCases: number
+  quantityBase: number
+  originalQuantityBase?: number
+  pickedQuantityBase?: number
+  remainingQuantityBase?: number
+  sourceLocationId: string
+  currentNodeId: string
+  currentDeviceId: string | null
+  status: string
+  caseType: 'full_case' | 'partial_case' | 'empty_case'
+  dataSource: 'simulation_test' | 'simulation'
+  authoritative: false
+  preview: false
+  simulationStateAuthoritative: true
+  currentPosition: SimulationTestPosition
+  previousPosition: SimulationTestPosition
+}
+
+export interface SimulationTestLeftFlowState {
+  status: string
+  taskId: string
+  pickQuantityBase?: number
+  returnQuantityBase?: number
+  sourceLocationId: string
+  sourceCellId: string
+  sourceStopCellId: string
+  sourcePosition: SimulationTestPosition
+  cargo: SimulationTestLeftCargoState
+  partialCase: SimulationTestLeftCargoState | null
+  ctu: {
+    deviceId: string
+    capacity: 1
+    phase: string
+    phaseTicks: number
+    activeCargoId: string | null
+    routeName: 'to_source' | 'to_station' | 'to_storage'
+    routeIndex: number
+    toSourceFrames: SimulationTestShuttleFrame[]
+    toStationFrames: SimulationTestShuttleFrame[]
+    toStorageFrames: SimulationTestShuttleFrame[]
+    currentPosition: SimulationTestPosition
+    dataSource: 'simulation_test' | 'simulation'
+  }
+  station: {
+    deviceId: string
+    deviceType: 'break_pack_station'
+    positionCellId: string
+    inputNodeId: string
+    outputNodeId: string
+    capacity: 1
+    reservedCargoIds: string[]
+    occupiedCargoIds: string[]
+    phase: string
+    phaseTicks: number
+    position: SimulationTestPosition
+    dataSource: 'simulation_test' | 'simulation'
+    validationStatus: 'simulation_only'
+  }
+  ledger: {
+    initialSourceQuantityBase: number
+    sourceQuantityBase: number
+    ctuQuantityBase: number
+    stationQuantityBase: number
+    pickedQuantityBase: number
+    returnedQuantityBase: number
+    returnApplied: boolean
+  }
+  quantityAudit: {
+    sourceConserved: boolean
+    orderQuantityAccounted: boolean
+  }
+}
+
+export interface SimulationTestRunState {
+  scenarioId: string
+  runMode: 'simulation_test' | 'simulation'
+  dataSource: 'simulation_test' | 'simulation'
+  topologyRevision: string
+  simulationStateAuthoritative: true
+  formalRouteStatus: 'BLOCKED'
+  simulationRouteStatus: 'PASS_SIMULATION_ONLY'
+  handoffContract?: FulfillmentTestScenarioAudit['rightHandoff']
+  syntheticTimingDisclosure: string
+  order: {
+    orderId: string
+    quantityBase: number
+    rightQuantityBase: number
+    leftSourceQuantityBase: number
+    leftPickQuantityBase: number
+    leftReturnQuantityBase: number
+    status: 'both_sides_transporting' | 'waiting_left_completion' | 'waiting_right_completion' | 'simulation_test_quantity_accounted' | 'right_transporting' | 'waiting_arm' | 'right_merge_arrived'
+    canDeclareCompleted: false
+    formalOrderCompleted?: false
+    physicalDeliveryConfirmed?: false
+    rightMergeAcceptedQuantityBase?: number
+    leftPickedQuantityBase?: number
+    leftReturnedQuantityBase?: number
+    quantityAccounted?: number
+  }
+  inventory: {
+    isolationMode: 'run_local_snapshot'
+    initializedOnce: true
+    right: {
+      initialCases: number
+      availableCases: number
+      inTransitCases: number
+      waitingArmCases: number
+      mergeArrivedCases: number
+    }
+    left: { sourceLocationId: string | null; sourceQuantityBase: number; pickQuantityBase: number; returnQuantityBase: number; status: string; dataSource: 'simulation_test' | 'simulation' }
+  }
+  leftFlow?: SimulationTestLeftFlowState
+  leftFlows?: SimulationTestLeftFlowState[]
+  cargo: SimulationTestCargoState[]
+  shuttle: {
+    deviceId: string
+    capacity: number
+    occupiedCargoIds: string[]
+    activeCargoId?: string | null
+    phase: string
+    routeIndex?: number
+    outboundFrames?: SimulationTestShuttleFrame[]
+    returnFrames?: SimulationTestShuttleFrame[]
+    currentPosition?: SimulationTestPosition
+  }
+  lift: { deviceId: string; capacity: number; occupiedCargoIds: string[]; dataSource: string; validationStatus: 'simulation_only' }
+  facilities: Array<FulfillmentTestScenarioAudit['rightHandoff']['facilities'][number] & {
+    durationTicks: number
+    occupiedCargoIds: string[]
+    queueCargoIds: string[]
+  }>
+  conveyor: {
+    path: string[]
+    occupiedByBlock: Record<string, string | null>
+    capacityPerBlock: 1
+    beltHeight?: number
+    gridRows: number
+    gridCols: number
+  }
+  armInfeed: { nodeId: string; capacity: number; occupiedCargoIds: string[]; status: string }
+  arm: {
+    armId: string
+    pickupNodeId: string
+    dropoffNodeId: string
+    capacity: 1
+    phase: 'idle' | 'approach' | 'grip' | 'lift' | 'rotate' | 'place' | 'release' | 'return_home'
+    phaseElapsedTicks: number
+    phaseDurationTicks: number
+    phaseProgress: number
+    activeCargoId: string | null
+    cargoPlacement: 'none' | 'pickup' | 'gripper'
+    completedCargoIds: string[]
+    dataSource: 'simulation_test'
+    simulationStateAuthoritative: true
+  }
+  mergeConveyor: {
+    path: Array<SimulationTestPosition & {
+      deviceIds: string[]
+      transferDeviceId?: string | null
+    }>
+    occupiedByNode: Record<string, string | null>
+    capacityPerBlock: 1
+  }
+  mergePoint: {
+    mergePointId: string
+    topologyNodeId: string
+    nodeId: string
+    capacity: number
+    acceptedCargoIds: string[]
+    acceptedCount: number
+    dataSource: 'simulation_test'
+  }
+  events: SimulationTestTransportEvent[]
+  resetGeneration: number
+  lastProgressTick: number
+  blockedTicks: number
+  diagnostics: Array<{ tick: number; reason: string; waitingCargoIds: string[] }>
 }
 
 export interface SimulationEvent {

@@ -16,6 +16,8 @@ import {
 } from 'lucide-react'
 import type {
   GoodsCatalogSku,
+  FulfillmentTestScenarioAudit,
+  SimulationInventoryProfile,
   SimulationOrder,
   SimulationOrderDispatchMode,
   SimulationOrderInput,
@@ -33,6 +35,7 @@ const statusLabels: Record<string, string> = {
   returning: '取消回库中',
   cancelled: '已取消',
   completed: '已完成',
+  shortage: '库存不足',
   exception: '异常',
 }
 
@@ -43,7 +46,7 @@ const dispatchModeLabels: Record<SimulationOrderDispatchMode, string> = {
 }
 
 function orderQuantity(order: OrderView) {
-  return order.lines.reduce((sum, line) => sum + line.quantity, 0)
+  return order.lines.reduce((sum, line) => sum + (line.quantityBase ?? line.quantity ?? 0), 0)
 }
 
 function orderStatus(order: OrderView) {
@@ -130,12 +133,14 @@ export function OrderRail({
                     </span>
                     <span className="simulation-order-progress"><i style={{ width: `${order.progress ?? 0}%` }} /></span>
                     <span className="simulation-order-card-meta">
-                      <small><Package2 size={12} />{order.lines.length} SKU · {orderQuantity(order)} 箱</small>
+                      <small><Package2 size={12} />{order.lines.length} SKU · {orderQuantity(order)} {order.lines.some((line) => line.quantityBase != null) ? '件' : '箱'}</small>
                       <small><MapPin size={12} />{order.targetStation}</small>
                     </span>
                     <span className="simulation-order-card-plan">
                       <GitBranch size={12} />
-                      {order.totalTasks ? `${order.totalTasks} 个 CTU 任务` : status === 'ready' ? '待下次启动' : dispatchModeLabels[order.dispatchMode ?? 'balanced']}
+                      {order.totalTasks
+                        ? `${order.totalTasks} 个${order.fulfillmentPlan ? '履约准备任务' : ' CTU 任务'}`
+                        : status === 'ready' ? '待下次启动' : dispatchModeLabels[order.dispatchMode ?? 'balanced']}
                       {order.decomposition?.activeVehicleIds.length ? ` · ${order.decomposition.activeVehicleIds.length} 辆已分配` : ''}
                     </span>
                   </button>
@@ -185,6 +190,16 @@ export function OrderComposer({
   catalog,
   catalogError = '',
   onRetryCatalog,
+  testScenario,
+  testScenarioLoading = false,
+  testScenarioError = '',
+  onSelectTestScenario,
+  onStartTestScenario,
+  testScenarioStarting = false,
+  testScenarioStartDisabled = false,
+  simulationProfile,
+  inventoryOverrides = [],
+  onInventoryOverride,
   onClose,
   onSubmit,
 }: {
@@ -192,6 +207,16 @@ export function OrderComposer({
   catalog: GoodsCatalogSku[]
   catalogError?: string
   onRetryCatalog?: () => void
+  testScenario?: FulfillmentTestScenarioAudit
+  testScenarioLoading?: boolean
+  testScenarioError?: string
+  onSelectTestScenario?: () => void
+  onStartTestScenario?: () => void | Promise<void>
+  testScenarioStarting?: boolean
+  testScenarioStartDisabled?: boolean
+  simulationProfile?: SimulationInventoryProfile
+  inventoryOverrides?: Array<{ inventoryRecordId: string; quantityCases: number }>
+  onInventoryOverride?: (inventoryRecordId: string, quantityCases: number) => void
   onClose: () => void
   onSubmit: (order: SimulationOrderInput) => void | Promise<void>
 }) {
@@ -205,6 +230,9 @@ export function OrderComposer({
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const selectedSku = catalog.find((sku) => sku.skuId === selectedSkuId)
+  const packagingVerified = selectedSku
+    ? ['verified', 'human_verified', 'simulation_configured'].includes(selectedSku.verificationStatus ?? '')
+    : false
 
   useEffect(() => {
     if (!catalog.length) {
@@ -226,25 +254,33 @@ export function OrderComposer({
       setFormError('所选商品已不在当前目录中，请重新选择。')
       return
     }
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
-      setFormError('商品数量必须是 1～20 箱的整数。')
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1_000_000) {
+      setFormError('订单基础件数必须是 1～1,000,000 的整数。')
+      return
+    }
+    if (!Number.isInteger(selectedSku.unitsPerCase) || Number(selectedSku.unitsPerCase) <= 0 || !selectedSku.packagingSource || !packagingVerified) {
+      setFormError(`SKU ${selectedSku.skuId} 缺少经过验证的每箱件数，不能执行整箱/拆零拆分。`)
+      return
+    }
+    if (lines.some((line) => line.quantity != null)) {
+      setFormError('按箱模板订单不能与基础件数订单混合；请删除模板明细后再添加。')
       return
     }
     const existing = lines.find((line) => line.skuId === selectedSku.skuId)
-    if (existing && existing.quantity + quantity > 20) {
-      setFormError(`同一 SKU 单个订单最多 20 箱；当前已有 ${existing.quantity} 箱。`)
-      return
-    }
     setLines((current) => {
       if (existing) {
-        return current.map((line) => line.skuId === selectedSku.skuId ? { ...line, quantity: line.quantity + quantity } : line)
+        return current.map((line) => line.skuId === selectedSku.skuId ? {
+          ...line,
+          quantityBase: (line.quantityBase ?? 0) + quantity,
+        } : line)
       }
       return [...current, {
         id: `line-${current.length + 1}-${Date.now()}`,
         skuId: selectedSku.skuId,
         skuName: selectedSku.name,
         spec: selectedSku.spec,
-        quantity,
+        quantityBase: quantity,
+        unitsPerCase: selectedSku.unitsPerCase as number,
       }]
     })
     setQuantity(1)
@@ -327,6 +363,37 @@ export function OrderComposer({
         <button type="button" onClick={onClose} aria-label="关闭新建订单"><X size={18} /></button>
       </div>
       <div className="simulation-order-composer-body">
+        {simulationProfile ? (
+          <section className="simulation-general-profile" aria-label="通用仿真库存配置">
+            <h3>通用订单仿真配置</h3>
+            <p className="muted-copy">
+              {simulationProfile.name} · Run-local snapshot · 不写正式库存
+            </p>
+            <div className="simulation-inventory-config-grid">
+              {simulationProfile.inventory.map((record) => {
+                const configured = inventoryOverrides.find((item) => item.inventoryRecordId === record.inventoryRecordId)
+                return (
+                  <label key={record.inventoryRecordId}>
+                    <span>{record.sourceWarehouse === 'right' ? '右仓 Shuttle' : '左仓 CTU'} · {record.skuId}</span>
+                    <small>{record.sourceLocationId} · {record.verificationStatus}</small>
+                    <input
+                      aria-label={`${record.inventoryRecordId} 仿真库存箱数`}
+                      type="number"
+                      min={0}
+                      max={1000000}
+                      value={configured?.quantityCases ?? record.quantityCases}
+                      onChange={(event) => onInventoryOverride?.(
+                        record.inventoryRecordId,
+                        Math.max(0, Number.parseInt(event.target.value || '0', 10)),
+                      )}
+                    />
+                  </label>
+                )
+              })}
+            </div>
+            <small>这里只调整独立仿真快照数量；SKU、包装、库位和拓扑映射均由后端白名单校验。</small>
+          </section>
+        ) : null}
         <section>
           <h3>快速模板</h3>
           <div className="simulation-order-templates">
@@ -339,7 +406,37 @@ export function OrderComposer({
             <button type="button" onClick={applyFleetTemplate}>
               <Bot size={17} /><span><b>多车协同订单</b><small>一张订单拆为 7 个 CTU 任务</small></span>
             </button>
+            <button type="button" onClick={onSelectTestScenario} disabled={!onSelectTestScenario || testScenarioLoading}>
+              <Boxes size={17} /><span><b>110件订单仿真测试</b><small>Run-local · simulation_test · 不写正式库存</small></span>
+            </button>
           </div>
+          {testScenarioError ? <p className="form-error" role="alert">测试场景加载失败：{testScenarioError}</p> : null}
+          {testScenario ? (
+            <div className="simulation-test-scenario-card" aria-label="110件订单仿真测试场景">
+              <header>
+                <strong>110件订单仿真测试</strong>
+                <b>{testScenario.rightHandoff.simulationRouteStatus}</b>
+              </header>
+              <dl>
+                <div><dt>订单需求</dt><dd>110件</dd></div>
+                <div><dt>右侧</dt><dd>5箱 / 100件</dd></div>
+                <div><dt>左侧</dt><dd>1箱 / 拆零10件 / 回库10件</dd></div>
+                <div><dt>数据来源</dt><dd>{testScenario.dataSource}</dd></div>
+                <div><dt>正式路线</dt><dd>{testScenario.rightHandoff.formalRouteStatus}</dd></div>
+                <div><dt>测试货箱</dt><dd>{testScenario.rightHandoff.cargo.length} 个独立 cargoId</dd></div>
+              </dl>
+              <p>接驳设施仅在本测试场景中可见；状态由后续统一 SimulationService Tick 推进，动画不能完成订单。</p>
+              <button
+                type="button"
+                className="accent-button simulation-test-start-button"
+                onClick={() => { void onStartTestScenario?.() }}
+                disabled={!onStartTestScenario || testScenarioStarting || testScenarioStartDisabled}
+              >
+                {testScenarioStarting ? '启动测试仿真中…' : '启动测试仿真'}
+              </button>
+              <small>只创建 simulation_test Run；正式物理运输仍为 BLOCKED，且不会写正式库存。</small>
+            </div>
+          ) : null}
         </section>
 
         <section>
@@ -383,15 +480,24 @@ export function OrderComposer({
               {!catalog.length ? <option value="">{catalogError ? '商品目录不可用' : '商品目录加载中…'}</option> : null}
               {catalog.map((sku) => <option key={sku.skuId} value={sku.skuId}>{sku.name}</option>)}
             </select>
-            <input aria-label="数量" type="number" min={1} max={20} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+            <input aria-label="订单基础件数" type="number" min={1} max={1000000} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
             <button type="button" onClick={addLine} disabled={!catalog.length}><Plus size={15} />添加</button>
           </div>
+          {selectedSku ? (
+            <p className={selectedSku.unitsPerCase && selectedSku.packagingSource && packagingVerified ? 'muted-copy' : 'form-error'}>
+              包装规格：{selectedSku.unitsPerCase && selectedSku.packagingSource && packagingVerified
+                ? `${selectedSku.unitsPerCase} 件/箱（${selectedSku.packagingSource} · ${selectedSku.verificationStatus}）`
+                : '未验证，禁止自动拆分'}
+            </p>
+          ) : null}
           {formError ? <p className="form-error" role="alert">{formError}</p> : null}
           <div className="simulation-order-lines">
             {lines.map((line) => (
               <div key={line.id}>
                 <span><b>{line.skuName}</b><small>{line.spec || line.skuId}</small></span>
-                <strong>× {line.quantity}</strong>
+                <strong>{line.quantityBase != null
+                  ? `${line.quantityBase} 件 · ${line.unitsPerCase} 件/箱`
+                  : `× ${line.quantity} 箱`}</strong>
                 <button type="button" onClick={() => setLines((current) => current.filter((item) => item.id !== line.id))} aria-label={`删除 ${line.skuName}`}><X size={14} /></button>
               </div>
             ))}
@@ -400,7 +506,7 @@ export function OrderComposer({
         </section>
       </div>
       <div className="simulation-order-composer-footer">
-        <span>{lines.length} 种SKU · {lines.reduce((sum, line) => sum + line.quantity, 0)} 箱 · {dispatchModeLabels[dispatchMode]}</span>
+        <span>{lines.length} 种SKU · {lines.reduce((sum, line) => sum + (line.quantityBase ?? line.quantity ?? 0), 0)} {lines.some((line) => line.quantityBase != null) ? '件' : '箱'} · {dispatchModeLabels[dispatchMode]}</span>
         <button className="accent-button" type="button" onClick={() => void submit()} disabled={!lines.length || submitting}>
           {submitting ? '提交中…' : '提交订单'}
         </button>
@@ -412,6 +518,7 @@ export function OrderComposer({
 const timelineStages = ['订单创建', '库存匹配', '任务拆解', 'CTU分配', '协同执行', '输送交付', '完成']
 
 function currentStage(order: OrderView) {
+  if (order.fulfillmentPlan) return order.fulfillmentPlan.allocationStatus === 'shortage' ? 2 : 3
   if (order.status === 'completed') return 6
   if (order.status === 'exception') return 1
   if (order.status === 'executing') {
@@ -437,6 +544,50 @@ export function OrderOrchestrationPanel({
   const allocated = decomposition?.allocatedQuantity ?? 0
   const assigned = tasks.filter((task) => task.assignedRobotId).length
   const strategy = order.dispatchMode ?? decomposition?.strategy ?? 'balanced'
+  if (order.fulfillmentPlan) {
+    const plan = order.fulfillmentPlan
+    return (
+      <section className="simulation-order-orchestration" aria-label="基础件数订单拆分">
+        <header>
+          <span><GitBranch size={15} /><b>整箱 / 拆零计划</b><small>仅任务准备，不扣库存</small></span>
+          <strong>{requested} 件 · {plan.allocationStatus === 'ready' ? '库存可满足' : '库存不足'}</strong>
+        </header>
+        <div className="simulation-fulfillment-allocations">
+          {plan.allocations.map((allocation) => (
+            <article key={allocation.lineId} className={allocation.inventorySufficient ? 'ready' : 'shortage'}>
+              <div>
+                <b>{allocation.skuId}</b>
+                <small>{allocation.quantityBase} 件 · {allocation.unitsPerCase} 件/箱</small>
+                <em>{allocation.inventorySufficient ? '库存足够' : `缺少 ${allocation.shortageQuantityBase} 件`}</em>
+              </div>
+              <dl>
+                <div><dt>右侧整箱</dt><dd>{allocation.rightQuantityCases} 箱 / {allocation.rightQuantityBase} 件</dd></div>
+                <div><dt>左侧来源</dt><dd>{allocation.leftSourceCases} 箱 / {allocation.leftSourceQuantityBase} 件</dd></div>
+                <div><dt>左侧拆零</dt><dd>{allocation.leftPickQuantityBase} 件</dd></div>
+                <div><dt>剩余回库</dt><dd>{allocation.leftReturnQuantityBase} 件</dd></div>
+              </dl>
+              <p>任务：{allocation.rightTasks.length} 个右侧整箱 · {allocation.leftTasks.length} 个左侧拆零</p>
+              {(allocation.rightTasks.length || allocation.leftTasks.length) ? (
+                <ul className="simulation-fulfillment-task-list">
+                  {allocation.rightTasks.map((task) => (
+                    <li key={task.taskId}>
+                      <b>{task.taskId}</b><span>{task.cargoId} · {task.sourceLocationId}</span><em>{task.status}</em>
+                    </li>
+                  ))}
+                  {allocation.leftTasks.map((task) => (
+                    <li key={task.taskId}>
+                      <b>{task.taskId}</b><span>{task.sourceLocationId} · 拣 {task.pickQuantityBase} / 回 {task.returnQuantityBase} 件</span><em>{task.status}</em>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </article>
+          ))}
+        </div>
+        <p>正式货物流尚未接入：机械臂预览不会接受这些任务，订单也不会在本阶段提前完成。</p>
+      </section>
+    )
+  }
   return (
     <section className="simulation-order-orchestration" aria-label="订单拆解与 CTU 分配">
       <header>
@@ -471,13 +622,16 @@ export function OrderOrchestrationPanel({
 export function OrderTimeline({ order }: { order?: OrderView }) {
   if (!order) return null
   const active = currentStage(order)
+  const stages = order.fulfillmentPlan
+    ? ['订单创建', '包装校验', '库存校验', '任务准备', '等待取货', '等待拆零', '等待汇集']
+    : timelineStages
   return (
     <div className="simulation-order-timeline">
       <span className="simulation-order-timeline-title">
         <b>{order.id}</b><small><Clock3 size={12} />{orderStatus(order)}</small>
       </span>
       <div className="simulation-order-timeline-steps">
-        {timelineStages.map((stage, index) => (
+        {stages.map((stage, index) => (
           <span key={stage} className={index < active ? 'done' : index === active ? 'active' : ''}>
             <i>{index < active ? '✓' : index + 1}</i><b>{stage}</b>
           </span>

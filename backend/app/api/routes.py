@@ -6,20 +6,44 @@ from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisc
 
 from ..core.config import API_PREFIX
 from ..schemas import (
+    GeneralSimulationControlResponse,
+    GeneralSimulationPlanRequest,
     ShuttleDockSettingsRequest,
     ShuttlePlanRequest,
     ShuttleTransferFailRequest,
     SimulationControlResponse,
     SimulationOrderCancelRequest,
     SimulationOrderInput,
+    OrderFulfillmentPlanResponse,
     SimulationSpeedRequest,
     SimulationSpeedResponse,
     SimulationStartRequest,
+    SimulationTestControlResponse,
+    SimulationTestStartRequest,
+    TransportLayoutPlanResponse,
     TopologyPayload,
 )
 from ..services.goods import build_inventory, load_catalog
+from ..services.fulfillment_data import (
+    FulfillmentDataValidationError,
+    catalog_with_packaging,
+    load_packaging_registry,
+    load_simulation_inventory_profile,
+    validate_general_simulation_orders,
+    validate_simulation_test_scenario,
+)
+from ..services.order_fulfillment import (
+    PackagingSpecificationError,
+    plan_order_fulfillment,
+    topology_inventory_balances,
+)
 from ..services.runtime import repo, simulation_service
 from ..services.shuttle_topology import topology_revision
+from ..services.transport_layout import (
+    LayoutRevisionMismatch,
+    LayoutValidationError,
+    load_transport_layout_plan,
+)
 from ..services.unified_transfer import plan_transfer, shuttle_contract
 
 router = APIRouter(prefix=API_PREFIX)
@@ -36,6 +60,13 @@ _goods_inventory_cache: dict[tuple[str, str], bytes] = {}
 _GOODS_INVENTORY_CACHE_LIMIT = 8
 
 
+def _utf8_json_response(payload) -> Response:
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        media_type="application/json; charset=utf-8",
+    )
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -43,12 +74,13 @@ def health() -> dict[str, str]:
 
 @router.get("/topologies")
 def list_topologies():
-    return repo.list_topologies()
+    return _utf8_json_response(repo.list_topologies())
 
 
 @router.post("/topologies")
 def create_topology(payload: TopologyPayload):
-    return repo.upsert_topology(payload.id, payload.name, payload.model_dump(by_alias=True))
+    saved = repo.upsert_topology(payload.id, payload.name, payload.model_dump(by_alias=True))
+    return _utf8_json_response(saved)
 
 
 @router.get("/topologies/{topology_id}")
@@ -56,7 +88,25 @@ def get_topology(topology_id: str):
     topology = repo.get_topology(topology_id)
     if not topology:
         raise HTTPException(status_code=404, detail="Topology not found")
-    return topology
+    return _utf8_json_response(topology)
+
+
+@router.get(
+    "/topologies/{topology_id}/transport-layout-plan",
+    response_model=TransportLayoutPlanResponse,
+)
+def get_transport_layout_plan(topology_id: str):
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    try:
+        return load_transport_layout_plan(topology["payload"])
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Picking-arm preview plan not found") from error
+    except LayoutRevisionMismatch as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except LayoutValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.delete("/topologies/{topology_id}")
@@ -80,7 +130,12 @@ def goods_inventory(topology_id: str):
     body = _goods_inventory_cache.get(key)
     if body is None:
         body = json.dumps(
-            {"topologyId": topology_id, "slots": build_inventory(payload)},
+            {
+                "topologyId": topology_id,
+                "dataSource": "simulation_catalog_seed",
+                "authoritative": False,
+                "slots": build_inventory(payload),
+            },
             ensure_ascii=False,
         ).encode("utf-8")
         if len(_goods_inventory_cache) >= 8:
@@ -91,7 +146,94 @@ def goods_inventory(topology_id: str):
 
 @router.get("/goods/catalog")
 def goods_catalog():
-    return load_catalog()
+    return catalog_with_packaging(load_catalog())
+
+
+@router.get("/goods/packaging-specs")
+def goods_packaging_specs():
+    return load_packaging_registry()
+
+
+@router.post(
+    "/topologies/{topology_id}/order-fulfillment-plan",
+    response_model=OrderFulfillmentPlanResponse,
+)
+def create_order_fulfillment_plan(topology_id: str, payload: SimulationOrderInput):
+    """Validate a base-unit order and return a non-mutating preparation plan."""
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    try:
+        return plan_order_fulfillment(
+            payload.model_dump(),
+            catalog_with_packaging(load_catalog()),
+            topology_inventory_balances(topology["payload"]),
+        )
+    except PackagingSpecificationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/topologies/{topology_id}/fulfillment-test-scenarios/{scenario_id}")
+def get_fulfillment_test_scenario(topology_id: str, scenario_id: str):
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    try:
+        return validate_simulation_test_scenario(
+            topology["payload"],
+            load_catalog(),
+            scenario_id,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Fulfillment test scenario not found") from error
+    except FulfillmentDataValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/topologies/{topology_id}/simulation-inventory-profiles/{profile_id}")
+def get_simulation_inventory_profile(topology_id: str, profile_id: str):
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    try:
+        profile = load_simulation_inventory_profile(profile_id)
+        actual_revision = topology_revision(topology["payload"])
+        if profile.get("topologyId") != topology_id or profile.get("topologyRevision") != actual_revision:
+            raise FulfillmentDataValidationError("Simulation inventory profile topology revision mismatch")
+        packaging = [
+            item for item in load_packaging_registry()["records"]
+            if item.get("scope") == "simulation" and item.get("profileId") == profile_id
+        ]
+        return {**profile, "packaging": packaging, "formalInventoryMutated": False}
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Simulation inventory profile not found") from error
+    except FulfillmentDataValidationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/topologies/{topology_id}/general-simulation-plan")
+def create_general_simulation_plan(topology_id: str, payload: GeneralSimulationPlanRequest):
+    if payload.topologyId != topology_id:
+        raise HTTPException(status_code=400, detail="Topology id mismatch")
+    topology = repo.get_topology(topology_id)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    if payload.topologyRevision != topology_revision(topology["payload"]):
+        raise HTTPException(status_code=409, detail="Topology revision mismatch")
+    try:
+        return validate_general_simulation_orders(
+            topology["payload"],
+            load_catalog(),
+            payload.profileId,
+            [order.model_dump() for order in payload.orders],
+            [item.model_dump() for item in payload.inventoryOverrides],
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Simulation inventory profile not found") from error
+    except (FulfillmentDataValidationError, PackagingSpecificationError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @router.get("/shuttle/topologies/{topology_id}/contract")
@@ -148,9 +290,85 @@ async def start_simulation(payload: SimulationStartRequest):
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-@router.post("/simulations/{run_id}/pause", response_model=SimulationControlResponse)
-def pause_simulation(run_id: str):
+@router.post(
+    "/simulations/test-scenarios/{scenario_id}/start",
+    response_model=SimulationTestControlResponse,
+)
+async def start_simulation_test_scenario(
+    scenario_id: str,
+    payload: SimulationTestStartRequest,
+):
+    if payload.scenarioId != scenario_id:
+        raise HTTPException(status_code=400, detail="Scenario id mismatch")
+    topology = repo.get_topology(payload.topologyId)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    actual_revision = topology_revision(topology["payload"])
+    if payload.topologyRevision != actual_revision:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scenario expects {payload.topologyRevision}; current topology is {actual_revision}",
+        )
     try:
+        audit = validate_simulation_test_scenario(
+            topology["payload"],
+            load_catalog(),
+            scenario_id,
+        )
+        return await simulation_service.start_simulation_test(topology["payload"], audit)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Fulfillment test scenario not found") from error
+    except (FulfillmentDataValidationError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post(
+    "/simulations/general/start",
+    response_model=GeneralSimulationControlResponse,
+)
+async def start_general_simulation(payload: GeneralSimulationPlanRequest):
+    topology = repo.get_topology(payload.topologyId)
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    actual_revision = topology_revision(topology["payload"])
+    if payload.topologyRevision != actual_revision:
+        raise HTTPException(status_code=409, detail="Topology revision mismatch")
+    try:
+        audit = validate_general_simulation_orders(
+            topology["payload"],
+            load_catalog(),
+            payload.profileId,
+            [order.model_dump() for order in payload.orders],
+            [item.model_dump() for item in payload.inventoryOverrides],
+            require_ready=True,
+        )
+        return await simulation_service.start_general_simulation(topology["payload"], audit)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Simulation inventory profile not found") from error
+    except (FulfillmentDataValidationError, PackagingSpecificationError, ValueError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get("/simulations")
+def list_simulations(topology_id: str | None = None):
+    return [
+        {
+            "id": item["id"],
+            "status": item["status"],
+            "topologyId": item["topology_id"],
+            "tick": int(item["payload"].get("tick", 0)),
+            "createdAt": item["created_at"],
+            "updatedAt": item["updated_at"],
+        }
+        for item in repo.list_runs(topology_id)
+    ]
+
+
+@router.post("/simulations/{run_id}/pause", response_model=SimulationControlResponse)
+async def pause_simulation(run_id: str):
+    try:
+        if run_id not in simulation_service.runtimes:
+            await simulation_service.recover_simulation_test(run_id)
         return simulation_service.pause(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -193,8 +411,10 @@ async def cancel_simulation_order(
 
 
 @router.post("/simulations/{run_id}/resume", response_model=SimulationControlResponse)
-def resume_simulation(run_id: str):
+async def resume_simulation(run_id: str):
     try:
+        if run_id not in simulation_service.runtimes:
+            await simulation_service.recover_simulation_test(run_id)
         return simulation_service.resume(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -208,6 +428,8 @@ async def stop_simulation(run_id: str):
         return await simulation_service.stop(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.post("/simulations/{run_id}/tasks/{task_id}/complete-picking")
@@ -224,14 +446,18 @@ async def complete_picking_task(run_id: str, task_id: str):
 @router.post("/simulations/{run_id}/reset", response_model=SimulationControlResponse)
 async def reset_simulation(run_id: str):
     try:
+        if run_id not in simulation_service.runtimes:
+            await simulation_service.recover_simulation_test(run_id)
         return await simulation_service.reset(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
 
 
 @router.post("/simulations/{run_id}/speed", response_model=SimulationSpeedResponse)
-def set_simulation_speed(run_id: str, payload: SimulationSpeedRequest):
+async def set_simulation_speed(run_id: str, payload: SimulationSpeedRequest):
     try:
+        if run_id not in simulation_service.runtimes:
+            await simulation_service.recover_simulation_test(run_id)
         return simulation_service.set_speed(run_id, payload.multiplier)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
