@@ -14,17 +14,11 @@ from fastapi import WebSocket
 
 from ..core.repository import Repository
 from .assignment import assign_tasks
-from .conveyor import compile_conveyor_graph, nearest_lift_id, route_from_block, route_from_cell
+from .conveyor import compile_conveyor_graph, nearest_lift_id, normalize_conveyor_anchors, route_from_block, route_from_cell
 from .fulfillment_data import (
     validate_general_simulation_orders,
     validate_simulation_test_scenario,
 )
-from .order_fulfillment import (
-    PackagingSpecificationError,
-    plan_orders_fulfillment,
-    topology_inventory_balances,
-)
-from .fulfillment_data import catalog_with_packaging
 from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes, load_catalog
 from .pathfinding import (
     build_occupied_lookup,
@@ -88,9 +82,13 @@ PORT_QUEUE_SERVICE_TICKS = 24
 # 机械臂交接：四向车在交接处等待后，机械臂抓取（pick）与放箱（place）的阶段时长。
 ARM_HANDOFF_PICK_TICKS = 3
 ARM_HANDOFF_PLACE_TICKS = 4
+# 机械臂放箱后的上层输送必须与前端 CTU 货箱的 DELIVERY_SPEED 一致。
+# 相邻 2×2 模块中心相距 2 个世界单位，因此每段需要约 1.11 秒。
+ARM_CONVEYOR_VISUAL_SPEED = 1.8
+ARM_CONVEYOR_BLOCK_DISTANCE = 2.0
 TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position", "conveyor_position", "arm_handoff"}
 # 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
-REROUTE_AFTER_BLOCK_TICKS = 2
+REROUTE_AFTER_BLOCK_TICKS = 4
 YIELD_AFTER_BLOCK_TICKS = 4
 MIN_SAFETY_TICKS = 2000
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 2.0
@@ -252,6 +250,7 @@ class SimulationService:
         topology: dict[str, Any],
         scenario_audit: dict[str, Any],
     ) -> RunRuntime:
+        topology = normalize_conveyor_anchors(topology)
         config = build_simulation_config(topology)
         runtime = self._create_runtime(
             run_id,
@@ -371,68 +370,6 @@ class SimulationService:
             "runMode": SIMULATION_TEST_RUN_MODE,
             "scenarioId": scenario_audit["scenarioId"],
         }
-
-    def _prepare_base_quantity_orders(
-        self,
-        topology: dict[str, Any],
-        orders: list[dict[str, Any]],
-        inventory_balances: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Attach non-executable fulfillment plans to the existing order model."""
-        plans = plan_orders_fulfillment(
-            orders,
-            catalog_with_packaging(load_catalog()),
-            inventory_balances if inventory_balances is not None else topology_inventory_balances(topology),
-        )
-        order_states: list[dict[str, Any]] = []
-        preparation_tasks: list[dict[str, Any]] = []
-        for order, plan in zip(orders, plans, strict=True):
-            ready = plan["allocationStatus"] == "ready"
-            task_ids = [task["taskId"] for task in plan["tasks"]]
-            requested = sum(int(line.get("quantityBase") or 0) for line in order.get("lines", []))
-            allocated = sum(
-                int(item["quantityBase"]) - int(item["shortageQuantityBase"])
-                for item in plan["allocations"]
-            )
-            runtime_lines = []
-            allocations_by_line = {item["lineId"]: item for item in plan["allocations"]}
-            for line in order.get("lines", []):
-                allocation = allocations_by_line[str(line.get("id"))]
-                runtime_lines.append({
-                    **line,
-                    "unitsPerCase": allocation["unitsPerCase"],
-                    "allocatedBase": allocation["quantityBase"] - allocation["shortageQuantityBase"],
-                    "pickedBase": 0,
-                })
-            order_states.append({
-                **order,
-                "lines": runtime_lines,
-                "taskIds": task_ids,
-                "totalTasks": len(task_ids),
-                "completedTasks": 0,
-                "progress": 0,
-                "status": "waiting_dispatch" if ready else "shortage",
-                "statusLabel": "任务已拆分，等待权威取货" if ready else "库存不足，等待人工处理",
-                "missingQuantity": requested - allocated,
-                "startedTick": None,
-                "completedTick": None,
-                "fulfillmentPlan": plan,
-                "decomposition": {
-                    "stage": "tasks_prepared" if ready else "shortage",
-                    "requestedQuantity": requested,
-                    "allocatedQuantity": allocated,
-                    "missingQuantity": requested - allocated,
-                    "taskCount": len(task_ids),
-                    "assignedTaskCount": 0,
-                    "activeVehicleIds": [],
-                    "vehicleCapacity": ROBOT_CARRY_CAPACITY["shuttle"],
-                    "strategy": order.get("dispatchMode", "balanced"),
-                    "maxParallelCtu": int(order.get("maxParallelCtu") or 7),
-                },
-            })
-            preparation_tasks.extend(plan["tasks"])
-        return order_states, preparation_tasks
-
 
     async def start_general_simulation(
         self,
@@ -1471,28 +1408,25 @@ class SimulationService:
                     {"stage": "place", "taskId": task["id"], "robotId": robot["id"], "dropoffCellId": target["dropoffCellId"]},
                 )
                 return
-            # place 完成：货箱落到放货点带面，四向车释放、任务完成。
-            box = dict((robot.get("carrying") or [{}])[0])
-            belt = runtime.state.setdefault("armBeltBoxes", [])
-            belt.append({
-                **box,
-                "cellId": target["dropoffCellId"],
-                "level": target["dropoffLevel"],
-                "beltHeight": target["dropoffBeltHeight"],
-                "placedTick": tick,
-            })
+            # place 完成：货箱落到放货点带面，四向车释放；任务转入独立的
+            # 上层输送阶段，只有货箱到达输送线终点后才真正完成。
             task["deliveredGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
             task["armPlacedCellId"] = target["dropoffCellId"]
-            robot["carrying"] = []
-            robot["load"] = 0
+            transport_started = self._start_arm_conveyor_delivery(runtime, task, target)
+            self._release_arm_handoff_robot(runtime, robot, task)
             arm.update({"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None})
             self._record_event(
                 runtime,
                 tick,
                 "arm_handoff",
-                {"stage": "placed", "taskId": task["id"], "robotId": robot["id"], "cellId": target["dropoffCellId"]},
+                {
+                    "stage": "placed",
+                    "taskId": task["id"],
+                    "robotId": robot["id"],
+                    "cellId": target["dropoffCellId"],
+                    "conveyorTransportStarted": transport_started,
+                },
             )
-            self._complete_task(runtime, robot, task)
             return
         # 空闲：寻找已停在交接处、进入等待阶段的载货四向车。
         for robot in runtime.state["robots"]:
@@ -1517,6 +1451,259 @@ class SimulationService:
                 {"stage": "pick", "taskId": task["id"], "robotId": robot["id"]},
             )
             return
+
+    def _start_arm_conveyor_delivery(
+        self,
+        runtime: RunRuntime,
+        task: dict[str, Any],
+        target: dict[str, Any],
+    ) -> bool:
+        """机械臂放箱后，从指定上层模块创建逐块输送任务。
+
+        路线 = 主线（conveyor_graph 图路由）走到随机选中的分支出货块，
+        再手工拼接分支段：分支行 (rN,61) down 单格 → (rN,62) 出货块锚点。
+        分支段不在图的有向边里（出货块靠转向移载机衔接），因此按块 id
+        直接构造，推进逻辑 _advance_conveyor_transport 对 route 列表通用。
+        """
+        tick = int(runtime.state["tick"])
+        graph = runtime.conveyor_graph
+        nodes = graph.get("nodes", {})
+        route = route_from_cell(
+            graph,
+            str(target.get("dropoffCellId") or ""),
+            "upper",
+            ground=False,
+        )
+        if not route:
+            # 路径异常时保留货箱而不是让它消失，并明确把任务标为异常。
+            box = dict((task.get("deliveredGoods") or task.get("lines") or [{}])[0])
+            runtime.state.setdefault("armBeltBoxes", []).append({
+                **box,
+                "taskId": task.get("id"),
+                "cellId": target.get("dropoffCellId"),
+                "level": target.get("dropoffLevel", 2),
+                "beltHeight": target.get("dropoffBeltHeight", 3.0),
+                "placedTick": tick,
+            })
+            task["status"] = "exception"
+            task["phase"] = "arm_conveyor_blocked"
+            task["phaseLabel"] = "机械臂放箱后输送路径不可用"
+            task["failureReason"] = "arm_dropoff_conveyor_route_missing"
+            task["completedTick"] = tick
+            task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+            )
+            return False
+
+        # 随机分流：扫描主线，收集出货块分支行（down 块东侧 (r,61) 存在、
+        # (r,62) 是 2×2 出货块锚点且方向 right），随机选中一个作为终点。
+        branch_rows: list[int] = []
+        floor = "1F"
+        for block_id in route:
+            node = nodes.get(block_id, {})
+            if str(node.get("outputSide") or "") != "south":
+                continue
+            row = int(node.get("row", -1))
+            col = int(node.get("col", -1))
+            east1 = nodes.get(f"{floor}:{row}:{col + 1}:upper")
+            east2 = nodes.get(f"{floor}:{row}:{col + 2}:upper")
+            if not east1 or not east2:
+                continue
+            anchor = east2.get("anchor") or {}
+            if (
+                int(anchor.get("row", -2)) == row
+                and int(anchor.get("col", -2)) == col + 2
+                and str(east2.get("outputSide") or "") == "east"
+            ):
+                branch_rows.append(row)
+        if branch_rows:
+            branch_row = random.choice(branch_rows)
+            branch_block = f"{floor}:{branch_row}:60:upper"
+            if branch_block in route:
+                idx = route.index(branch_block)
+                route = route[: idx + 1] + [
+                    f"{floor}:{branch_row}:61:upper",
+                    f"{floor}:{branch_row}:62:upper",
+                ]
+
+        task["status"] = "assigned"
+        task["phase"] = "arm_conveyor_delivery"
+        task["phaseLabel"] = f"机械臂放箱后上层输送 1/{len(route)}"
+        task["assignedRobotId"] = None
+        task["remainingStageTicks"] = max(0, len(route) - 1)
+        task["lastProgressTick"] = tick
+        task["conveyorTransport"] = {
+            "phase": "arm_conveyor_delivery",
+            "deck": "upper",
+            "route": route,
+            "index": 0,
+            "currentBlockId": route[0],
+            "nextBlockId": route[1] if len(route) > 1 else None,
+            "waitingTicks": 0,
+            "movedTicks": 0,
+            "startedTick": tick,
+            # 使用真实秒累计，而不是固定 tick 数；切换 1×/2×/4× 后仍与
+            # CTU 货箱保持相同的屏幕移动速度。
+            "travelProgressSeconds": 0.0,
+        }
+        task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "conveyor_position",
+            {"taskId": task["id"], "deck": "upper", "blockId": route[0], "index": 0},
+        )
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": task["phase"], "status": task["status"], "routeLength": len(route)},
+        )
+        return True
+
+    def _release_arm_handoff_robot(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> None:
+        """机械臂接管货箱后释放四向车，并立即规划撤离交接位的返程。"""
+        robot["currentTaskId"] = None
+        robot["handlingAction"] = None
+        robot["path"] = [robot["currentCellId"]]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        robot["load"] = 0
+        robot["carrying"] = []
+        robot["waitTicks"] = 0
+        task["assignedRobotId"] = None
+
+        # 交接位是单容量资源。若卸箱后直接改成 idle，车辆会永久占住
+        # picking-handoff，后续车辆只能停在前一格等待。无论货箱输送任务
+        # 是否已经完成，空车都要独立返回自己的待命位。
+        home_cell = robot.get("homeCellId")
+        can_return_home = bool(
+            home_cell
+            and home_cell != robot["currentCellId"]
+            and self._robot_path_to(
+                runtime,
+                robot,
+                str(home_cell),
+                int(robot.get("currentLayer", 1)),
+            )
+            and len(robot.get("path") or []) > 1
+        )
+        evacuated_to_last_cell = False
+        if not can_return_home:
+            last_cell = robot.get("lastCellId")
+            occupied = {
+                item.get("currentCellId")
+                for item in runtime.state.get("robots", [])
+                if item.get("id") != robot.get("id")
+            }
+            if last_cell and last_cell != robot["currentCellId"] and last_cell not in occupied:
+                robot["path"] = [robot["currentCellId"], last_cell]
+                robot["pathLayers"] = [int(robot.get("currentLayer", 1))] * 2
+                robot["targetCellId"] = last_cell
+                robot["targetLayer"] = int(robot.get("currentLayer", 1))
+                evacuated_to_last_cell = True
+
+        if can_return_home or evacuated_to_last_cell:
+            robot["pathStages"] = ["return_to_standby"] * len(robot["path"])
+            robot["returningToStandby"] = True
+            robot["status"] = "returning"
+            robot["phaseLabel"] = "交接完成 / 返回待命位" if can_return_home else "交接完成 / 撤离交接位"
+            self._record_event(
+                runtime,
+                int(runtime.state["tick"]),
+                "arm_handoff_robot_released",
+                {
+                    "robotId": robot["id"],
+                    "handoffCellId": robot["currentCellId"],
+                    "standbyCellId": home_cell,
+                    "targetCellId": robot.get("targetCellId"),
+                    "returnHome": can_return_home,
+                },
+            )
+            return
+
+        robot["returningToStandby"] = False
+        robot["status"] = "exception"
+        robot["phaseLabel"] = "交接完成 / 无法撤离交接位"
+        self._emit_alert(
+            runtime,
+            int(runtime.state["tick"]),
+            category=f"arm_handoff_exit_unreachable:{robot['id']}",
+            level="error",
+            message=f"四向车 {robot['id']} 完成机械臂交接后无法返回待命位。",
+            details={
+                "robotId": robot["id"],
+                "handoffCellId": robot["currentCellId"],
+                "standbyCellId": home_cell,
+            },
+            suggestion="检查机械臂交接位到四向车待命位之间的轨道连通性。",
+        )
+
+    def _advance_detached_conveyor_tasks(self, runtime: RunRuntime) -> None:
+        """推进已脱离机器人的机械臂放箱输送任务。"""
+        tick = int(runtime.state["tick"])
+        for task in runtime.state.get("tasks", []):
+            if task.get("status") in TERMINAL_TASK_STATUSES or task.get("phase") != "arm_conveyor_delivery":
+                continue
+            transport = task.get("conveyorTransport")
+            if not isinstance(transport, dict) or int(transport.get("startedTick", -1)) >= tick:
+                continue
+            if self._advance_conveyor_transport(runtime, None, task):
+                self._complete_detached_conveyor_task(runtime, task)
+
+    def _complete_detached_conveyor_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """货箱到达机械臂输送路线终点后完成任务并保留终点货箱快照。"""
+        tick = int(runtime.state["tick"])
+        transport = task.get("conveyorTransport") or {}
+        final_block = transport.get("currentBlockId")
+        final_node = runtime.conveyor_graph.get("nodes", {}).get(final_block, {})
+        final_cell = cell_id(
+            int(final_node.get("row", 0)),
+            int(final_node.get("col", 0)),
+            str(final_node.get("floor") or "1F"),
+        )
+        box = dict((task.get("deliveredGoods") or task.get("lines") or [{}])[0])
+        runtime.state.setdefault("armBeltBoxes", []).append({
+            **box,
+            "taskId": task.get("id"),
+            "cellId": final_cell,
+            "level": 2,
+            "beltHeight": 3.0,
+            "placedTick": tick,
+        })
+        task["armConveyorCompleted"] = True
+        task["armConveyorEndCellId"] = final_cell
+        task["conveyorTransport"] = None
+        task["status"] = "completed"
+        task["phase"] = "completed"
+        task["completedTick"] = tick
+        task["remainingStageTicks"] = 0
+        runtime.metrics["completedTasks"] += 1
+        runtime.metrics["throughput"] += 1
+        if task.get("urgent"):
+            runtime.metrics["urgentOrdersHandled"] += 1
+        task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "arm_handoff",
+            {"stage": "conveyor_completed", "taskId": task["id"], "cellId": final_cell},
+        )
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+        )
+        self._maybe_loop_dock_task(runtime, task)
 
     def _split_ports_by_conveyor_kind(self, topology: dict[str, Any]) -> tuple[list[str], list[str]]:
         """按最近输送块的类型把 port 分成（地面线, 架空线）两组。
@@ -2404,6 +2591,7 @@ class SimulationService:
         self._assign_tasks(runtime)
         self._move_robots(runtime)
         self._advance_picking_arm(runtime)
+        self._advance_detached_conveyor_tasks(runtime)
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
@@ -2791,6 +2979,11 @@ class SimulationService:
         if not target or target == robot["currentCellId"]:
             return False
         others = {parse_cell_id(cell) for cell in occupied_cells if cell != robot["currentCellId"]}
+        # 普通绕行不得立即返回上一格，否则两辆相邻 CTU 会同步在两条巷道间
+        # A-B-A-B 往返。真正需要后退时由 _clear_head_on/_yield_ctu 显式执行。
+        last_cell = robot.get("lastCellId")
+        if last_cell and last_cell != target:
+            others.add(parse_cell_id(last_cell))
         for item in runtime.state["robots"]:
             if item["id"] == robot["id"] or item.get("type") != "ctu":
                 continue
@@ -3483,6 +3676,16 @@ class SimulationService:
             transport["nextBlockId"] = None
             task["remainingStageTicks"] = 0
             return True
+
+        if task.get("phase") == "arm_conveyor_delivery":
+            seconds_per_block = ARM_CONVEYOR_BLOCK_DISTANCE / ARM_CONVEYOR_VISUAL_SPEED
+            progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._tick_delay(runtime)
+            if progress_seconds + 1e-9 < seconds_per_block:
+                transport["travelProgressSeconds"] = progress_seconds
+                return False
+            # 保留不足一个 tick 的余量，使离散模块事件长期平均速度精确
+            # 对齐前端连续动画，而不是每段都向上取整造成越走越慢。
+            transport["travelProgressSeconds"] = max(0.0, progress_seconds - seconds_per_block)
 
         next_block = route[index + 1]
         node = runtime.conveyor_graph.get("nodes", {}).get(next_block, {})
@@ -4419,6 +4622,7 @@ class SimulationService:
             "lift_to_upper": "升降移栽",
             "conveyor_to_pick": "上层输送至拣货位",
             "picking": "人工拣货",
+            "arm_conveyor_delivery": "机械臂放箱后上层输送",
             "place_goods": "拣货放置",
             "conveyor_return": "输送线回程",
             "pickup_from_port": "出入口取回",

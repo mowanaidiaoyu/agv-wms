@@ -30,8 +30,9 @@ import {
   type SceneTower,
 } from '../../lib/topology3d'
 import { conveyorBlockCellIds, type CellBox } from '../../lib/topology'
-import type { EditorObjectType, GoodsSlot, TopologyPayload, ZoneType } from '../../types'
+import type { EditorObjectType, GoodsSlot, TopologyNode, TopologyPayload, ZoneType } from '../../types'
 import type { TopologySelection } from '../../store/useTopologyEditorStore'
+import { ShuttleCartModel } from './ShuttleCartModel'
 
 export type Topology3DSceneProps = {
   topology: TopologyPayload
@@ -94,6 +95,90 @@ function makeSelectProps(
     onPointerOver: () => setHoverEntity(entity.id),
     onPointerOut: () => setHoverEntity(null),
   }
+}
+
+/**
+ * 拓扑编辑器中的常驻机械臂模型。
+ *
+ * 仿真页的机械臂由 PickingArmHandoff 驱动动作；编辑器不应依赖布局方案接口，
+ * 否则拓扑 revision 更新后模型会随布局接口 409 一起消失。这里直接按
+ * picking_arm 节点渲染待机姿态，并且不绘制悬浮文字，避免遮挡仓库视野。
+ */
+function TopologyPickingArm({
+  node,
+  cols,
+  rows,
+  floorY,
+  highlighted,
+  hovered,
+  selectProps,
+}: {
+  node: TopologyNode
+  cols: number
+  rows: number
+  floorY: number
+  highlighted: boolean
+  hovered: boolean
+  selectProps: PointerHandlers
+}) {
+  const active = highlighted || hovered
+  const yellow = active ? '#fde047' : '#f59e0b'
+  const dark = active ? '#475569' : '#1f2937'
+
+  return (
+    <group
+      position={[worldX(node.col, cols), floorY, worldZ(node.row, rows)]}
+      rotation={[0, -0.62, 0]}
+      {...selectProps}
+    >
+      <mesh position={[0, 0.18, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.72, 0.82, 0.36, 28]} />
+        <meshStandardMaterial color={dark} emissive={active ? '#0ea5e9' : '#111827'} emissiveIntensity={active ? 0.3 : 0.08} roughness={0.4} metalness={0.68} />
+      </mesh>
+      <mesh position={[0, 2.02, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.4, 0.5, 3.7, 24]} />
+        <meshStandardMaterial color="#d97706" roughness={0.42} metalness={0.48} />
+      </mesh>
+      <group position={[0, 4, 0]} rotation={[0, 0, -0.34]}>
+        <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+          <cylinderGeometry args={[0.34, 0.34, 0.66, 20]} />
+          <meshStandardMaterial color={dark} roughness={0.3} metalness={0.75} />
+        </mesh>
+        <mesh position={[1.9, 0, 0]} castShadow>
+          <boxGeometry args={[3.8, 0.46, 0.5]} />
+          <meshStandardMaterial color={yellow} emissive="#92400e" emissiveIntensity={0.1} roughness={0.38} metalness={0.4} />
+        </mesh>
+        <group position={[3.8, 0, 0]} rotation={[0, 0, 1.18]}>
+          <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+            <cylinderGeometry args={[0.31, 0.31, 0.62, 20]} />
+            <meshStandardMaterial color={dark} roughness={0.3} metalness={0.75} />
+          </mesh>
+          <mesh position={[1.7, 0, 0]} castShadow>
+            <boxGeometry args={[3.4, 0.4, 0.44]} />
+            <meshStandardMaterial color="#fbbf24" emissive="#92400e" emissiveIntensity={0.08} roughness={0.38} metalness={0.38} />
+          </mesh>
+          <group position={[3.4, 0, 0]}>
+            <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+              <cylinderGeometry args={[0.18, 0.18, 0.36, 18]} />
+              <meshStandardMaterial color="#374151" roughness={0.28} metalness={0.78} />
+            </mesh>
+            <mesh position={[0.3, 0, 0]} castShadow>
+              <boxGeometry args={[0.6, 0.24, 0.34]} />
+              <meshStandardMaterial color="#111827" roughness={0.3} metalness={0.72} />
+            </mesh>
+            <mesh position={[0.66, 0.22, 0]} castShadow>
+              <boxGeometry args={[0.42, 0.09, 0.09]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.22} metalness={0.82} />
+            </mesh>
+            <mesh position={[0.66, -0.22, 0]} castShadow>
+              <boxGeometry args={[0.42, 0.09, 0.09]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.22} metalness={0.82} />
+            </mesh>
+          </group>
+        </group>
+      </group>
+    </group>
+  )
 }
 
 function buildGridPositions(cols: number, rows: number): Float32Array {
@@ -162,6 +247,10 @@ function SceneContent({
   const activeFloorIndex = Math.max(0, spec.floors.indexOf(activeFloor))
   const activeFloorY = floorPlaneY(activeFloorIndex)
   const gridPositions = useMemo(() => buildGridPositions(spec.cols, spec.rows), [spec.cols, spec.rows])
+  const shuttleRobotIds = useMemo(
+    () => new Set(topology.nodes.filter((node) => node.type === 'shuttle_robot').map((node) => node.id)),
+    [topology.nodes],
+  )
 
   const layers = useMemo(() => {
     const boxes: SceneBox[] = []
@@ -170,6 +259,8 @@ function SceneContent({
     const slabs: SceneSlab[] = []
     const towers: SceneTower[] = []
     for (const item of spec.items) {
+      // 四向车使用与仿真工作台相同的共享模型，不再渲染旧的紫色方块占位。
+      if (item.entity?.kind === 'node' && shuttleRobotIds.has(item.entity.id)) continue
       if (item.kind === 'box') boxes.push(item)
       else if (item.kind === 'rack') racks.push(item)
       else if (item.kind === 'cyl') cylinders.push(item)
@@ -177,7 +268,7 @@ function SceneContent({
       else towers.push(item)
     }
     return { boxes, cylinders, racks, slabs, towers }
-  }, [spec])
+  }, [shuttleRobotIds, spec])
 
   const highlightIds = useMemo(() => {
     const ids = new Set<string>()
@@ -253,6 +344,13 @@ function SceneContent({
     onMoveCell(row, col)
   }
 
+  const pickingArms = topology.nodes.filter(
+    (node) => node.type === 'picking_arm' && (node.floor ?? '1F') === activeFloor,
+  )
+  const shuttleRobots = topology.nodes.filter(
+    (node) => node.type === 'shuttle_robot' && (node.floor ?? '1F') === activeFloor,
+  )
+
   return (
     <group>
       <ambientLight intensity={0.65} />
@@ -296,6 +394,43 @@ function SceneContent({
       ))}
 
       <GoodsBoxes boxes={goodsBoxes} />
+
+      {pickingArms.map((node) => {
+        const entity: SceneEntity = { kind: 'node', id: node.id, floor: node.floor ?? '1F' }
+        return (
+          <TopologyPickingArm
+            key={`full-arm-${node.id}`}
+            node={node}
+            cols={spec.cols}
+            rows={spec.rows}
+            floorY={activeFloorY}
+            highlighted={highlightIds.has(`${node.id}-base`) || selection?.kind === 'node' && selection.id === node.id}
+            hovered={hoverEntity === node.id}
+            selectProps={makeSelectProps(canSelect, entity, onEntityDown, setHoverEntity)}
+          />
+        )
+      })}
+
+      {shuttleRobots.map((node) => {
+        const entity: SceneEntity = { kind: 'node', id: node.id, floor: node.floor ?? '1F' }
+        const highlighted = selection?.kind === 'node' && selection.id === node.id
+        return (
+          <group
+            key={`full-shuttle-${node.id}`}
+            position={[
+              worldX(node.col, spec.cols) + CELL / 2,
+              activeFloorY,
+              worldZ(node.row, spec.rows) - CELL / 2,
+            ]}
+            {...makeSelectProps(canSelect, entity, onEntityDown, setHoverEntity)}
+          >
+            <ShuttleCartModel
+              paused
+              highlighted={highlighted || hoverEntity === node.id}
+            />
+          </group>
+        )
+      })}
 
       {/* 活动层网格线（落位辅助） */}
       <lineSegments position={[0, activeFloorY + 0.24, 0]}>

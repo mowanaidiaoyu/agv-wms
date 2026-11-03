@@ -43,6 +43,7 @@ class GridConfig(BaseModel):
 class ConveyorDeckConfig(BaseModel):
     enabled: bool = True
     inputSide: ConveyorSide
+    inputSides: list[ConveyorSide] | None = None
     outputSide: ConveyorSide
     role: Literal["outbound", "return", "custom"] = "custom"
     speed: float = Field(default=1.0, gt=0)

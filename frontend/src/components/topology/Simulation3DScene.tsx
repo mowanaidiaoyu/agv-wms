@@ -6,6 +6,7 @@ import { Group, MOUSE, Mesh, Vector3 } from 'three'
 import { BatchedTopologyMeshes, GoodsBoxes, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
 import { TransportLayoutPreview } from './TransportLayoutPreview'
 import { PickingArmHandoff, type PickingArmCargo } from './PickingArmHandoff'
+import { ShuttleCartModel } from './ShuttleCartModel'
 import {
   CELL,
   CONVEYOR_DECK_BASE,
@@ -75,8 +76,6 @@ export type Simulation3DSceneProps = {
   speedMultiplier?: 1 | 2 | 4
 }
 
-const SHUTTLE_COLOR = '#c084fc'
-const SHUTTLE_EMISSIVE = '#6d28d9'
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
@@ -327,24 +326,6 @@ function CtuCart({
           ) : null}
         </group>
       </group>
-    </group>
-  )
-}
-
-/** 四向车：2×2 车体。局部坐标，原点=格中心贴地。 */
-function ShuttleCart() {
-  const w = CELL * 2 * 0.88
-  return (
-    <group position={[0, 0.42, 0]}>
-      <mesh>
-        <boxGeometry args={[w, 0.8, w]} />
-        <meshStandardMaterial color={SHUTTLE_COLOR} emissive={SHUTTLE_EMISSIVE} emissiveIntensity={0.5} roughness={0.42} />
-      </mesh>
-      <mesh position={[0, 0.46, 0]}>
-        <boxGeometry args={[w * 0.58, 0.12, w * 0.58]} />
-        <meshStandardMaterial color="#f5d0fe" emissive="#c026d3" emissiveIntensity={0.8} roughness={0.3} />
-      </mesh>
-      <pointLight color="#e879f9" intensity={1.8} distance={7} decay={2} />
     </group>
   )
 }
@@ -1905,7 +1886,7 @@ function Simulation3DScene({
           <RobotGroup key={robot.id} position={position} onClick={() => onSelectRobot?.(robot.id)} paused={paused} transitionDuration={transitionDuration}>
             {robot.type === 'ctu' ? (
               <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} paused={paused} />
-            ) : <ShuttleCart />}
+            ) : <ShuttleCartModel load={robot.load} carrying={robot.carrying} paused={paused} />}
             {robot.id === (selectedRobotId || focusRobot?.id) ? (
               <RobotFocusMarker
                 robotId={robot.id}

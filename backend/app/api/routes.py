@@ -33,6 +33,7 @@ from ..services.fulfillment_data import (
     validate_general_simulation_orders,
     validate_simulation_test_scenario,
 )
+from ..services.conveyor import normalize_conveyor_anchors
 from ..services.goods import build_inventory, load_catalog
 from ..services.order_fulfillment import (
     PackagingSpecificationError,
@@ -75,6 +76,7 @@ async def create_topology(request: Request):
     # 拓扑 revision 与 data/topology_666.json / 配置戳 / 测试断言出现伪差异。
     # 这里只校验、不重建，入库结构与客户端发来的完全一致。
     raw = await request.json()
+    raw = normalize_conveyor_anchors(raw)
     try:
         TopologyPayload.model_validate(raw)
     except ValidationError as error:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Literal
 
 from .pathfinding import parse_cell_id
@@ -36,6 +37,83 @@ def _anchor(cell: dict[str, Any]) -> tuple[int, int]:
     row = int(anchor.get("row", int(cell["row"]) - int(cell["row"]) % 2))
     col = int(anchor.get("col", int(cell["col"]) - int(cell["col"]) % 2))
     return row, col
+
+
+def normalize_conveyor_anchors(topology: dict[str, Any]) -> dict[str, Any]:
+    """Persist one shared anchor for every legacy 2x2 conveyor block."""
+    source_groups: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for cell in topology.get("cells", []):
+        if cell.get("type") != "conveyor":
+            continue
+        row, col = _anchor(cell)
+        source_groups.setdefault((str(cell.get("floor") or "1F"), row, col), []).append(cell)
+
+    already_normalized = True
+    for (_, inferred_row, inferred_col), cells in source_groups.items():
+        anchor_cell = next(
+            (
+                cell
+                for cell in cells
+                if int(cell.get("row", -1)) == inferred_row
+                and int(cell.get("col", -1)) == inferred_col
+            ),
+            cells[0],
+        )
+        expected = {"row": int(anchor_cell["row"]), "col": int(anchor_cell["col"])}
+        if any(
+            cell.get("conveyorAnchor") != expected
+            or (
+                cell is not anchor_cell
+                and (cell.get("conveyorDecks") or cell.get("conveyorMode"))
+            )
+            for cell in cells
+        ):
+            already_normalized = False
+            break
+    if already_normalized:
+        return topology
+
+    normalized = deepcopy(topology)
+    groups: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for cell in normalized.get("cells", []):
+        if cell.get("type") != "conveyor":
+            continue
+        row, col = _anchor(cell)
+        key = (str(cell.get("floor") or "1F"), row, col)
+        groups.setdefault(key, []).append(cell)
+
+    for (_, inferred_row, inferred_col), cells in groups.items():
+        anchor_cell = next(
+            (
+                cell
+                for cell in cells
+                if int(cell.get("row", -1)) == inferred_row
+                and int(cell.get("col", -1)) == inferred_col
+            ),
+            cells[0],
+        )
+        anchor = {"row": int(anchor_cell["row"]), "col": int(anchor_cell["col"])}
+        config_source = next((cell for cell in cells if cell.get("conveyorDecks")), anchor_cell)
+        if not anchor_cell.get("conveyorDecks") and config_source.get("conveyorDecks"):
+            anchor_cell["conveyorDecks"] = deepcopy(config_source["conveyorDecks"])
+            if config_source.get("conveyorMode") is not None:
+                anchor_cell["conveyorMode"] = config_source["conveyorMode"]
+        for cell in cells:
+            cell["conveyorAnchor"] = dict(anchor)
+            if cell is not anchor_cell:
+                cell.pop("conveyorDecks", None)
+                cell.pop("conveyorMode", None)
+    return normalized
+
+
+def conveyor_input_sides(config: dict[str, Any]) -> list[Side]:
+    stored = config.get("inputSides")
+    raw = stored if isinstance(stored, list) and stored else [config.get("inputSide")]
+    sides: list[Side] = []
+    for side in raw:
+        if side in SIDE_STEP and side not in sides:
+            sides.append(side)
+    return sides
 
 
 def _legacy_decks(cell: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -144,6 +222,7 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
         if transfer:
             if transfer.get("transferInputSide"):
                 config["inputSide"] = transfer["transferInputSide"]
+                config["inputSides"] = [transfer["transferInputSide"]]
             if transfer.get("transferOutputSide"):
                 config["outputSide"] = transfer["transferOutputSide"]
         return config
@@ -165,7 +244,8 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
             key = f"{floor}:{row}:{col}:{deck}"
             output_side: Side = str(config.get("outputSide") or "east")  # type: ignore[assignment]
             input_side: Side = str(config.get("inputSide") or opposite_side(output_side))  # type: ignore[assignment]
-            if cell.get("conveyorDecks") and input_side == output_side:
+            input_sides = conveyor_input_sides(config) or [input_side]
+            if cell.get("conveyorDecks") and output_side in input_sides:
                 issues.append({"blockId": key, "deck": deck, "message": "入口侧和出口侧不能相同。"})
             if cell.get("conveyorDecks") and cell.get("conveyorGround") and deck == "upper":
                 issues.append({"blockId": key, "deck": deck, "message": "地面输送线不能配置上层。"})
@@ -179,7 +259,7 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                     and
                     next_config
                     and next_config.get("enabled", True)
-                    and next_config.get("inputSide") == opposite_side(output_side)
+                    and opposite_side(output_side) in conveyor_input_sides(next_config)
                 ):
                     next_key = f"{floor}:{row + dr}:{col + dc}:{deck}"
                 elif (
@@ -192,31 +272,32 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                         "deck": deck,
                         "message": "出口方向与下一手动配置模块的入口方向不匹配。",
                     })
-            previous_block = neighbors.get(input_side)
-            if (
-                cell.get("conveyorDecks")
-                and previous_block is not None
-                and previous_block.get("conveyorDecks")
-                and same_line(cell, previous_block)
-            ):
-                previous_step = SIDE_STEP[input_side]
-                previous_config = deck_config(
-                    floor,
-                    row + previous_step[0],
-                    col + previous_step[1],
-                    previous_block,
-                    deck,
-                )
-                if not (
-                    previous_config
-                    and previous_config.get("enabled", True)
-                    and previous_config.get("outputSide") == opposite_side(input_side)
+            for accepted_input in input_sides:
+                previous_block = neighbors.get(accepted_input)
+                if (
+                    cell.get("conveyorDecks")
+                    and previous_block is not None
+                    and previous_block.get("conveyorDecks")
+                    and same_line(cell, previous_block)
                 ):
-                    issues.append({
-                        "blockId": key,
-                        "deck": deck,
-                        "message": "入口方向与上一手动配置模块的出口方向不匹配。",
-                    })
+                    previous_step = SIDE_STEP[accepted_input]
+                    previous_config = deck_config(
+                        floor,
+                        row + previous_step[0],
+                        col + previous_step[1],
+                        previous_block,
+                        deck,
+                    )
+                    if not (
+                        previous_config
+                        and previous_config.get("enabled", True)
+                        and previous_config.get("outputSide") == opposite_side(accepted_input)
+                    ):
+                        issues.append({
+                            "blockId": key,
+                            "deck": deck,
+                            "message": "入口方向与上一手动配置模块的出口方向不匹配。",
+                        })
             nodes[key] = {
                 "id": key,
                 "floor": floor,
@@ -224,6 +305,7 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                 "col": col,
                 "deck": deck,
                 "inputSide": input_side,
+                "inputSides": input_sides,
                 "outputSide": output_side,
                 "role": config.get("role", "custom"),
                 "capacity": max(1, int(config.get("capacity", 1) or 1)),
