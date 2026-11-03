@@ -1,15 +1,20 @@
 import { describe, it, expect } from 'vitest'
-import { emptyTopology } from '../data/defaults'
+import { emptyTopology } from '../data/topologyDefaults'
 import type { TopologyPayload } from '../types'
 import {
   conveyorBlockAnchor,
   conveyorBlockCellIds,
+  conveyorBlocks,
+  conveyorDecksOf,
   conveyorRunFromCell,
+  configureConveyorRun,
   createZone,
   eraseAt,
   fillNodes,
   moveConveyorRun,
+  normalizeConveyorAnchors,
   paintCell,
+  paintStroke,
   placeNode,
   removeZone,
   setShuttleSlotLift,
@@ -17,7 +22,11 @@ import {
   shuttleSlotLift,
   shuttleSlotRemoved,
   slotNumberFor,
+  swapConveyorDecks,
+  traceConveyorDeckRoute,
+  updateConveyorBlockDeck,
   updateZoneGeometry,
+  validateConveyorTopology,
 } from './topology'
 
 function base() {
@@ -131,6 +140,27 @@ describe('conveyor 2×2 占位', () => {
   it('conveyorBlockAnchor 向下取偶', () => {
     expect(conveyorBlockAnchor(4, 4)).toEqual({ row: 4, col: 4 })
     expect(conveyorBlockAnchor(5, 3)).toEqual({ row: 4, col: 2 })
+  })
+
+  it('旧数据归一化后四格共享显式锚点和锚点方向', () => {
+    const topology = base()
+    topology.cells = [
+      { id: 'cell-r0-c0', row: 0, col: 0, floor: '1F', type: 'conveyor', cost: 1, walkable: false, conveyorDecks: {
+        lower: { enabled: true, inputSide: 'south', outputSide: 'east', role: 'outbound', speed: 1, capacity: 1 },
+      } },
+      { id: 'cell-r0-c1', row: 0, col: 1, floor: '1F', type: 'conveyor', cost: 1, walkable: false },
+      { id: 'cell-r1-c0', row: 1, col: 0, floor: '1F', type: 'conveyor', cost: 1, walkable: false },
+      { id: 'cell-r1-c1', row: 1, col: 1, floor: '1F', type: 'conveyor', cost: 1, walkable: false },
+    ]
+
+    const normalized = normalizeConveyorAnchors(topology)
+    expect(normalized.cells.every((cell) =>
+      cell.conveyorAnchor?.row === 0 && cell.conveyorAnchor?.col === 0,
+    )).toBe(true)
+    expect(normalized.cells.filter((cell) => cell.conveyorDecks)).toHaveLength(1)
+    expect(normalized.cells.every((cell) =>
+      conveyorDecksOf(normalized, cell).lower.outputSide === 'east',
+    )).toBe(true)
   })
 })
 
@@ -248,5 +278,200 @@ describe('moveConveyorRun（拖动平移输送线）', () => {
     const result = moveConveyorRun(t, startIdOf(t), 4, 4)
     expect(result.message).toBeTruthy()
     expect(result.topology.cells.filter((c) => c.type === 'conveyor')).toHaveLength(12)
+  })
+})
+
+describe('双层输送线独立路由', () => {
+  it('绘制转弯线路时不再根据手势自动推断模块方向', () => {
+    const topology = paintStroke(base(), 'conveyor', [
+      { row: 0, col: 0 },
+      { row: 0, col: 2 },
+      { row: 2, col: 2 },
+    ])
+    const blocks = conveyorBlocks(topology)
+
+    expect(blocks).toHaveLength(3)
+    expect(blocks.every((block) => block.anchorCell.conveyorDirection === 'right')).toBe(true)
+    expect(blocks.every((block) => block.anchorCell.conveyorDecks == null)).toBe(true)
+  })
+
+  it('自动生成下层去程和上层反向回程，并通过连接校验', () => {
+    let topology = base()
+    topology = paintCell(topology, 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    topology = paintCell(topology, 'conveyor', 2, 2).topology
+    const ids = topology.cells.filter((cell) => cell.type === 'conveyor').map((cell) => cell.id)
+
+    topology = configureConveyorRun(topology, ids, 'round_trip')
+    const blocks = conveyorBlocks(topology, ids)
+    const first = blocks.find((block) => block.row === 0 && block.col === 0)!
+    const corner = blocks.find((block) => block.row === 0 && block.col === 2)!
+    const last = blocks.find((block) => block.row === 2 && block.col === 2)!
+
+    expect(conveyorDecksOf(topology, first.anchorCell).lower).toMatchObject({ inputSide: 'east', outputSide: 'west' })
+    expect(conveyorDecksOf(topology, corner.anchorCell).lower).toMatchObject({ inputSide: 'east', outputSide: 'south' })
+    expect(conveyorDecksOf(topology, last.anchorCell).upper).toMatchObject({ inputSide: 'south', outputSide: 'north' })
+    expect(validateConveyorTopology(topology).filter((issue) => issue.severity === 'error')).toEqual([])
+  })
+
+  it('旧双层方向自动迁移为上下层相反方向', () => {
+    let topology = paintCell(base(), 'conveyor', 0, 0).topology
+    topology.cells = topology.cells.map((cell) => ({ ...cell, levels: 2, conveyorDirection: 'down' }))
+    const block = conveyorBlocks(topology)[0]
+    const decks = conveyorDecksOf(topology, block.anchorCell)
+    expect(decks.lower).toMatchObject({ inputSide: 'north', outputSide: 'south', role: 'outbound' })
+    expect(decks.upper).toMatchObject({ inputSide: 'south', outputSide: 'north', role: 'return' })
+  })
+
+  it('可以交换上下层的用途和走向', () => {
+    let topology = paintCell(base(), 'conveyor', 0, 0).topology
+    const ids = topology.cells.filter((cell) => cell.type === 'conveyor').map((cell) => cell.id)
+    topology = configureConveyorRun(topology, ids, 'round_trip')
+    const before = conveyorDecksOf(topology, conveyorBlocks(topology)[0].anchorCell)
+    topology = swapConveyorDecks(topology, ids)
+    const block = conveyorBlocks(topology)[0]
+    const after = conveyorDecksOf(topology, block.anchorCell)
+
+    expect(after.lower).toEqual(before.upper)
+    expect(after.upper).toEqual(before.lower)
+    expect(block.anchorCell.conveyorMode).toBe('independent')
+  })
+
+  it('校验业务区域与输送端点的固定连接侧', () => {
+    let topology = base()
+    topology = paintCell(topology, 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    const ids = topology.cells.filter((cell) => cell.type === 'conveyor').map((cell) => cell.id)
+    topology = configureConveyorRun(topology, ids, 'round_trip')
+    topology.zones = [{
+      id: 'port-1', label: '出库口 01', type: 'port', x: 0, y: 0, width: 1, height: 1,
+      conveyorBinding: { blockId: '1F:0:0', side: 'north' },
+    }]
+
+    expect(validateConveyorTopology(topology).some((issue) => issue.message.includes('下层入口侧'))).toBe(true)
+    topology.zones[0].conveyorBinding = { blockId: '1F:0:0', side: 'east' }
+    expect(validateConveyorTopology(topology).filter((issue) => issue.severity === 'error')).toEqual([])
+  })
+
+  it('选择已编号线路时不会吞并紧贴的另一条线路', () => {
+    let topology = paintCell(base(), 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    topology.cells = topology.cells.map((cell) => ({
+      ...cell,
+      conveyorLineId: cell.col < 2 ? 'line-a' : 'line-b',
+    }))
+    const start = topology.cells.find((cell) => cell.row === 0 && cell.col === 0)!
+
+    expect(conveyorRunFromCell(topology, start.id).map((cell) => cell.conveyorLineId)).toEqual([
+      'line-a', 'line-a', 'line-a', 'line-a',
+    ])
+  })
+
+  it('只手动配置一个模块时也会检查相邻旧模块的入口方向', () => {
+    let topology = paintCell(base(), 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    topology.cells = topology.cells.map((cell) =>
+      cell.type === 'conveyor' && cell.col >= 2
+        ? { ...cell, conveyorDirection: 'down' }
+        : cell,
+    )
+    const first = conveyorBlocks(topology).find((block) => block.col === 0)!
+    topology = updateConveyorBlockDeck(topology, first.anchorCell.id, 'lower', {
+      inputSide: 'east', outputSide: 'west',
+    })
+
+    expect(validateConveyorTopology(topology).some((issue) => issue.message.includes('出口与下一块'))).toBe(true)
+  })
+
+  it('两个手动配置模块的出口和入口不匹配时才报错', () => {
+    let topology = paintCell(base(), 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    const blocks = conveyorBlocks(topology)
+    topology = updateConveyorBlockDeck(topology, blocks.find((block) => block.col === 0)!.anchorCell.id, 'lower', {
+      inputSide: 'east', outputSide: 'west',
+    })
+    topology = updateConveyorBlockDeck(topology, blocks.find((block) => block.col === 2)!.anchorCell.id, 'lower', {
+      inputSide: 'north', outputSide: 'south',
+    })
+
+    expect(validateConveyorTopology(topology).some((issue) => issue.message.includes('出口与下一块'))).toBe(true)
+  })
+
+  it('按模块追踪入口、中心、出口对应的 L 形路线', () => {
+    let topology = base()
+    topology = paintCell(topology, 'conveyor', 2, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 0).topology
+    topology = paintCell(topology, 'conveyor', 0, 2).topology
+    const blocks = conveyorBlocks(topology)
+    const configure = (row: number, col: number, inputSide: 'north' | 'east' | 'south' | 'west', outputSide: 'north' | 'east' | 'south' | 'west') => {
+      const block = blocks.find((item) => item.row === row && item.col === col)!
+      topology = updateConveyorBlockDeck(topology, block.anchorCell.id, 'lower', { inputSide, outputSide })
+    }
+    configure(2, 0, 'south', 'north')
+    configure(0, 0, 'south', 'west')
+    configure(0, 2, 'east', 'west')
+
+    const start = conveyorBlocks(topology).find((block) => block.row === 2 && block.col === 0)!
+    const trace = traceConveyorDeckRoute(topology, start.anchorCell, 'lower')
+    expect(trace.status).toBe('endpoint')
+    expect(trace.blocks.map((block) => [block.row, block.col])).toEqual([[2, 0], [0, 0], [0, 2]])
+  })
+
+  it('断路和循环会被明确检测并截断', () => {
+    let broken = paintCell(base(), 'conveyor', 0, 0).topology
+    broken = paintCell(broken, 'conveyor', 0, 2).topology
+    let blocks = conveyorBlocks(broken)
+    broken = updateConveyorBlockDeck(broken, blocks[0].anchorCell.id, 'lower', { inputSide: 'east', outputSide: 'west' })
+    broken = updateConveyorBlockDeck(broken, blocks[1].anchorCell.id, 'lower', { inputSide: 'north', outputSide: 'south' })
+    expect(traceConveyorDeckRoute(broken, conveyorBlocks(broken)[0].anchorCell, 'lower').status).toBe('broken')
+
+    let loop = base()
+    loop = paintCell(loop, 'conveyor', 0, 0).topology
+    loop = paintCell(loop, 'conveyor', 0, 2).topology
+    loop = paintCell(loop, 'conveyor', 2, 2).topology
+    loop = paintCell(loop, 'conveyor', 2, 0).topology
+    blocks = conveyorBlocks(loop)
+    const directions = [
+      [0, 0, 'south', 'west'],
+      [0, 2, 'east', 'south'],
+      [2, 2, 'north', 'east'],
+      [2, 0, 'west', 'north'],
+    ] as const
+    for (const [row, col, inputSide, outputSide] of directions) {
+      const block = blocks.find((item) => item.row === row && item.col === col)!
+      loop = updateConveyorBlockDeck(loop, block.anchorCell.id, 'lower', { inputSide, outputSide })
+    }
+    const trace = traceConveyorDeckRoute(loop, conveyorBlocks(loop)[0].anchorCell, 'lower')
+    expect(trace.status).toBe('loop')
+    expect(trace.blocks).toHaveLength(4)
+  })
+
+  it('双入口合流模块同时接收西侧直行和南侧汇入', () => {
+    let topology = base()
+    for (const [row, col] of [[0, 0], [0, 2], [0, 4], [2, 2]] as const) {
+      topology = paintCell(topology, 'conveyor', row, col).topology
+    }
+    const blockAt = (row: number, col: number) =>
+      conveyorBlocks(topology).find((block) => block.row === row && block.col === col)!
+    topology = updateConveyorBlockDeck(topology, blockAt(0, 4).anchorCell.id, 'upper', {
+      inputSide: 'west', outputSide: 'east',
+    })
+    topology = updateConveyorBlockDeck(topology, blockAt(0, 2).anchorCell.id, 'upper', {
+      inputSide: 'west', inputSides: ['west', 'south'], outputSide: 'east',
+    })
+    topology = updateConveyorBlockDeck(topology, blockAt(0, 0).anchorCell.id, 'upper', {
+      inputSide: 'west', outputSide: 'east',
+    })
+    topology = updateConveyorBlockDeck(topology, blockAt(2, 2).anchorCell.id, 'upper', {
+      inputSide: 'south', outputSide: 'north',
+    })
+
+    const westTrace = traceConveyorDeckRoute(topology, blockAt(0, 4).anchorCell, 'upper')
+    const southTrace = traceConveyorDeckRoute(topology, blockAt(2, 2).anchorCell, 'upper')
+    expect(westTrace.status).toBe('endpoint')
+    expect(southTrace.status).toBe('endpoint')
+    expect(westTrace.blocks.map((block) => [block.row, block.col])).toEqual([[0, 4], [0, 2], [0, 0]])
+    expect(southTrace.blocks.map((block) => [block.row, block.col])).toEqual([[2, 2], [0, 2], [0, 0]])
+    expect(validateConveyorTopology(topology).filter((issue) => issue.severity === 'error')).toEqual([])
   })
 })

@@ -1,7 +1,7 @@
-import type { ConveyorDirection, EditorObjectType, NodeType } from '../types'
+import type { ConveyorDirection, EditorObjectType, NodeType, ZoneType } from '../types'
 
 type TopologyGlyphProps = {
-  kind: EditorObjectType | NodeType
+  kind: EditorObjectType | NodeType | ZoneType
   size?: 'card' | 'panel' | 'board'
   direction?: ConveyorDirection
   className?: string
@@ -62,6 +62,40 @@ export function TopologyGlyph({
         </>
       ) : null}
 
+      {kind === 'ground_conveyor' ? (
+        <>
+          <span className="topology-glyph-conveyor-track topology-glyph-ground-track" />
+          <span className="topology-glyph-conveyor-arrow topology-glyph-ground-arrow" />
+          <span className="topology-glyph-ground-line" />
+        </>
+      ) : null}
+
+      {kind === 'shuttle_dock' ? (
+        <>
+          <span className="topology-glyph-dock-pad" />
+          <span className="topology-glyph-dock-box" />
+          <span className="topology-glyph-dock-arrow" />
+        </>
+      ) : null}
+
+      {kind === 'picking_handoff' ? (
+        <>
+          <span className="topology-glyph-handoff-pad" />
+          <span className="topology-glyph-handoff-box" />
+          <span className="topology-glyph-handoff-arm" />
+          <span className="topology-glyph-handoff-target" />
+        </>
+      ) : null}
+
+      {kind === 'picking_arm' ? (
+        <>
+          <span className="topology-glyph-arm-base" />
+          <span className="topology-glyph-arm-column" />
+          <span className="topology-glyph-arm-link" />
+          <span className="topology-glyph-arm-gripper" />
+        </>
+      ) : null}
+
       {kind === 'storage' ? (
         <>
           <span className="topology-glyph-storage-frame" />
@@ -105,6 +139,22 @@ export function TopologyGlyph({
           <span className="topology-glyph-turn-transfer-ring" />
           <span className="topology-glyph-turn-transfer-arm topology-glyph-turn-transfer-arm-a" />
           <span className="topology-glyph-turn-transfer-arm topology-glyph-turn-transfer-arm-b" />
+        </>
+      ) : null}
+
+      {kind === 'pick_station' ? (
+        <>
+          <span className="topology-glyph-pick-station-bench" />
+          <span className="topology-glyph-pick-station-post" />
+          <span className="topology-glyph-pick-station-box" />
+        </>
+      ) : null}
+
+      {kind === 'drop_zone' ? (
+        <>
+          <span className="topology-glyph-drop-zone-pad" />
+          <span className="topology-glyph-drop-zone-box" />
+          <span className="topology-glyph-drop-zone-box topology-glyph-drop-zone-box-stacked" />
         </>
       ) : null}
     </span>

@@ -12,6 +12,8 @@ from .pathfinding import cell_id, cell_position, node_position
 INVENTORY_SEED = 20261016
 # 镜像 simulation.CTU_RACK_LAYERS，避免 goods -> simulation 的循环导入。
 CTU_LAYERS = 17
+# 四向车库货道深度：每条货道最多 3 箱（depth=1 外层靠巷道面，深处箱被外层箱挡住）。
+SHUTTLE_LANE_DEPTH = 3
 
 # 商品目录静态 JSON（由 scripts/extract_sku_catalog.py 从真实 SKU xlsx 抽取）。
 BACKEND_DIR = Path(__file__).resolve().parents[2]  # web/backend
@@ -72,6 +74,27 @@ def ctu_storage_nodes(topology: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def shuttle_lanes(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    """四向车库可服务货道：[{cellId, layer, nodeId}]，供带深度的货道库存使用。"""
+    from .pathfinding import parse_cell_id, shuttle_servable_slots
+
+    node_by_pos = {
+        node_position(node): node
+        for node in topology.get("nodes", [])
+        if node.get("type") == "storage"
+    }
+    lanes: list[dict[str, Any]] = []
+    for lane_cell, layer in shuttle_servable_slots(topology):
+        _floor, row, col = parse_cell_id(lane_cell)
+        node = node_by_pos.get((row, col))
+        lanes.append({
+            "cellId": lane_cell,
+            "layer": int(layer),
+            "nodeId": node["id"] if node else None,
+        })
+    return lanes
+
+
 def build_inventory(
     topology: dict[str, Any],
     catalog: dict[str, Any] | None = None,
@@ -89,8 +112,6 @@ def build_inventory(
         return []
 
     ctu_sources = ctu_storage_nodes(topology)
-    if not ctu_sources:
-        return []
 
     slots: list[tuple[dict[str, Any], int]] = [(node, layer) for node in ctu_sources for layer in range(1, CTU_LAYERS + 1)]
     rng = random.Random(seed)
@@ -121,6 +142,36 @@ def build_inventory(
                 "qty": rng.randint(1, 5),
             }
         )
+
+    # 四向车库货道库存：每条可服务货道 0..SHUTTLE_LANE_DEPTH 箱，depth=1 为外层
+    # （靠巷道面），深处箱被外层箱挡住——取出前需先倒库到空货道。
+    # 填充按确定性轮转（约 1/4 货道留空作倒库缓冲），保证演示与测试可复现。
+    lanes = shuttle_lanes(topology)
+    rng.shuffle(lanes)
+    fill_cycle = (3, 1, 2, 0, 2, 1, 3, 0)
+    sku_index = len(slots)
+    for lane_index, lane in enumerate(lanes):
+        count = fill_cycle[lane_index % len(fill_cycle)]
+        for depth in range(1, count + 1):
+            sku = skus[sku_index % len(skus)]
+            sku_index += 1
+            inventory.append(
+                {
+                    "nodeId": lane["nodeId"],
+                    "cellId": lane["cellId"],
+                    "layer": lane["layer"],
+                    "depth": depth,
+                    "skuId": sku.get("skuId"),
+                    "skuName": sku.get("name"),
+                    "largeCategory": sku.get("largeCategory"),
+                    "subclass": sku.get("subclass"),
+                    "spec": sku.get("spec"),
+                    "grade": sku.get("grade"),
+                    "material": sku.get("material"),
+                    "surfaceTreatment": sku.get("surfaceTreatment"),
+                    "qty": 1,
+                }
+            )
     return inventory
 
 

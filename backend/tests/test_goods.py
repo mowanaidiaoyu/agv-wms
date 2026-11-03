@@ -31,9 +31,8 @@ TOPOLOGY = {
     ],
 }
 
-SCENARIO = {
-    "id": "goods-scenario",
-    "name": "Goods Scenario",
+CONFIG = {
+    "id": "goods-config",
     "topologyId": "goods-topology",
     "robots": [],
     "orderGenerator": {"ratePerMinute": 2, "maxOrders": 4, "linesPerOrderMin": 1, "linesPerOrderMax": 2, "urgentInsertionTick": 4},
@@ -141,7 +140,7 @@ def test_seed_tasks_no_ctu_tasks_when_no_ctu_zone():
             {"id": "orphan", "type": "storage", "row": 0, "col": 0, "zoneId": None, "capacity": 17, "label": "残留库位"},
         ],
     }
-    tasks = _service()._seed_tasks(topology, SCENARIO)
+    tasks = _service()._seed_tasks(topology, CONFIG)
     assert [task for task in tasks if task["robotType"] == "ctu"] == []
 
 
@@ -158,7 +157,7 @@ def test_sample_order_lines_carry_sku_and_stay_within_inventory():
 def test_seed_tasks_lines_carry_sku(monkeypatch):
     monkeypatch.setattr(simulation, "build_inventory", lambda topology: build_inventory(TOPOLOGY, CATALOG))
     service = _service()
-    tasks = service._seed_tasks(TOPOLOGY, SCENARIO)
+    tasks = service._seed_tasks(TOPOLOGY, CONFIG)
     ctu_tasks = [task for task in tasks if task["robotType"] == "ctu"]
     assert ctu_tasks
     for task in ctu_tasks:
@@ -178,12 +177,6 @@ def test_build_task_legacy_line_keeps_three_fields():
         2,
     )
     assert set(task["lines"][0].keys()) == {"nodeId", "cellId", "layer"}
-
-
-def test_goods_catalog_endpoint():
-    response = client.get("/api/v1/goods/catalog")
-    assert response.status_code == 200
-    assert isinstance(response.json().get("skus"), list)
 
 
 def test_goods_inventory_endpoint():

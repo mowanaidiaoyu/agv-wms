@@ -1,6 +1,9 @@
+import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Save, Trash2, FilePlus2 } from 'lucide-react'
+import { Loader2, Save, Trash2, FilePlus2, PlayCircle } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
+import { validateConveyorTopology, type ConveyorValidationIssue } from '../../lib/topology'
 import { usePlatformStore } from '../../store/usePlatformStore'
 import { useTopologyEditorStore } from '../../store/useTopologyEditorStore'
 import type { StoredRecord, TopologyPayload } from '../../types'
@@ -9,8 +12,25 @@ function recordLabel(record: StoredRecord<TopologyPayload>): string {
   return `${record.name}（${record.id}）`
 }
 
+class TopologyValidationError extends Error {
+  issue: ConveyorValidationIssue
+  total: number
+
+  constructor(issue: ConveyorValidationIssue, total: number) {
+    const layer = issue.deck === 'lower' ? '下层' : '上层'
+    const extra = total > 1 ? `（另外还有 ${total - 1} 处错误）` : ''
+    super(`输送模块 ${issue.blockKey} ${layer}：${issue.message}${extra}`)
+    this.name = 'TopologyValidationError'
+    this.issue = issue
+    this.total = total
+  }
+}
+
 export function TopologyEditorToolbar() {
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const enterSimulationRef = useRef(false)
+  const [savingForSimulation, setSavingForSimulation] = useState(false)
   const topologiesQuery = useQuery({ queryKey: ['topologies'], queryFn: api.listTopologies })
   const records = topologiesQuery.data ?? []
 
@@ -25,17 +45,54 @@ export function TopologyEditorToolbar() {
   const setLoading = useTopologyEditorStore((state) => state.setLoading)
   const setNotice = useTopologyEditorStore((state) => state.setNotice)
   const setSelectedTopologyId = usePlatformStore((state) => state.setSelectedTopologyId)
+  const resetRun = usePlatformStore((state) => state.resetRun)
+
+  function openSimulation(topologyId: string) {
+    setSelectedTopologyId(topologyId)
+    resetRun()
+    navigate(`/simulation?topologyId=${encodeURIComponent(topologyId)}`)
+  }
 
   const saveMutation = useMutation({
-    mutationFn: (payload: TopologyPayload) => api.saveTopology(payload),
+    mutationFn: (payload: TopologyPayload) => {
+      const errors = validateConveyorTopology(payload).filter((issue) => issue.severity === 'error')
+      if (errors.length) {
+        throw new TopologyValidationError(errors[0], errors.length)
+      }
+      return api.saveTopology(payload)
+    },
     onSuccess: async (saved) => {
       setSaved(saved.payload, saved.id)
       setSelectedTopologyId(saved.id)
       await queryClient.invalidateQueries({ queryKey: ['topologies'] })
       // 库内商品由后端按拓扑派生：保存后要重新拉取，否则增删货架后货物仍按旧库存显示。
       await queryClient.invalidateQueries({ queryKey: ['goods', 'inventory'] })
+      if (enterSimulationRef.current) {
+        enterSimulationRef.current = false
+        setSavingForSimulation(false)
+        openSimulation(saved.id)
+      }
     },
-    onError: (error) => setNotice({ kind: 'error', text: `保存失败：${String(error)}` }),
+    onError: (error, payload) => {
+      enterSimulationRef.current = false
+      setSavingForSimulation(false)
+      if (error instanceof TopologyValidationError) {
+        const parts = error.issue.blockKey.split(':')
+        const floor = parts.length >= 3 ? parts[parts.length - 3] : ''
+        const row = Number(parts[parts.length - 2])
+        const col = Number(parts[parts.length - 1])
+        const cell = payload.cells.find((item) =>
+          item.type === 'conveyor'
+          && (item.floor ?? '1F') === floor
+          && item.row === row
+          && item.col === col,
+        )
+        if (cell) useTopologyEditorStore.getState().selectCellById(cell.id)
+        setNotice({ kind: 'error', text: `保存失败：${error.message}` })
+        return
+      }
+      setNotice({ kind: 'error', text: `保存失败：${error instanceof Error ? error.message : String(error)}` })
+    },
   })
 
   const deleteMutation = useMutation({
@@ -66,8 +123,22 @@ export function TopologyEditorToolbar() {
   const busy = saveMutation.isPending || deleteMutation.isPending || useTopologyEditorStore.getState().loading
   const currentRecord = records.find((record) => record.id === loadedId)
 
+  function enterSimulation() {
+    if (dirty || !loadedId) {
+      enterSimulationRef.current = true
+      setSavingForSimulation(true)
+      saveMutation.mutate(draft)
+      return
+    }
+    openSimulation(loadedId)
+  }
+
   return (
     <div className="topo-toolbar">
+      <div className="topo-toolbar-heading">
+        <strong>拓扑编辑器</strong>
+        <span>维护道路、输送带、区域与设备，保存后直接进入仿真。</span>
+      </div>
       <div className="topo-toolbar-group topo-toolbar-meta">
         <label className="topo-name-field">
           <span>拓扑名称</span>
@@ -110,11 +181,25 @@ export function TopologyEditorToolbar() {
           className="accent-button"
           type="button"
           disabled={busy}
-          onClick={() => saveMutation.mutate(draft)}
+          onClick={() => {
+            enterSimulationRef.current = false
+            setSavingForSimulation(false)
+            saveMutation.mutate(draft)
+          }}
           title={dirty ? '草稿有未保存改动' : '内容已是最新'}
         >
           {saveMutation.isPending ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
           保存拓扑
+        </button>
+        <button
+          className="simulation-entry-button"
+          type="button"
+          disabled={busy}
+          onClick={enterSimulation}
+          title={dirty || !loadedId ? '先保存当前拓扑，再进入仿真工作台' : '使用当前拓扑进入仿真工作台'}
+        >
+          {savingForSimulation ? <Loader2 className="spin" size={16} /> : <PlayCircle size={16} />}
+          {dirty || !loadedId ? '保存并仿真' : '进入仿真'}
         </button>
         <button
           className="ghost-button topo-danger-button"
@@ -136,7 +221,7 @@ export function TopologyEditorToolbar() {
         {dirty ? <span className="topo-badge topo-badge-dirty">未保存修改</span> : null}
         {!loadedId ? <span className="topo-badge topo-badge-new">新建中</span> : null}
         {notice ? (
-          <span className={`topo-notice topo-notice-${notice.kind}`} role="status">
+          <span className={`topo-notice topo-notice-${notice.kind}`} role="status" title={notice.text}>
             {notice.text}
           </span>
         ) : null}

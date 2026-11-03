@@ -1,50 +1,29 @@
-# AGV Simulation Platform
+# AGV 6.6 拓扑与仿真平台
 
-This repository contains a local-first MVP for an intelligent warehouse AGV
-simulation and optimization platform.
+项目只保留两个业务模块：
 
-## Layout
+- 拓扑编辑器：维护 6.6 仓库拓扑、区域、道路、输送带与设备节点。
+- 仿真工作台：直接根据所选拓扑生成运行配置并启动实时仿真。
 
-- `frontend/`: React + Vite + TypeScript console
-- `backend/`: FastAPI simulation service
-- `data/`: sample topology and scenario JSON
-- `shared/`: design tokens and JSON schemas
-- `scripts/`: bootstrap and run scripts
-- `.venv/`: Python virtual environment
+## 启动
 
-## Quick start
+首次运行：
 
 ```powershell
 .\scripts\bootstrap.ps1
+```
+
+分别启动后端和前端：
+
+```powershell
 .\scripts\run-backend.ps1
 .\scripts\run-frontend.ps1
 ```
 
-## URLs
+## 地址
 
-- Frontend: `http://127.0.0.1:5173`
-- Backend: `http://127.0.0.1:8000`
-- Health: `http://127.0.0.1:8000/api/v1/health`
+- 拓扑编辑器：`http://127.0.0.1:5173/topology`
+- 仿真工作台：`http://127.0.0.1:5173/simulation`
+- 后端健康检查：`http://127.0.0.1:8000/api/v1/health`
 
-## Data files (large, not in git)
-
-- 源数据（`.dxf` / `.dwg` / `.xlsx`）体积大（约 187MB），**不放在仓库里**。
-- 请把数据文件放到仓库**上一级**的 `data/` 目录（与 `web/` 同级），后端从 `../data` 读取。
-- 数据文件列表与下载方式：见团队共享网盘（`启动方法.md` / `docs/启动方法.md`）。
-
-## Verification
-
-Backend:
-
-```powershell
-cd .\backend
-..\.venv\Scripts\python.exe -m pytest
-```
-
-Frontend:
-
-```powershell
-cd .\frontend
-npm run test
-npm run build
-```
+6.6 拓扑源数据位于 `data/topology_666.json`，首次启动后端时会自动导入。

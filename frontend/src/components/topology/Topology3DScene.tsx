@@ -1,13 +1,12 @@
-import { useMemo, useState } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { useMemo, useRef, useState } from 'react'
+import { Canvas, useFrame } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { MOUSE } from 'three'
+import { MOUSE, Vector3 } from 'three'
 import {
-  BoxView,
+  BatchedTopologyMeshes,
   GoodsBoxes,
   HOVER,
-  RackView,
   SlabView,
   TowerView,
   ZoomToCursor,
@@ -15,20 +14,25 @@ import {
 } from './SceneMeshes'
 import {
   CELL,
+  buildGoodsSceneBoxes,
   buildSceneSpec,
   floorPlaneY,
   shuttleSlotEntityId,
-  worldToCell,
   worldX,
   worldZ,
   type SceneBox,
+  type SceneCylinder,
   type SceneEntity,
   type SceneEntityKind,
+  type SceneRack,
+  type SceneSlab,
   type SceneSpec,
+  type SceneTower,
 } from '../../lib/topology3d'
-import type { CellBox } from '../../lib/topology'
-import type { EditorObjectType, GoodsSlot, TopologyPayload, ZoneType } from '../../types'
+import { conveyorBlockCellIds, type CellBox } from '../../lib/topology'
+import type { EditorObjectType, GoodsSlot, TopologyNode, TopologyPayload, ZoneType } from '../../types'
 import type { TopologySelection } from '../../store/useTopologyEditorStore'
+import { ShuttleCartModel } from './ShuttleCartModel'
 
 export type Topology3DSceneProps = {
   topology: TopologyPayload
@@ -42,6 +46,33 @@ export type Topology3DSceneProps = {
   onCellEnter: (row: number, col: number) => void
   onEntityDown: (kind: SceneEntityKind, id: string, floor: string) => void
   onMoveCell: (row: number, col: number) => void
+  onCompassAngleChange?: (angle: number) => void
+}
+
+function CompassOrientationReporter({
+  target,
+  onChange,
+}: {
+  target: [number, number, number]
+  onChange?: (angle: number) => void
+}) {
+  const lastAngle = useRef<number | null>(null)
+  const origin = useMemo(() => new Vector3(), [])
+  const north = useMemo(() => new Vector3(), [])
+
+  useFrame(({ camera }) => {
+    if (!onChange) return
+    origin.set(target[0], target[1], target[2]).project(camera)
+    north.set(target[0], target[1], target[2] + 5).project(camera)
+    const dx = north.x - origin.x
+    const dy = north.y - origin.y
+    if (Math.abs(dx) + Math.abs(dy) < 0.0001) return
+    const angle = Math.atan2(dx, dy)
+    if (lastAngle.current !== null && Math.abs(angle - lastAngle.current) < 0.005) return
+    lastAngle.current = angle
+    onChange(angle)
+  })
+  return null
 }
 
 function isLeftButton(e: ThreeEvent<PointerEvent>): boolean {
@@ -66,6 +97,90 @@ function makeSelectProps(
   }
 }
 
+/**
+ * 拓扑编辑器中的常驻机械臂模型。
+ *
+ * 仿真页的机械臂由 PickingArmHandoff 驱动动作；编辑器不应依赖布局方案接口，
+ * 否则拓扑 revision 更新后模型会随布局接口 409 一起消失。这里直接按
+ * picking_arm 节点渲染待机姿态，并且不绘制悬浮文字，避免遮挡仓库视野。
+ */
+function TopologyPickingArm({
+  node,
+  cols,
+  rows,
+  floorY,
+  highlighted,
+  hovered,
+  selectProps,
+}: {
+  node: TopologyNode
+  cols: number
+  rows: number
+  floorY: number
+  highlighted: boolean
+  hovered: boolean
+  selectProps: PointerHandlers
+}) {
+  const active = highlighted || hovered
+  const yellow = active ? '#fde047' : '#f59e0b'
+  const dark = active ? '#475569' : '#1f2937'
+
+  return (
+    <group
+      position={[worldX(node.col, cols), floorY, worldZ(node.row, rows)]}
+      rotation={[0, -0.62, 0]}
+      {...selectProps}
+    >
+      <mesh position={[0, 0.18, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.72, 0.82, 0.36, 28]} />
+        <meshStandardMaterial color={dark} emissive={active ? '#0ea5e9' : '#111827'} emissiveIntensity={active ? 0.3 : 0.08} roughness={0.4} metalness={0.68} />
+      </mesh>
+      <mesh position={[0, 2.02, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[0.4, 0.5, 3.7, 24]} />
+        <meshStandardMaterial color="#d97706" roughness={0.42} metalness={0.48} />
+      </mesh>
+      <group position={[0, 4, 0]} rotation={[0, 0, -0.34]}>
+        <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+          <cylinderGeometry args={[0.34, 0.34, 0.66, 20]} />
+          <meshStandardMaterial color={dark} roughness={0.3} metalness={0.75} />
+        </mesh>
+        <mesh position={[1.9, 0, 0]} castShadow>
+          <boxGeometry args={[3.8, 0.46, 0.5]} />
+          <meshStandardMaterial color={yellow} emissive="#92400e" emissiveIntensity={0.1} roughness={0.38} metalness={0.4} />
+        </mesh>
+        <group position={[3.8, 0, 0]} rotation={[0, 0, 1.18]}>
+          <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+            <cylinderGeometry args={[0.31, 0.31, 0.62, 20]} />
+            <meshStandardMaterial color={dark} roughness={0.3} metalness={0.75} />
+          </mesh>
+          <mesh position={[1.7, 0, 0]} castShadow>
+            <boxGeometry args={[3.4, 0.4, 0.44]} />
+            <meshStandardMaterial color="#fbbf24" emissive="#92400e" emissiveIntensity={0.08} roughness={0.38} metalness={0.38} />
+          </mesh>
+          <group position={[3.4, 0, 0]}>
+            <mesh rotation={[Math.PI / 2, 0, 0]} castShadow>
+              <cylinderGeometry args={[0.18, 0.18, 0.36, 18]} />
+              <meshStandardMaterial color="#374151" roughness={0.28} metalness={0.78} />
+            </mesh>
+            <mesh position={[0.3, 0, 0]} castShadow>
+              <boxGeometry args={[0.6, 0.24, 0.34]} />
+              <meshStandardMaterial color="#111827" roughness={0.3} metalness={0.72} />
+            </mesh>
+            <mesh position={[0.66, 0.22, 0]} castShadow>
+              <boxGeometry args={[0.42, 0.09, 0.09]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.22} metalness={0.82} />
+            </mesh>
+            <mesh position={[0.66, -0.22, 0]} castShadow>
+              <boxGeometry args={[0.42, 0.09, 0.09]} />
+              <meshStandardMaterial color="#cbd5e1" roughness={0.22} metalness={0.82} />
+            </mesh>
+          </group>
+        </group>
+      </group>
+    </group>
+  )
+}
+
 function buildGridPositions(cols: number, rows: number): Float32Array {
   const halfW = cols / 2
   const halfD = rows / 2
@@ -81,8 +196,27 @@ function buildGridPositions(cols: number, rows: number): Float32Array {
   return new Float32Array(segments)
 }
 
+function useGoodsLayer(topology: TopologyPayload, goods: GoodsSlot[], floors: string[]): SceneBox[] {
+  const cacheRef = useRef<{ signature: string; goods: GoodsSlot[]; boxes: SceneBox[] } | null>(null)
+  const nodeSignature = topology.nodes
+    .map((node) => `${node.id}:${node.row}:${node.col}:${node.floor ?? '1F'}`)
+    .join('|')
+  const signature = `${topology.grid.rows}:${topology.grid.cols}:${floors.join(',')}:${nodeSignature}`
+  const cached = cacheRef.current
+  if (!cached || cached.signature !== signature || cached.goods !== goods) {
+    cacheRef.current = {
+      signature,
+      goods,
+      boxes: buildGoodsSceneBoxes(topology, goods, floors),
+    }
+  }
+  return cacheRef.current?.boxes ?? []
+}
+
 function SceneContent({
+  topology,
   spec,
+  goodsBoxes,
   activeFloor,
   activeTool,
   activeZoneType,
@@ -93,7 +227,9 @@ function SceneContent({
   onEntityDown,
   onMoveCell,
 }: {
+  topology: TopologyPayload
   spec: SceneSpec
+  goodsBoxes: SceneBox[]
   activeFloor: string
   activeTool: EditorObjectType
   activeZoneType: ZoneType | null
@@ -111,18 +247,39 @@ function SceneContent({
   const activeFloorIndex = Math.max(0, spec.floors.indexOf(activeFloor))
   const activeFloorY = floorPlaneY(activeFloorIndex)
   const gridPositions = useMemo(() => buildGridPositions(spec.cols, spec.rows), [spec.cols, spec.rows])
-
-  // 商品箱单独走 InstancedMesh 批量绘制，不参与逐件交互/高亮。
-  const goodsBoxes = useMemo(
-    () => spec.items.filter((item): item is SceneBox => item.kind === 'box' && item.key.startsWith('goods-')),
-    [spec],
+  const shuttleRobotIds = useMemo(
+    () => new Set(topology.nodes.filter((node) => node.type === 'shuttle_robot').map((node) => node.id)),
+    [topology.nodes],
   )
+
+  const layers = useMemo(() => {
+    const boxes: SceneBox[] = []
+    const racks: SceneRack[] = []
+    const cylinders: SceneCylinder[] = []
+    const slabs: SceneSlab[] = []
+    const towers: SceneTower[] = []
+    for (const item of spec.items) {
+      // 四向车使用与仿真工作台相同的共享模型，不再渲染旧的紫色方块占位。
+      if (item.entity?.kind === 'node' && shuttleRobotIds.has(item.entity.id)) continue
+      if (item.kind === 'box') boxes.push(item)
+      else if (item.kind === 'rack') racks.push(item)
+      else if (item.kind === 'cyl') cylinders.push(item)
+      else if (item.kind === 'slab') slabs.push(item)
+      else towers.push(item)
+    }
+    return { boxes, cylinders, racks, slabs, towers }
+  }, [shuttleRobotIds, spec])
 
   const highlightIds = useMemo(() => {
     const ids = new Set<string>()
     if (!selection) return ids
     if (selection.kind === 'cell') {
-      ids.add(selection.id)
+      const cell = topology.cells.find((item) => item.id === selection.id)
+      if (cell?.type === 'conveyor') {
+        for (const id of conveyorBlockCellIds(topology, selection.id)) ids.add(id)
+      } else {
+        ids.add(selection.id)
+      }
     } else if (selection.kind === 'node') {
       // 节点可能由多个 box 组成（如 CTU 车 5 层载货位），按 entity 匹配整组高亮
       for (const item of spec.items) {
@@ -132,7 +289,7 @@ function SceneContent({
       for (const item of spec.items) {
         if (item.entity?.kind === 'zone' && item.entity.id === selection.id) ids.add(item.key)
       }
-    } else if (selection.kind === 'storage-batch' || selection.kind === 'conveyor-batch' || selection.kind === 'conveyor-run') {
+    } else if (selection.kind === 'storage-batch' || selection.kind === 'conveyor-batch') {
       for (const id of selection.ids) ids.add(id)
     } else if (selection.kind === 'shuttle-batch') {
       const slotKey = (r: number, c: number) => `${r}:${c}`
@@ -156,15 +313,18 @@ function SceneContent({
     return ids
   }, [selection, spec])
 
-  const marqueeCenter =
-    marquee && marquee.row1 >= marquee.row0 && marquee.col1 >= marquee.col0
-      ? {
-          x: worldX((marquee.col0 + marquee.col1) / 2, spec.cols),
-          z: worldZ((marquee.row0 + marquee.row1) / 2, spec.rows),
-          w: (marquee.col1 - marquee.col0 + 1) * CELL,
-          d: (marquee.row1 - marquee.row0 + 1) * CELL,
-        }
-      : null
+  const marqueeCenter = useMemo(
+    () =>
+      marquee && marquee.row1 >= marquee.row0 && marquee.col1 >= marquee.col0
+        ? {
+            x: worldX((marquee.col0 + marquee.col1) / 2, spec.cols),
+            z: worldZ((marquee.row0 + marquee.row1) / 2, spec.rows),
+            w: (marquee.col1 - marquee.col0 + 1) * CELL,
+            d: (marquee.row1 - marquee.row0 + 1) * CELL,
+          }
+        : null,
+    [marquee, spec.cols, spec.rows],
+  )
 
   // 框选方框的矩形描边（4 条边，8 个顶点，lineSegments）
   const marqueeFramePoints = useMemo(() => {
@@ -179,69 +339,98 @@ function SceneContent({
     ])
   }, [marqueeCenter])
 
-  const handleMovePointer = (event: ThreeEvent<PointerEvent>) => {
-    const { row, col } = worldToCell(event.point.x, event.point.z, spec.cols, spec.rows)
+  const handleCellEnter = (row: number, col: number) => {
+    onCellEnter(row, col)
     onMoveCell(row, col)
   }
 
+  const pickingArms = topology.nodes.filter(
+    (node) => node.type === 'picking_arm' && (node.floor ?? '1F') === activeFloor,
+  )
+  const shuttleRobots = topology.nodes.filter(
+    (node) => node.type === 'shuttle_robot' && (node.floor ?? '1F') === activeFloor,
+  )
+
   return (
-    <group onPointerMove={handleMovePointer}>
+    <group>
       <ambientLight intensity={0.65} />
       <hemisphereLight intensity={0.45} color="#d7dee9" groundColor="#0b101a" />
       <directionalLight position={[14, 24, 12]} intensity={1.5} color="#fff4e6" />
       <directionalLight position={[-12, 8, -14]} intensity={0.35} color="#7dd3fc" />
       <directionalLight position={[0, 30, -4]} intensity={0.4} color="#e2e8f0" />
 
-      {spec.items.map((item) => {
-        if (item.kind === 'box' && item.key.startsWith('goods-')) return null
-        switch (item.kind) {
-          case 'slab':
-            return (
-              <SlabView
-                key={item.key}
-                slab={item}
-                isActive={item.label === activeFloor}
-                cols={spec.cols}
-                rows={spec.rows}
-                onCellDown={onCellDown}
-                onCellEnter={onCellEnter}
-                setHoverCell={setHoverCell}
-              />
-            )
-          case 'rack':
-            return (
-              <RackView
-                key={item.key}
-                rack={item}
-                highlighted={highlightIds.has(item.key)}
-                hovered={hoverEntity === item.entity?.id}
-                selectProps={makeSelectProps(canSelect, item.entity, onEntityDown, setHoverEntity)}
-              />
-            )
-          case 'tower':
-            return (
-              <TowerView
-                key={item.key}
-                tower={item}
-                highlighted={highlightIds.has(item.key)}
-                hovered={hoverEntity === item.entity?.id}
-                selectProps={makeSelectProps(canSelect, item.entity, onEntityDown, setHoverEntity)}
-              />
-            )
-          case 'box':
-            return (
-              <BoxView
-                key={item.key}
-                box={item}
-                highlighted={highlightIds.has(item.key)}
-                hovered={hoverEntity === item.entity?.id}
-                selectProps={makeSelectProps(canSelect, item.entity, onEntityDown, setHoverEntity)}
-              />
-            )
-        }
-      })}
+      {layers.slabs.map((slab) => (
+        <SlabView
+          key={slab.key}
+          slab={slab}
+          isActive={slab.label === activeFloor}
+          cols={spec.cols}
+          rows={spec.rows}
+          onCellDown={onCellDown}
+          onCellEnter={handleCellEnter}
+          setHoverCell={setHoverCell}
+        />
+      ))}
+
+      <BatchedTopologyMeshes
+        boxes={layers.boxes}
+        racks={layers.racks}
+        cylinders={layers.cylinders}
+        highlightKeys={highlightIds}
+        hoveredEntityId={hoverEntity}
+        canSelect={canSelect}
+        onEntityDown={onEntityDown}
+        setHoverEntity={setHoverEntity}
+      />
+
+      {layers.towers.map((tower) => (
+        <TowerView
+          key={tower.key}
+          tower={tower}
+          highlighted={highlightIds.has(tower.key)}
+          hovered={hoverEntity === tower.entity?.id}
+          selectProps={makeSelectProps(canSelect, tower.entity, onEntityDown, setHoverEntity)}
+        />
+      ))}
 
       <GoodsBoxes boxes={goodsBoxes} />
+
+      {pickingArms.map((node) => {
+        const entity: SceneEntity = { kind: 'node', id: node.id, floor: node.floor ?? '1F' }
+        return (
+          <TopologyPickingArm
+            key={`full-arm-${node.id}`}
+            node={node}
+            cols={spec.cols}
+            rows={spec.rows}
+            floorY={activeFloorY}
+            highlighted={highlightIds.has(`${node.id}-base`) || selection?.kind === 'node' && selection.id === node.id}
+            hovered={hoverEntity === node.id}
+            selectProps={makeSelectProps(canSelect, entity, onEntityDown, setHoverEntity)}
+          />
+        )
+      })}
+
+      {shuttleRobots.map((node) => {
+        const entity: SceneEntity = { kind: 'node', id: node.id, floor: node.floor ?? '1F' }
+        const highlighted = selection?.kind === 'node' && selection.id === node.id
+        return (
+          <group
+            key={`full-shuttle-${node.id}`}
+            position={[
+              worldX(node.col, spec.cols) + CELL / 2,
+              activeFloorY,
+              worldZ(node.row, spec.rows) - CELL / 2,
+            ]}
+            {...makeSelectProps(canSelect, entity, onEntityDown, setHoverEntity)}
+          >
+            <ShuttleCartModel
+              paused
+              highlighted={highlighted || hoverEntity === node.id}
+            />
+          </group>
+        )
+      })}
 
       {/* 活动层网格线（落位辅助） */}
       <lineSegments position={[0, activeFloorY + 0.24, 0]}>
@@ -308,20 +497,25 @@ export default function Topology3DScene({
   onCellEnter,
   onEntityDown,
   onMoveCell,
+  onCompassAngleChange,
 }: Topology3DSceneProps) {
-  const spec = useMemo(() => buildSceneSpec(topology, goods), [topology, goods])
+  const spec = useMemo(() => buildSceneSpec(topology), [topology])
+  const goodsBoxes = useGoodsLayer(topology, goods ?? [], spec.floors)
 
   return (
     <Canvas
-      dpr={[1, 2]}
-      gl={{ antialias: true, alpha: true }}
+      dpr={1}
+      frameloop="demand"
+      gl={{ antialias: false, alpha: true }}
       camera={{ position: spec.camera.position, fov: 42, near: 0.1, far: 4000 }}
       style={{ background: 'transparent' }}
     >
       <color attach="background" args={['#0a0f19']} />
       <fog attach="fog" args={['#0a0f19', 500, 1600]} />
       <SceneContent
+        topology={topology}
         spec={spec}
+        goodsBoxes={goodsBoxes}
         activeFloor={activeFloor}
         activeTool={activeTool}
         activeZoneType={activeZoneType}
@@ -332,6 +526,7 @@ export default function Topology3DScene({
         onEntityDown={onEntityDown}
         onMoveCell={onMoveCell}
       />
+      <CompassOrientationReporter target={spec.camera.target} onChange={onCompassAngleChange} />
       <OrbitControls
         makeDefault
         target={spec.camera.target}

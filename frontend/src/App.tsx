@@ -1,22 +1,17 @@
-import { Routes, Route } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import { NavShell } from './components/NavShell'
-import { DashboardPage } from './pages/DashboardPage'
 import { TopologyPage } from './pages/TopologyPage'
-import { ScenarioPage } from './pages/ScenarioPage'
 import { SimulationPage } from './pages/SimulationPage'
-import { LabPage } from './pages/LabPage'
-import { ReportsPage } from './pages/ReportsPage'
 
 export default function App() {
   return (
     <NavShell>
       <Routes>
-        <Route path="/" element={<DashboardPage />} />
+        <Route path="/" element={<Navigate to="/topology" replace />} />
         <Route path="/topology" element={<TopologyPage />} />
-        <Route path="/scenario" element={<ScenarioPage />} />
         <Route path="/simulation" element={<SimulationPage />} />
-        <Route path="/lab" element={<LabPage />} />
-        <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/simulation/orders" element={<SimulationPage />} />
+        <Route path="*" element={<Navigate to="/topology" replace />} />
       </Routes>
     </NavShell>
   )

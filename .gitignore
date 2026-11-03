@@ -8,3 +8,6 @@ frontend/playwright-report/
 frontend/playwright.screenshots/
 __pycache__/
 *.pyc
+
+data/wms.db
+frontend/src/lib/__tmp_demo.json
