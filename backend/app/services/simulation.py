@@ -13,7 +13,14 @@ from fastapi import WebSocket
 
 from ..core.repository import Repository
 from .assignment import assign_tasks
-from .conveyor import compile_conveyor_graph, nearest_lift_id, normalize_conveyor_anchors, route_from_block, route_from_cell
+from .conveyor import (
+    compile_conveyor_graph,
+    nearest_lift_id,
+    normalize_conveyor_anchors,
+    route_from_block,
+    route_from_block_branch,
+    route_from_cell,
+)
 from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes
 from .pathfinding import (
     build_occupied_lookup,
@@ -979,7 +986,7 @@ class SimulationService:
         )
         if not route:
             # 路径异常时保留货箱而不是让它消失，并明确把任务标为异常。
-            box = dict((task.get("deliveredGoods") or task.get("lines") or [{}])[0])
+            box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
             runtime.state.setdefault("armBeltBoxes", []).append({
                 **box,
                 "taskId": task.get("id"),
@@ -1146,7 +1153,7 @@ class SimulationService:
             int(final_node.get("col", 0)),
             str(final_node.get("floor") or "1F"),
         )
-        box = dict((task.get("deliveredGoods") or task.get("lines") or [{}])[0])
+        box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
         runtime.state.setdefault("armBeltBoxes", []).append({
             **box,
             "taskId": task.get("id"),
@@ -1163,10 +1170,12 @@ class SimulationService:
         task["phaseLabel"] = self._phase_label("completed")
         task["completedTick"] = tick
         task["remainingStageTicks"] = 0
-        runtime.metrics["completedTasks"] += 1
-        runtime.metrics["throughput"] += 1
-        if task.get("urgent"):
-            runtime.metrics["urgentOrdersHandled"] += 1
+        # 子任务（有 parentId）不单独算 completedTasks / throughput
+        if not task.get("parentId"):
+            runtime.metrics["completedTasks"] += 1
+            runtime.metrics["throughput"] += 1
+            if task.get("urgent"):
+                runtime.metrics["urgentOrdersHandled"] += 1
         task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
         self._record_event(
             runtime,
@@ -2123,7 +2132,7 @@ class SimulationService:
         urgent_tick = runtime.config["orderGenerator"].get("urgentInsertionTick")
         if urgent_tick != tick:
             return
-        if any(task["urgent"] and task["createdTick"] == urgent_tick for task in runtime.state["tasks"]):
+        if any(task.get("urgent") and task.get("createdTick") == urgent_tick for task in runtime.state["tasks"]):
             return
         delivery = self._first_delivery_cell(runtime.topology)
         if not delivery:
@@ -3046,7 +3055,12 @@ class SimulationService:
         self._complete_task(runtime, robot, task)
 
     def _pick_station_for(self, runtime: RunRuntime, task: dict[str, Any]) -> dict[str, Any] | None:
-        """为任务选择人工拣货位（取离交付出入口最近的一个）；仅 CTU 任务启用。"""
+        """为任务选择人工拣货位（取离交付出入口最近的一个）；仅 CTU 任务启用。
+
+        拓扑没有显式 pick_station 区域时，回退用同一 assignedPortId 作为虚拟拣货位——
+        让输送线链路（conveyor_to_lift → lift_to_upper → conveyor_to_pick → picking →
+        place_goods 分裂 → conveyor_return 回库）能启动，货箱全程由 transport 逐块同步。
+        """
         if task.get("robotType") != "ctu":
             return None
         zones = [
@@ -3055,6 +3069,15 @@ class SimulationService:
             if zone.get("type") == "pick_station"
         ]
         if not zones:
+            port_zone_id = task.get("assignedPortId")
+            if port_zone_id:
+                port_zones = [
+                    zone
+                    for zone in runtime.topology.get("zones", [])
+                    if zone.get("id") == port_zone_id
+                ]
+                if port_zones:
+                    return port_zones[0]
             return None
         try:
             _, row, col = parse_cell_id(task.get("deliveryCellId") or "")
@@ -3095,10 +3118,102 @@ class SimulationService:
         task: dict[str, Any],
         phase: str,
     ) -> int | None:
-        """为显式分层输送模型创建逐块运输状态；旧拓扑继续使用原固定 tick。"""
+        """为显式分层输送模型创建逐块运输状态；旧拓扑继续使用原固定 tick。
+
+        除 conveyor_to_lift / conveyor_return 两条滑动路线外，lift_to_upper /
+        conveyor_to_pick / picking / place_goods 也挂 transport（静态或短滑行），
+        让前端全程用 transportPoint 定位货箱：货箱在下层终点（升降机）平滑抬升、
+        沿上层滑到拣货台并停住，避免阶段切换时回退到入口重播动画造成"消失/凭空出现"。
+        """
         if not runtime.conveyor_graph.get("explicit"):
             task["conveyorTransport"] = None
             return None
+        if phase == "lift_to_upper":
+            # 升降机抬升：等待升降权期间货箱停在下层注入块（不下水到上层），
+            # 拿到升降权后由驱动器把 deck 翻转为 upper，货箱才平滑抬升。
+            lift_block = task.get("liftBlockId")
+            if not lift_block:
+                task["conveyorTransport"] = None
+                return None
+            node_id = str(lift_block) if str(lift_block).endswith(":lower") else f"{lift_block}:lower"
+            task["conveyorTransport"] = {
+                "phase": phase,
+                "deck": "lower",
+                "route": [node_id],
+                "index": 0,
+                "currentBlockId": node_id,
+                "nextBlockId": None,
+                "waitingTicks": 0,
+                "movedTicks": 0,
+                "startedTick": int(runtime.state["tick"]),
+            }
+            return None  # 保持默认 liftTicks 计时；transport 仅用于前端定位
+        if phase == "conveyor_to_pick":
+            # 上层滑行：从升降设备块滑回上层线首，再向前走到拣货台
+            # （本布局：94 设备 → 92 → 90 → 88 拣货台，共 4 块）。
+            lift_block = task.get("liftBlockId")
+            if not lift_block:
+                task["conveyorTransport"] = None
+                return None
+            route = route_from_block(runtime.conveyor_graph, str(lift_block), "upper")[:3]
+            if not route:
+                task["conveyorTransport"] = None
+                return None
+            device_block = self._lift_device_block(runtime, task)
+            if device_block:
+                # 路线起点为升降设备块：货箱从设备上平滑滑入上层线首
+                route = [f"{device_block}:upper"] + route
+            task["conveyorTransport"] = {
+                "phase": phase,
+                "deck": "upper",
+                "route": route,
+                "index": 0,
+                "currentBlockId": route[0],
+                "nextBlockId": route[1] if len(route) > 1 else None,
+                "waitingTicks": 0,
+                "movedTicks": 0,
+                "startedTick": int(runtime.state["tick"]),
+            }
+            return max(1, len(route))
+        if phase in ("picking", "place_goods"):
+            # 拣货/放置：货箱停在拣货台块上（"停几秒钟"），transport 仅用于前端定位。
+            station_block = task.get("stationBlockId")
+            if not station_block:
+                task["conveyorTransport"] = None
+                return None
+            node_id = str(station_block) if str(station_block).endswith(":upper") else f"{station_block}:upper"
+            task["conveyorTransport"] = {
+                "phase": phase,
+                "deck": "upper",
+                "route": [node_id],
+                "index": 0,
+                "currentBlockId": node_id,
+                "nextBlockId": None,
+                "waitingTicks": 0,
+                "movedTicks": 0,
+                "startedTick": int(runtime.state["tick"]),
+            }
+            return None  # 保持 pickTicks / placeTicks 计时
+        if phase == "pickup_from_port":
+            # CTU 到回库口取回期间，货箱视觉上停在回库口块（上层），
+            # 直到被 CTU 取走（_advance_pickup_from_port 会清掉 transport）。
+            end_block = task.get("returnEndBlockId")
+            if not end_block:
+                task["conveyorTransport"] = None
+                return None
+            node_id = str(end_block) if str(end_block).endswith(":upper") else f"{end_block}:upper"
+            task["conveyorTransport"] = {
+                "phase": phase,
+                "deck": "upper",
+                "route": [node_id],
+                "index": 0,
+                "currentBlockId": node_id,
+                "nextBlockId": None,
+                "waitingTicks": 0,
+                "movedTicks": 0,
+                "startedTick": int(runtime.state["tick"]),
+            }
+            return None  # 等待 CTU 到达取回，无固定计时
         if phase == "conveyor_to_lift":
             deck = "lower"
             reference_cell = task.get("deliveryCellId")
@@ -3125,18 +3240,143 @@ class SimulationService:
         if not route:
             task["conveyorTransport"] = None
             return None
+        # 回库支线：沿图上正式分叉（(84,c) 向北 → (82,c) → 回库口链），
+        # 货箱从拣货台 (88,c) 起全程可见地滑行到回库口。
+        # 注意不能用 route_from_cell 兜底：分叉加入后回库段起点不再是源头节点，
+        # route_from_cell 会找到送货源头 92:c 而返回整条送货路线。
+        if phase == "conveyor_return":
+            station_block = task.get("stationBlockId")
+            if station_block:
+                parts = str(station_block).split(":")
+                if len(parts) >= 3:
+                    s_row, s_col = int(parts[1]), int(parts[2])
+                    branch_route = route_from_block_branch(
+                        runtime.conveyor_graph,
+                        str(station_block),
+                        deck,
+                        branch_side="north",
+                    )
+                    if branch_route and branch_route[0] == f"{station_block}:upper":
+                        last_parts = branch_route[-1].split(":")
+                        # 校验终点：与拣货台同列、位于其北侧（回库口），不是送货主线
+                        if int(last_parts[2]) == s_col and int(last_parts[1]) < s_row:
+                            route = branch_route
+        # index 从 0 起步（currentBlockId=route[0]）：货箱第一帧就出现在线首，
+        # 避免 index=-1 时前端 transportPoint 为空回退重播动画造成的闪烁。
         task["conveyorTransport"] = {
             "phase": phase,
             "deck": deck,
             "route": route,
-            "index": -1,
-            "currentBlockId": None,
-            "nextBlockId": route[0],
+            "index": 0,
+            "currentBlockId": route[0],
+            "nextBlockId": route[1] if len(route) > 1 else None,
             "waitingTicks": 0,
             "movedTicks": 0,
             "startedTick": int(runtime.state["tick"]),
         }
         return max(1, len(route))
+
+    def _find_pick_station_block(self, runtime: RunRuntime, pick_cell_id: str) -> str | None:
+        """从 pickStationCellId（port zone entry cell）找到对应的拣货台上输送块 block_id。
+
+        port zone entry cell 在 row~73，而拣货台上输送块在 row~88（row 值更大）。
+        两者 col 接近（±5）。从输送线 upper deck nodes 中选 col 最接近且 row 最大的，
+        就能找到拣货台 anchor block。返回不带 deck 后缀的 block_id，如 "1F:88:66"。
+        """
+        try:
+            _, ref_row, ref_col = parse_cell_id(pick_cell_id)
+        except (TypeError, ValueError):
+            return None
+        nodes = runtime.conveyor_graph.get("nodes", {})
+        upper_nodes = [
+            node for node in nodes.values()
+            if node.get("deck") == "upper" and not node.get("ground")
+        ]
+        if not upper_nodes:
+            return None
+        # 先按 col 距离排序，选 col 差距 ≤ 5 的（或取 col 最接近的）
+        def col_dist(node: dict[str, Any]) -> int:
+            return abs(int(node.get("col", 0)) - ref_col)
+        sorted_by_col = sorted(upper_nodes, key=col_dist)
+        # 取 col 最接近的前几名，在其中找 row 最大的（拣货台 anchor row 通常最大）
+        top_col = sorted_by_col[: max(3, len(sorted_by_col) // 4)]
+        best = max(top_col, key=lambda n: int(n.get("row", 0)))
+        node_id = best.get("id", "")
+        # node_id 格式 "1F:88:66:upper" → 去掉最后一个 ":upper" 得到 "1F:88:66"
+        if node_id.endswith(":upper"):
+            return node_id[: -len(":upper")]
+        return node_id
+
+    def _spawn_placed_goods_delivery(self, runtime: RunRuntime, parent_task: dict[str, Any]) -> None:
+        """Picking 分裂：已拣部分（placedGoods）创建 forward 输送线子任务。
+
+        从拣货台对应的上层输送块出发，沿 next 方向走到出货口 (118,60)。
+        这是一个纯输送线任务——没有 robot 参与，只由 conveyorTransport 推进。
+        """
+        placed = parent_task.get("placedGoods") or []
+        if not placed:
+            return
+        pick_cell = parent_task.get("pickStationCellId")
+        if not pick_cell:
+            return
+
+        # 找到拣货台对应的上层输送块 block_id。
+        # 优先用父任务在 conveyor_to_pick 结束时记录的 stationBlockId（拣货台 anchor，
+        # 如 1F:88:66）；没有时回退到按 pickStationCellId 列对齐 + 最大行的启发式。
+        station_block = parent_task.get("stationBlockId")
+        if station_block:
+            route = route_from_block(runtime.conveyor_graph, str(station_block), "upper")
+        else:
+            block_id = self._find_pick_station_block(runtime, pick_cell)
+            route = route_from_block(runtime.conveyor_graph, block_id, "upper") if block_id else []
+        if not route:
+            return  # 没有可走的 forward 路线 → 放弃（不会发货丢失，任务至少完成了回库）
+        child_id = f"{parent_task['id']}-placed-fwd"
+        # 确保不重复创建
+        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
+            return
+        child_task: dict[str, Any] = {
+            "id": child_id,
+            "parentId": parent_task["id"],
+            "taskKind": "placed_goods_delivery",
+            "robotType": "none",  # 纯输送线，无 robot
+            "status": "assigned",
+            "phase": "arm_conveyor_delivery",
+            "phaseLabel": "已拣货物上层输送",
+            "lines": [],
+            "transitGoods": [dict(slot) for slot in placed],
+            "placedGoods": [],
+            "deliveredGoods": [],
+            "picked": 0,
+            "history": [{"tick": runtime.state["tick"], "phase": "arm_conveyor_delivery", "status": "assigned"}],
+            "pickStationCellId": pick_cell,
+            "assignedPortId": parent_task.get("assignedPortId"),
+            "deliveryCellId": parent_task.get("deliveryCellId"),
+            "createdTick": runtime.state["tick"],
+            "startedTick": runtime.state["tick"],
+            "completedTick": None,
+            "urgent": bool(parent_task.get("urgent")),
+            "orderId": parent_task.get("orderId"),
+        }
+        child_task["conveyorTransport"] = {
+            "phase": "arm_conveyor_delivery",
+            "deck": "upper",
+            "route": route,
+            "index": 0,
+            "currentBlockId": route[0],
+            "nextBlockId": route[1] if len(route) > 1 else None,
+            "waitingTicks": 0,
+            "movedTicks": 0,
+            "startedTick": runtime.state["tick"],
+            "travelProgressSeconds": 0.0,
+        }
+        runtime.state.setdefault("tasks", []).append(child_task)
+        self._record_event(
+            runtime,
+            runtime.state["tick"],
+            "task_spawned",
+            {"taskId": child_id, "parentId": parent_task["id"], "phase": "arm_conveyor_delivery", "placedGoodsCount": len(placed), "routeLen": len(route)},
+        )
 
     def _advance_conveyor_transport(
         self,
@@ -3242,6 +3482,17 @@ class SimulationService:
         winner = min(contenders, key=lambda other: (int(other.get("liftEnteredTick", 0)), str(other.get("id"))))
         return winner.get("id") == task.get("id")
 
+    def _lift_device_block(self, runtime: RunRuntime, task: dict[str, Any]) -> str | None:
+        """返回任务所配升降移载机的设备块（如 1F:94:90），用于货箱滑上设备再抬升。"""
+        resource_id = task.get("conveyorResourceId")
+        if not resource_id:
+            return None
+        for node in runtime.topology.get("nodes", []):
+            if node.get("id") == resource_id:
+                floor = str(node.get("floor") or "1F")
+                return f"{floor}:{int(node.get('row', 0))}:{int(node.get('col', 0))}"
+        return None
+
     def _enter_timed_stage(
         self,
         runtime: RunRuntime,
@@ -3337,6 +3588,7 @@ class SimulationService:
         else:
             self._start_conveyor_return(runtime, robot, task)
 
+
     def _start_conveyor_return(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
         """空货箱放回上层输送线，沿原路运回上层的输送线出入口。"""
         task["returnLineIndex"] = 0
@@ -3350,6 +3602,8 @@ class SimulationService:
         capacity = int(robot.get("capacity", ROBOT_CARRY_CAPACITY.get("ctu", 5)))
         robot["carrying"] = [dict(slot) for slot in goods]
         robot["load"] = min(capacity, len(goods))
+        # 货箱已被 CTU 取走：清掉回库口停靠 transport，后续由车载渲染接管。
+        task["conveyorTransport"] = None
         task["returnLineIndex"] = 0
         task["history"].append({"tick": tick, "phase": "pickup_from_port", "status": task["status"]})
         self._record_event(
@@ -3677,9 +3931,20 @@ class SimulationService:
             "place_goods",
             "conveyor_return",
         }:
-            if task["phase"] in {"conveyor_to_lift", "conveyor_return"} and task.get("conveyorTransport"):
+            if task["phase"] in {"conveyor_to_lift", "conveyor_to_pick", "conveyor_return"} and task.get("conveyorTransport"):
                 if not self._advance_conveyor_transport(runtime, robot, task):
                     return
+                transport = task.get("conveyorTransport") or {}
+                current_block = str(transport.get("currentBlockId") or "")
+                if task["phase"] == "conveyor_to_lift" and current_block:
+                    # 记录升降注入块（下层终点），供 lift_to_upper / conveyor_to_pick 定位。
+                    task["liftBlockId"] = current_block.removesuffix(":lower")
+                elif task["phase"] == "conveyor_to_pick" and current_block:
+                    # 记录拣货台块，供 picking / place_goods 停靠与分裂子任务起点使用。
+                    task["stationBlockId"] = current_block.removesuffix(":upper")
+                elif task["phase"] == "conveyor_return" and current_block:
+                    # 记录回库口块，供 pickup_from_port 阶段停靠定位。
+                    task["returnEndBlockId"] = current_block.removesuffix(":upper")
                 task["conveyorTransport"] = None
                 self._advance_timed_stage(runtime, robot, task)
                 return
@@ -3687,6 +3952,29 @@ class SimulationService:
                 robot["status"] = "waiting"
                 robot["phaseLabel"] = "等待升降移载机"
                 return
+            if task["phase"] == "lift_to_upper":
+                # 升降编排：拿到升降权后货箱先滑上升降机设备块，
+                # 计时末段再在设备上抬升到上层（deck 翻转为 upper）。
+                lift_transport = task.get("conveyorTransport")
+                if isinstance(lift_transport, dict) and lift_transport.get("deck") != "upper":
+                    device_block = self._lift_device_block(runtime, task)
+                    if device_block:
+                        # 滑上升降机（输送线末端 → 设备块）
+                        device_lower = f"{device_block}:lower"
+                        if lift_transport.get("currentBlockId") != device_lower:
+                            lift_transport["currentBlockId"] = device_lower
+                            lift_transport["route"] = [device_lower]
+                    if int(task.get("remainingStageTicks", 0)) <= 1:
+                        # 末段抬升
+                        lift_transport["deck"] = "upper"
+                        if device_block:
+                            device_upper = f"{device_block}:upper"
+                            lift_transport["currentBlockId"] = device_upper
+                            lift_transport["route"] = [device_upper]
+                        else:
+                            base = str(lift_transport.get("currentBlockId") or "").removesuffix(":lower")
+                            lift_transport["currentBlockId"] = base + ":upper"
+                            lift_transport["route"] = [base + ":upper"]
             remaining = int(task.get("remainingStageTicks", 0)) - 1
             task["remainingStageTicks"] = max(0, remaining)
             if remaining > 0:
@@ -3725,9 +4013,65 @@ class SimulationService:
             self._finish_picking(runtime, task, robot)
             return
         if phase == "place_goods":
-            # 拣出的货物落到放置区：记录快照供前端渲染放置区货物，空货箱开始回程。
-            task["placedGoods"] = [dict(line) for line in (task.get("lines") or [])]
-            self._start_conveyor_return(runtime, robot, task)
+            # ===== Picking 分裂点 =====
+            # 从 transitGoods（输送线送来的货箱）里扣减拣出数量：
+            # - 已拣部分合并成 placedGoods（继续 forward 输送线到出货口）
+            # - 剩余 qty 留在 transitGoods（走 conveyor_return 回库）
+            # - qty 归零的空箱丢弃（无需回库）
+            transit = task.get("transitGoods") or []
+            if not transit:
+                # 没有输送过来的货箱——兜底处理
+                task["placedGoods"] = [dict(line) for line in (task.get("lines") or [])]
+            else:
+                placed_fragments: list[dict[str, Any]] = []
+                new_transit: list[dict[str, Any]] = []
+                for slot in transit:
+                    sku = slot.get("skuId")
+                    slot_qty = max(1, int(slot.get("qty", 1)))
+                    pick_qty = min(slot_qty, 1)  # 每个货箱默认拣 1 件
+                    placed_fragments.append({
+                        "skuId": sku,
+                        "skuName": slot.get("skuName"),
+                        "qty": pick_qty,
+                        "nodeId": slot.get("nodeId"),
+                        "layer": slot.get("layer"),
+                        "cellId": slot.get("cellId"),
+                    })
+                    leftover = slot_qty - pick_qty
+                    if leftover > 0:
+                        leftover_slot = dict(slot)
+                        leftover_slot["qty"] = leftover
+                        new_transit.append(leftover_slot)
+                # 汇总 placedGoods（同 SKU 合并 qty）
+                placed_map: dict[str, dict[str, Any]] = {}
+                for frag in placed_fragments:
+                    key = frag["skuId"]
+                    if key in placed_map:
+                        placed_map[key]["qty"] = int(placed_map[key].get("qty", 1)) + int(frag["qty"])
+                    else:
+                        placed_map[key] = dict(frag)
+                task["placedGoods"] = list(placed_map.values())
+                task["transitGoods"] = new_transit
+
+            # ===== 分裂：已拣部分创建 forward 输送线子任务 =====
+            if task.get("placedGoods"):
+                self._spawn_placed_goods_delivery(runtime, task)
+
+            # 剩余货箱走 conveyor_return 回库；如果 transitGoods 已空则直接 complete
+            if task.get("transitGoods"):
+                self._start_conveyor_return(runtime, robot, task)
+            else:
+                task["phase"] = "completed"
+                task["status"] = "completed"
+                task["completedTick"] = runtime.state["tick"]
+                robot["carrying"] = []
+                robot["load"] = 0
+                self._record_event(
+                    runtime,
+                    runtime.state["tick"],
+                    "task_completed",
+                    {"taskId": task["id"], "reason": "空箱无剩余，直接完成"},
+                )
             return
         if phase == "conveyor_return":
             # 货箱经上层输送线回到出入口，CTU 再到出入口取回。
@@ -3737,6 +4081,9 @@ class SimulationService:
             task["status"] = "assigned"
             robot["status"] = "moving"
             robot["handlingAction"] = None
+            # 回库口停靠 transport：货箱视觉上停在回库口块等待 CTU 取回。
+            # （此阶段不走 _enter_timed_stage，需要显式调用 _prepare 创建。）
+            self._prepare_conveyor_transport(runtime, task, "pickup_from_port")
             if task.get("deliveryCellId"):
                 self._set_robot_leg(
                     runtime,
@@ -3939,8 +4286,13 @@ class SimulationService:
         ]
         active = [robot for robot in runtime.state["robots"] if robot["status"] in {"moving", "handling", "returning"}]
         blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
-        completed = [task for task in runtime.state["tasks"] if task["completedTick"] is not None and task["startedTick"] is not None]
-        completed_durations = [task["completedTick"] - task["startedTick"] for task in completed]
+        completed = [
+            task for task in runtime.state["tasks"]
+            if task.get("completedTick") is not None and task.get("startedTick") is not None
+        ]
+        completed_durations = [
+            int(task["completedTick"]) - int(task["startedTick"]) for task in completed
+        ]
         conveyor_items: list[dict[str, Any]] = []
         for task in pending:
             transport = task.get("conveyorTransport")

@@ -13,8 +13,8 @@ import type {
   TransportLayoutPlan,
 } from '../types'
 
-const API_BASE = 'http://127.0.0.1:8000/api/v1'
-const WS_BASE = 'ws://127.0.0.1:8000/ws'
+const API_BASE = 'http://127.0.0.1:8001/api/v1'
+const WS_BASE = 'ws://127.0.0.1:8001/ws'
 
 type ApiValidationIssue = {
   loc?: Array<string | number>

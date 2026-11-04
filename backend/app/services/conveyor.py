@@ -149,6 +149,17 @@ def conveyor_input_sides(config: dict[str, Any]) -> list[Side]:
     return sides
 
 
+def conveyor_output_sides(config: dict[str, Any]) -> list[Side]:
+    """读取模块层的出口方向列表：outputSides 数组（多出口分流），缺省回退 outputSide 单出口。"""
+    stored = config.get("outputSides")
+    raw = stored if isinstance(stored, list) and stored else [config.get("outputSide")]
+    sides: list[Side] = []
+    for side in raw:
+        if side in SIDE_STEP and side not in sides:
+            sides.append(side)
+    return sides
+
+
 def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
     """把 2×2 输送块编译为按层有向图；旧 direction 数据在这里自动迁移读取。"""
     blocks: dict[tuple[str, int, int], dict[str, Any]] = {}
@@ -246,33 +257,29 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
             output_side: Side = str(config.get("outputSide") or "east")  # type: ignore[assignment]
             input_side: Side = str(config.get("inputSide") or opposite_side(output_side))  # type: ignore[assignment]
             input_sides = conveyor_input_sides(config) or [input_side]
+            output_sides = conveyor_output_sides(config) or [output_side]
             if cell.get("conveyorDecks") and output_side in input_sides:
                 issues.append({"blockId": key, "deck": deck, "message": "入口侧和出口侧不能相同。"})
             if cell.get("conveyorDecks") and cell.get("conveyorGround") and deck == "upper":
                 issues.append({"blockId": key, "deck": deck, "message": "地面输送线不能配置上层。"})
-            dr, dc = SIDE_STEP[output_side]
-            next_block = blocks.get((floor, row + dr, col + dc))
-            next_key: str | None = None
-            if next_block is not None:
-                next_config = deck_config(floor, row + dr, col + dc, next_block, deck)
-                if (
-                    same_line(cell, next_block)
-                    and
-                    next_config
-                    and next_config.get("enabled", True)
-                    and opposite_side(output_side) in conveyor_input_sides(next_config)
-                ):
-                    next_key = f"{floor}:{row + dr}:{col + dc}:{deck}"
-                elif (
-                    cell.get("conveyorDecks")
-                    and next_block.get("conveyorDecks")
-                    and same_line(cell, next_block)
-                ):
-                    issues.append({
-                        "blockId": key,
-                        "deck": deck,
-                        "message": "出口方向与下一手动配置模块的入口方向不匹配。",
-                    })
+            # 多出口：逐个出口方向解析下游邻块（分流器），主出口 = 第一个连通的出口。
+            # 单出口模块（未配置 outputSides）行为与旧编译完全一致。
+            nexts: dict[str, str | None] = {}
+            for out_side in output_sides:
+                out_dr, out_dc = SIDE_STEP[out_side]
+                out_block = blocks.get((floor, row + out_dr, col + out_dc))
+                out_key: str | None = None
+                if out_block is not None:
+                    out_config = deck_config(floor, row + out_dr, col + out_dc, out_block, deck)
+                    if (
+                        same_line(cell, out_block)
+                        and out_config
+                        and out_config.get("enabled", True)
+                        and opposite_side(out_side) in conveyor_input_sides(out_config)
+                    ):
+                        out_key = f"{floor}:{row + out_dr}:{col + out_dc}:{deck}"
+                nexts[out_side] = out_key
+            next_key: str | None = next((nk for nk in nexts.values() if nk), None)
             for accepted_input in input_sides:
                 previous_block = neighbors.get(accepted_input)
                 if (
@@ -292,7 +299,10 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                     if not (
                         previous_config
                         and previous_config.get("enabled", True)
-                        and previous_config.get("outputSide") == opposite_side(accepted_input)
+                        and (
+                            previous_config.get("outputSide") == opposite_side(accepted_input)
+                            or opposite_side(accepted_input) in conveyor_output_sides(previous_config)
+                        )
                     ):
                         issues.append({
                             "blockId": key,
@@ -308,18 +318,21 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                 "inputSide": input_side,
                 "inputSides": input_sides,
                 "outputSide": output_side,
+                "outputSides": output_sides,
                 "role": config.get("role", "custom"),
                 "capacity": max(1, int(config.get("capacity", 1) or 1)),
                 "speed": max(0.01, float(config.get("speed", 1.0) or 1.0)),
                 "ground": bool(cell.get("conveyorGround")),
                 "lineId": cell.get("conveyorLineId"),
                 "next": next_key,
+                "nexts": nexts,
             }
 
     indegree = {key: 0 for key in nodes}
     for node in nodes.values():
-        if node["next"] in indegree:
-            indegree[node["next"]] += 1
+        for branch_next in (node.get("nexts") or {}).values():
+            if branch_next in indegree:
+                indegree[branch_next] += 1
     explicit = any(
         isinstance(cell.get("conveyorDecks"), dict)
         for cell in topology.get("cells", [])
@@ -426,3 +439,36 @@ def nearest_lift_id(topology: dict[str, Any], block_id: str | None) -> str | Non
         return None
     lift = min(lifts, key=lambda node: abs(int(node["row"]) - row) + abs(int(node["col"]) - col))
     return str(lift.get("id"))
+
+
+def route_from_block_branch(
+    graph: dict[str, Any],
+    block_id: str | None,
+    deck: Deck,
+    *,
+    branch_side: Side,
+    branch_target: str | None = None,
+) -> list[str]:
+    """沿多出口图行走：在第一个「branch_side 出口指向 branch_target」的块上分叉，
+    其余块走主出口；图无该分叉时沿主出口走到链尾（退化为 route_from_block）。
+
+    用于分流场景（如回库支线）：主出口继续去出货口，分叉出口送回库段。
+    """
+    if not block_id:
+        return []
+    start = block_id if block_id.endswith(f":{deck}") else f"{block_id}:{deck}"
+    current = graph.get("nodes", {}).get(start)
+    route: list[str] = []
+    seen: set[str] = set()
+    while current and current["id"] not in seen:
+        seen.add(current["id"])
+        route.append(current["id"])
+        nexts = current.get("nexts") or {}
+        candidate = nexts.get(branch_side)
+        next_id: str | None = None
+        if candidate and (branch_target is None or candidate == branch_target):
+            next_id = candidate
+        if not next_id:
+            next_id = current.get("next")
+        current = graph.get("nodes", {}).get(next_id) if next_id else None
+    return route

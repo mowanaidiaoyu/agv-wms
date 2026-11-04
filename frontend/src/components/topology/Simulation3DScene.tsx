@@ -1345,7 +1345,11 @@ function Simulation3DScene({
     const robotsById = new Map(robots.map((robot) => [robot.id, robot]))
 
     for (const task of tasks) {
-      if (!task.lines.length) continue
+      // 允许 placed_goods_delivery 子任务（lines 为空但有 transitGoods + 活跃 conveyorTransport）进入渲染
+      const hasRenderableGoods = task.lines?.length
+        || task.transitGoods?.length
+        || task.deliveredGoods?.length
+      if (!hasRenderableGoods) continue
 
       // 拣出货物渲染到放置区：优先用 task.dropZoneCellId，解析失败回退到最近 drop_zone 的底边中点。
       if (dropGoodsPhases.has(task.phase)) {
@@ -1404,6 +1408,10 @@ function Simulation3DScene({
           // 没有拣货位、或四向车任务（整箱走地面输送线，交付后即完成）：
           // 任务完成即播放；机器人已停在出入口的交付阶段也提前生成，
           // 避免第一辆车交付瞬间因阶段推进而错过动画。
+          // 注意：本拓扑 CTU 任务一律由后端拣货链路驱动（transport 逐块同步），
+          // 在途与完成阶段都不需要入口重播动画——重播箱会与车上货箱、
+          // 分裂子任务重叠形成"幽灵箱"（凭空出现/两箱重叠的元凶）。
+          if (robot?.type === 'ctu') continue
           const atPort = robot?.currentCellId === task.deliveryCellId
           if (task.phase !== 'completed' && !(task.phase === 'delivery_to_port' && atPort)) continue
         }
@@ -1645,16 +1653,19 @@ function Simulation3DScene({
           : task.robotType === 'ctu' || robot?.type === 'ctu'
           ? CTU_GOODS_COLOR
           : GOODS_CATEGORY_COLORS[line.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+        // 同任务多箱的横向展开：默认 0.12 会让两箱几乎完全重叠，看起来像一箱
+        const slotLateral = (lineIndex % 2) * 0.36 - 0.18
+        const slotStack = Math.floor(lineIndex / 2) * 0.16
         if (transportPoint) {
           const synchronizedPoint: [number, number, number] = [
-            transportPoint[0] + (lineIndex % 2) * 0.12 - 0.06,
-            transportPoint[1] + Math.floor(lineIndex / 2) * 0.14,
-            transportPoint[2] + (lineIndex % 2) * 0.12 - 0.06,
+            transportPoint[0] + slotLateral,
+            transportPoint[1] + slotStack,
+            transportPoint[2] + slotLateral,
           ]
           if (task.phase === 'arm_conveyor_delivery' && armTransportPath.length > 1) {
-            const offsetX = (lineIndex % 2) * 0.12 - 0.06
-            const offsetY = Math.floor(lineIndex / 2) * 0.14
-            const offsetZ = (lineIndex % 2) * 0.12 - 0.06
+            const offsetX = slotLateral
+            const offsetY = slotStack
+            const offsetZ = slotLateral
             const continuousPath = armTransportPath.map((point) => [
               point[0] + offsetX,
               point[1] + offsetY,
