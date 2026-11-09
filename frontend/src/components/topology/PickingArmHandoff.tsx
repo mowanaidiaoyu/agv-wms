@@ -39,6 +39,8 @@ export interface PickingArmHandoffProps {
   authoritativeSignals?: Partial<PickingArmSignals>
   /** 覆盖取货点世界坐标（X/Z）：运行时按四向车实际停靠位置（2×2 吸附中心）抓取。 */
   pickupOverrideXZ?: [number, number]
+  /** 覆盖放货点世界坐标（X/Z）：理货臂按当前货箱的放置区落位放箱。 */
+  dropoffOverrideXZ?: [number, number]
   /** 标签形态：preview=预览循环 / live=仿真运行中 / idle=运行中待机 */
   variant?: 'preview' | 'live' | 'idle'
 }
@@ -86,6 +88,7 @@ export function PickingArmHandoff({
   resetRequest,
   authoritativeSignals,
   pickupOverrideXZ,
+  dropoffOverrideXZ,
   variant = preview ? 'preview' : 'live',
 }: PickingArmHandoffProps) {
   const waistRef = useRef<Group>(null)
@@ -118,11 +121,17 @@ export function PickingArmHandoff({
         layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
         worldZ(layout.pickup.position.row, rows) - base[2],
       ], [base, cols, layout.pickup.beltHeight, layout.pickup.position.col, layout.pickup.position.row, pickupOverrideXZ, rows])
-  const dropoff = useMemo<[number, number, number]>(() => [
-    worldX(layout.dropoff.position.col, cols) - base[0],
-    layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
-    worldZ(layout.dropoff.position.row, rows) - base[2],
-  ], [base, cols, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
+  const dropoff = useMemo<[number, number, number]>(() => dropoffOverrideXZ
+    ? [
+        dropoffOverrideXZ[0] - base[0],
+        layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
+        dropoffOverrideXZ[1] - base[2],
+      ]
+    : [
+        worldX(layout.dropoff.position.col, cols) - base[0],
+        layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
+        worldZ(layout.dropoff.position.row, rows) - base[2],
+      ], [base, cols, dropoffOverrideXZ, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
   const points = useMemo(() => ({
     // 待机姿态与拓扑编辑器的机械臂朝向一致（rotation.y = -0.62 rad，
     // yaw = atan2(-z, x) ⇒ 目标点取 [r·cos0.62, h, r·sin0.62]）。

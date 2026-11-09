@@ -13,6 +13,8 @@ export interface ConveyorDeckConfig {
   /** 合流模块允许的全部入口；缺省时等价于仅包含 inputSide。 */
   inputSides?: ConveyorSide[]
   outputSide: ConveyorSide
+  /** 分流模块允许的全部出口；缺省时等价于仅包含 outputSide。 */
+  outputSides?: ConveyorSide[]
   role: ConveyorDeckRole
   speed?: number
   capacity?: number
@@ -812,6 +814,40 @@ export interface SimulationState {
     depth?: number
     skuId?: string | null
     skuName?: string | null
+    largeCategory?: string | null
+    qty?: number
+    placedTick?: number
+    [key: string]: unknown
+  }>
+  /** 侧向出货口理货机械臂状态（state.pickingArms）：各臂独立取放，把货箱搬进放置区。 */
+  pickingArms?: Array<{
+    armId: string
+    nodeId: string
+    status: string
+    stage: string | null
+    remainingTicks: number
+    taskId: string | null
+    cargoToken: string | null
+    portCellId: string | null
+    dropCellId: string | null
+    cargo?: {
+      orderId?: string | null
+      skuId?: string | null
+      skuName?: string | null
+      largeCategory?: string | null
+      qty?: number
+      [key: string]: unknown
+    } | null
+  }>
+  /** 机械臂搬进放置区的货箱（state.armDropBoxes）。 */
+  armDropBoxes?: Array<{
+    armId?: string
+    taskId?: string | null
+    cellId: string
+    row?: number
+    col?: number
+    orderId?: string | null
+    skuId?: string | null
     largeCategory?: string | null
     qty?: number
     placedTick?: number

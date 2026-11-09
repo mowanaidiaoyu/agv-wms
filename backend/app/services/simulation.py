@@ -77,6 +77,10 @@ PORT_QUEUE_SERVICE_TICKS = 24
 # 机械臂交接：四向车在交接处等待后，机械臂抓取（pick）与放箱（place）的阶段时长。
 ARM_HANDOFF_PICK_TICKS = 3
 ARM_HANDOFF_PLACE_TICKS = 4
+# 侧向出货口理货机械臂：抓取时长与交接臂一致；放箱阶段覆盖整段搬运动画
+# （前端整周期约 6.6 秒，1× 下 3+8 tick 与之对齐），把货箱放到放置区。
+ARM_DROPZONE_PICK_TICKS = 3
+ARM_DROPZONE_PLACE_TICKS = 8
 # 机械臂放箱后的上层输送必须与前端 CTU 货箱的 DELIVERY_SPEED 一致。
 # 相邻 2×2 模块中心相距 2 个世界单位，因此每段需要约 1.11 秒。
 ARM_CONVEYOR_VISUAL_SPEED = 1.8
@@ -112,6 +116,8 @@ class RunRuntime:
     conveyor_graph: dict[str, Any] = field(default_factory=dict)
     # 机械臂交接目标（交接处格 + 放货点带面）；None 表示未启用机械臂交接
     arm_handoff: dict[str, Any] | None = None
+    # 侧向出货口理货机械臂：把送到出货口的货箱搬运到放置区（drop_zone）
+    secondary_arms: list[dict[str, Any]] = field(default_factory=list)
 
 
 class WebSocketHub:
@@ -615,6 +621,8 @@ class SimulationService:
             )
         # 机械臂交接：拓扑有 picking_handoff 标记 + 布局计划声明放货点时启用。
         arm_handoff = self._arm_handoff_target(topology)
+        # 侧向出货口理货机械臂：把送达出货口的货箱搬运到放置区。
+        secondary_arms = self._secondary_arm_configs(topology, conveyor_graph)
         node_lookup = build_node_lookup(topology)
         robots: list[dict[str, Any]] = []
         for robot in config["robots"]:
@@ -707,7 +715,24 @@ class SimulationService:
             "queues": {"conveyor": [], "station": [], "buffer": []},
             "conveyorItems": [],
             "pickingArm": {"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None} if arm_handoff else None,
+            "pickingArms": [
+                {
+                    "armId": config["armId"],
+                    "nodeId": config["nodeId"],
+                    "status": "idle",
+                    "stage": None,
+                    "remainingTicks": 0,
+                    "taskId": None,
+                    "cargoToken": None,
+                    "portCellId": None,
+                    "dropCellId": None,
+                    "cargo": None,
+                }
+                for config in secondary_arms
+            ],
             "armBeltBoxes": [],
+            # 机械臂已搬进放置区的货箱（按 dropZone 内坐标渲染）。
+            "armDropBoxes": [],
             "createdAt": now_dt().isoformat(),
             "updatedAt": now_dt().isoformat(),
         }
@@ -736,6 +761,7 @@ class SimulationService:
             speed_multiplier=DEFAULT_SPEED_MULTIPLIER,
             conveyor_graph=conveyor_graph,
             arm_handoff=arm_handoff,
+            secondary_arms=secondary_arms,
         )
         # Every WebSocket connection receives one complete snapshot. Normal
         # tick frames can therefore omit the potentially very large inventory.
@@ -1050,6 +1076,149 @@ class SimulationService:
         preferred = elevated_ports or ground_ports
         return preferred[0] if preferred else ""
 
+    def _secondary_arm_configs(
+        self, topology: dict[str, Any], conveyor_graph: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """侧向出货口理货机械臂：除主交接臂外，每个侧向出货口归最近的机械臂。
+
+        拓扑主干竖段（如 col 60）旁 col+2 的死端帽口就是侧向出货口（如 106:62）；
+        新增机械臂站在出货口与放置区之间，把送到帽口的货箱抓进放置区。
+        """
+        arm_nodes = [node for node in topology.get("nodes", []) if node.get("type") == "picking_arm"]
+        if len(arm_nodes) < 2:
+            return []
+        primary_id = self._primary_arm_node_id(topology, arm_nodes)
+        ports = self._side_output_ports(conveyor_graph)
+        if not ports:
+            return []
+        secondary_nodes = [
+            node for node in arm_nodes if str(node.get("id")) != primary_id
+        ]
+        if not secondary_nodes:
+            return []
+        # 只服务机械臂工作半径内的帽口：远端出库口（如 row 82 一线）不在臂的可达范围。
+        work_radius = self._arm_work_radius(topology)
+        reachable_ports = [
+            port
+            for port in ports
+            if min(
+                abs(port["row"] - int(node.get("row", 0)))
+                + abs(port["col"] - int(node.get("col", 0)))
+                for node in secondary_nodes
+            )
+            <= work_radius
+        ]
+        if not reachable_ports:
+            return []
+        # 出货口按就近归属：109:63 的臂负责 102/106/110，117:63 的臂负责 114/118。
+        assignments: dict[str, list[dict[str, Any]]] = {
+            str(node.get("id")): [] for node in secondary_nodes
+        }
+        for port in reachable_ports:
+            owner = min(
+                secondary_nodes,
+                key=lambda node: (
+                    abs(port["row"] - int(node.get("row", 0)))
+                    + abs(port["col"] - int(node.get("col", 0))),
+                    int(node.get("row", 0)),
+                ),
+            )
+            assignments[str(owner.get("id"))].append(port)
+        configs: list[dict[str, Any]] = []
+        drop_zone = next(
+            (zone for zone in topology.get("zones", []) if zone.get("type") == "drop_zone"),
+            None,
+        )
+        drop_col = (
+            int(drop_zone["x"]) + int(drop_zone["width"]) // 2 if drop_zone else 67
+        )
+        for node in secondary_nodes:
+            row = int(node.get("row", 0))
+            col = int(node.get("col", 0))
+            served = assignments[str(node.get("id"))]
+            configs.append(
+                {
+                    "armId": str(node.get("id")),
+                    "nodeId": str(node.get("id")),
+                    "row": row,
+                    "col": col,
+                    "dropCol": drop_col,
+                    "ports": [dict(port) for port in served],
+                }
+            )
+        return configs
+
+    def _arm_work_radius(self, topology: dict[str, Any]) -> float:
+        """机械臂平面工作半径（格）：取布局计划里的安装参数，缺失时用默认 8.9。"""
+        try:
+            raw = _load_raw_plan(str(topology.get("id") or ""))
+            preview = raw.get("pickingArmPreview") or {}
+            installation = preview.get("installation") or {}
+            radius = installation.get("workRadius")
+            if radius is not None:
+                return float(radius)
+        except (OSError, ValueError, TypeError):
+            pass
+        return 8.9
+
+    def _primary_arm_node_id(
+        self, topology: dict[str, Any], arm_nodes: list[dict[str, Any]]
+    ) -> str:
+        """主交接臂：布局计划里 pickingArmPreview 声明的臂；读不到时退回第一个臂节点。"""
+        try:
+            raw = _load_raw_plan(str(topology.get("id") or ""))
+            preview = raw.get("pickingArmPreview") or {}
+            arm_id = str(preview.get("armId") or "")
+            if arm_id and any(str(node.get("id")) == arm_id for node in arm_nodes):
+                return arm_id
+            installation = preview.get("installation") or {}
+            inst_row = int(installation.get("row", -1))
+            inst_col = int(installation.get("col", -1))
+            if inst_row >= 0 and inst_col >= 0:
+                nearest = min(
+                    arm_nodes,
+                    key=lambda node: abs(int(node.get("row", 0)) - inst_row)
+                    + abs(int(node.get("col", 0)) - inst_col),
+                )
+                return str(nearest.get("id"))
+        except (OSError, ValueError, TypeError):
+            pass
+        return str(arm_nodes[0].get("id"))
+
+    def _side_output_ports(self, conveyor_graph: dict[str, Any]) -> list[dict[str, Any]]:
+        """识别主干竖段上的侧向出货口（hat 口）：next 指回竖段、且自身无上游喂入。"""
+        nodes = conveyor_graph.get("nodes") or {}
+        fed = {
+            str(node.get("next"))
+            for node in nodes.values()
+            if isinstance(node, dict) and node.get("next")
+        }
+        ports: list[dict[str, Any]] = []
+        for block_id, node in nodes.items():
+            if not str(block_id).endswith(":upper") or not isinstance(node, dict):
+                continue
+            downstream = nodes.get(str(node.get("next") or ""))
+            if not isinstance(downstream, dict):
+                continue
+            row = int(node.get("row", 0))
+            col = int(node.get("col", 0))
+            if int(downstream.get("row", 0)) != row or int(downstream.get("col", 0)) != col - 2:
+                continue
+            if block_id in fed:
+                continue
+            ports.append(
+                {
+                    "blockId": str(block_id),
+                    "cellId": cell_id(row, col),
+                    "row": row,
+                    "col": col,
+                    "level": 2,
+                    "beltHeight": 3.0,
+                }
+            )
+        ports.sort(key=lambda port: (port["row"], port["col"]))
+        return ports
+
     def _arm_handoff_target(self, topology: dict[str, Any]) -> dict[str, Any] | None:
         """机械臂交接目标：拓扑里有 picking_handoff 标记 + 布局计划声明了放货点时才启用。
 
@@ -1168,6 +1337,124 @@ class SimulationService:
                 {"stage": "pick", "taskId": task["id"], "robotId": robot["id"]},
             )
             return
+
+    def _advance_picking_arms(self, runtime: RunRuntime) -> None:
+        """侧向出货口理货机械臂：把停在帽口的货箱搬进放置区（drop_zone）。
+
+        每台臂独立逐箱服务：pick 从出货口帽口抓取 → place 放到放置区地面。
+        抓取时把货箱从 armBeltBoxes 摘走（输送带面不再显示），放置完成后
+        追加到 armDropBoxes，前端据此在放置区渲染真实落位。
+        """
+        arm_states = runtime.state.get("pickingArms") or []
+        if not arm_states or not runtime.secondary_arms:
+            return
+        configs = {str(config["armId"]): config for config in runtime.secondary_arms}
+        tick = int(runtime.state["tick"])
+        boxes = runtime.state.setdefault("armBeltBoxes", [])
+        for arm in arm_states:
+            config = configs.get(str(arm.get("armId")))
+            if config is None:
+                continue
+            stage = arm.get("stage")
+            if stage in {"pick", "place"}:
+                remaining = int(arm.get("remainingTicks", 0)) - 1
+                arm["remainingTicks"] = max(0, remaining)
+                if remaining > 0:
+                    continue
+                if stage == "pick":
+                    arm["stage"] = "place"
+                    arm["remainingTicks"] = ARM_DROPZONE_PLACE_TICKS
+                    self._record_event(
+                        runtime,
+                        tick,
+                        "arm_handoff",
+                        {
+                            "stage": "dropzone_place",
+                            "armId": arm.get("armId"),
+                            "taskId": arm.get("taskId"),
+                            "dropCellId": arm.get("dropCellId"),
+                        },
+                    )
+                    continue
+                cargo = arm.get("cargo") or {}
+                drop_boxes = runtime.state.setdefault("armDropBoxes", [])
+                drop_boxes.append({
+                    **{
+                        key: cargo[key]
+                        for key in ("orderId", "skuId", "skuName", "largeCategory", "qty")
+                        if cargo.get(key) not in (None, "")
+                    },
+                    "taskId": cargo.get("taskId") or arm.get("taskId"),
+                    "armId": arm.get("armId"),
+                    "cellId": arm.get("dropCellId"),
+                    "row": int(arm.get("dropRow") or 0),
+                    "col": int(arm.get("dropCol") or 0),
+                    "placedTick": tick,
+                })
+                # 放置区货箱只用于可视化；保留最近 60 箱，避免长时间 Run 的
+                # 状态帧无限膨胀（前端也只渲染最近若干箱）。
+                if len(drop_boxes) > 60:
+                    del drop_boxes[: len(drop_boxes) - 60]
+                self._record_event(
+                    runtime,
+                    tick,
+                    "arm_handoff",
+                    {
+                        "stage": "dropzone_placed",
+                        "armId": arm.get("armId"),
+                        "taskId": arm.get("taskId"),
+                        "cellId": arm.get("dropCellId"),
+                    },
+                )
+                arm.update({
+                    "status": "idle",
+                    "stage": None,
+                    "remainingTicks": 0,
+                    "taskId": None,
+                    "cargoToken": None,
+                    "portCellId": None,
+                    "dropCellId": None,
+                    "cargo": None,
+                })
+                continue
+            # 空闲：寻找停在本臂出货口帽口、尚未被搬走的货箱。
+            port_cells = {str(port["cellId"]): port for port in config["ports"]}
+            claimed_index = next(
+                (
+                    index
+                    for index, box in enumerate(boxes)
+                    if str(box.get("cellId") or "") in port_cells
+                ),
+                None,
+            )
+            if claimed_index is None:
+                continue
+            box = boxes.pop(claimed_index)
+            port = port_cells[str(box.get("cellId"))]
+            drop_row = int(port["row"])
+            arm.update({
+                "status": "busy",
+                "stage": "pick",
+                "remainingTicks": ARM_DROPZONE_PICK_TICKS,
+                "taskId": box.get("taskId"),
+                "cargoToken": f"{arm.get('armId')}:{box.get('taskId') or 'box'}:{tick}",
+                "portCellId": str(box.get("cellId")),
+                "dropCellId": cell_id(drop_row, int(config.get("dropCol") or 67)),
+                "dropRow": drop_row,
+                "dropCol": int(config.get("dropCol") or 67),
+                "cargo": dict(box),
+            })
+            self._record_event(
+                runtime,
+                tick,
+                "arm_handoff",
+                {
+                    "stage": "dropzone_pick",
+                    "armId": arm.get("armId"),
+                    "taskId": arm.get("taskId"),
+                    "portCellId": arm.get("portCellId"),
+                },
+            )
 
     def _start_arm_conveyor_delivery(
         self,
@@ -2312,6 +2599,7 @@ class SimulationService:
         self._assign_tasks(runtime)
         self._move_robots(runtime)
         self._advance_picking_arm(runtime)
+        self._advance_picking_arms(runtime)
         self._advance_detached_conveyor_tasks(runtime)
         self._advance_detached_picking_tasks(runtime)
         self._advance_feeding_parents(runtime)

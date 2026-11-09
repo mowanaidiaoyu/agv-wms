@@ -864,6 +864,8 @@ export function SimulationPage() {
                     pickingArmResetRequest={pickingArmResetRequest}
                     armRuntime={currentState?.pickingArm ?? null}
                     armBeltBoxes={currentState?.armBeltBoxes ?? []}
+                    armSecondaryRuntime={currentState?.pickingArms ?? []}
+                    armDropBoxes={currentState?.armDropBoxes ?? []}
                     simulationActive={simulationActive}
                     speedMultiplier={speedMultiplier}
                   />

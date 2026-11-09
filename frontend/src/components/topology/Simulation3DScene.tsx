@@ -6,6 +6,7 @@ import { Group, MOUSE, Mesh, Vector3 } from 'three'
 import { BatchedTopologyMeshes, GoodsBoxes, SlabView, TowerView, ZoomToCursor } from './SceneMeshes'
 import { TransportLayoutPreview } from './TransportLayoutPreview'
 import { PickingArmHandoff, type PickingArmCargo } from './PickingArmHandoff'
+import type { PickingArmSignals } from '../../lib/pickingArmMotion'
 import { ShuttleCartModel } from './ShuttleCartModel'
 import {
   CELL,
@@ -79,6 +80,10 @@ export type Simulation3DSceneProps = {
   armRuntime?: SimulationState['pickingArm']
   /** 机械臂已放到输送线带面的货箱（state.armBeltBoxes）：渲染在放货点带面高度 */
   armBeltBoxes?: SimulationState['armBeltBoxes']
+  /** 侧向出货口理货机械臂状态（state.pickingArms）：各臂独立把货箱搬进放置区 */
+  armSecondaryRuntime?: SimulationState['pickingArms']
+  /** 机械臂已搬进放置区的货箱（state.armDropBoxes） */
+  armDropBoxes?: SimulationState['armDropBoxes']
   /** 仿真是否进行中（running/paused）：运行时机械臂常驻显示，空闲时保持待机姿态 */
   simulationActive?: boolean
   speedMultiplier?: 1 | 2 | 4
@@ -954,6 +959,8 @@ function Simulation3DScene({
   },
   armRuntime = null,
   armBeltBoxes = [],
+  armSecondaryRuntime = [],
+  armDropBoxes = [],
   simulationActive = false,
   speedMultiplier = 1,
 }: Simulation3DSceneProps) {
@@ -1038,24 +1045,71 @@ function Simulation3DScene({
 
   // 机械臂运行时：仿真状态驱动机械臂常驻显示与取放动作，不再依赖「机械臂预览」开关。
   const armLive = Boolean(armRuntime?.taskId)
-  const armNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_arm'), [topology])
+  const armNodes = useMemo(() => topology.nodes.filter((node) => node.type === 'picking_arm'), [topology])
   const armHandoffNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_handoff'), [topology])
   // 机械臂底座节点（picking_arm）覆盖布局计划的安装位：编辑器里把底座放哪里，机械臂就装在哪里；
   // 拣货位节点（picking_handoff）覆盖取货点：四向车实际停在该节点所在格（后端 handoffCellId 同源）。
-  const armLayout = useMemo(() => {
-    const base = layoutPlan?.pickingArm
-    if (!base) return undefined
-    const installation = armNode
-      ? { ...base.installation, floor: '1F', row: Number(armNode.row), col: Number(armNode.col) }
-      : base.installation
-    const pickup = armHandoffNode
-      ? {
-          ...base.pickup,
-          position: { ...base.pickup.position, floor: '1F', row: Number(armHandoffNode.row), col: Number(armHandoffNode.col) },
-        }
-      : base.pickup
-    return { ...base, installation, pickup }
-  }, [armHandoffNode, armNode, layoutPlan])
+  // 新增的臂没有 picking_handoff，负责把侧向出货口（col 62 上层帽口）的货箱搬进放置区：
+  // 取货点 = 最近出货口，放货点 = 放置区内同一行的落位。
+  const armLayouts = useMemo(() => {
+    const template = layoutPlan?.pickingArm
+    if (!template) return []
+    const portCells = topology.cells.filter(
+      (cell) => cell.type === 'conveyor' && Number(cell.col) === 62 && (cell.floor ?? '1F') === '1F',
+    )
+    const dropZone = topology.zones.find((zone) => zone.type === 'drop_zone')
+    const dropCol = dropZone ? dropZone.x + Math.floor(dropZone.width / 2) : 67
+    const upperBeltHeight = CONVEYOR_DECK_BASE + CONVEYOR_DECK_STEP
+    return armNodes.map((node) => {
+      const installation = { ...template.installation, floor: '1F', row: Number(node.row), col: Number(node.col) }
+      const isPrimary = node.id === template.armId
+      if (isPrimary) {
+        const pickup = armHandoffNode
+          ? {
+              ...template.pickup,
+              position: { ...template.pickup.position, floor: '1F', row: Number(armHandoffNode.row), col: Number(armHandoffNode.col) },
+            }
+          : template.pickup
+        return { id: node.id, primary: true, layout: { ...template, installation, pickup } }
+      }
+      const nearestPort = portCells.reduce<(typeof portCells)[number] | undefined>((best, cell) => {
+        if (!best) return cell
+        return Math.abs(Number(cell.row) - Number(node.row)) < Math.abs(Number(best.row) - Number(node.row)) ? cell : best
+      }, undefined)
+      const portRow = nearestPort ? Number(nearestPort.row) : Number(node.row)
+      const pickup = {
+        ...template.pickup,
+        topologyCellId: nearestPort?.id ?? template.pickup.topologyCellId,
+        position: {
+          ...template.pickup.position,
+          floor: '1F',
+          row: portRow,
+          col: nearestPort ? Number(nearestPort.col) : 62,
+          level: 2,
+        },
+        beltHeight: upperBeltHeight,
+      }
+      // 放置区没有格子：落位用区域内的平面坐标，高度按地面处理。
+      const dropoff = {
+        ...template.dropoff,
+        topologyCellId: null,
+        position: { ...template.dropoff.position, floor: '1F', row: portRow, col: dropCol, level: 1 },
+        beltHeight: 0,
+      }
+      return {
+        id: node.id,
+        primary: false,
+        layout: {
+          ...template,
+          armId: node.id,
+          installation,
+          pickup,
+          dropoff,
+          previewConveyorPath: [],
+        },
+      }
+    })
+  }, [armHandoffNode, armNodes, layoutPlan, topology.cells, topology.zones])
   // 取货点世界坐标：与四向车停靠位置同一套 2×2 吸附算法，保证机械臂抓的是车上的货。
   const armPickupWorld = useMemo(() => {
     if (!armHandoffNode) return undefined
@@ -1142,6 +1196,69 @@ function Simulation3DScene({
       }
     }).filter((box): box is NonNullable<typeof box> => box !== null)
   }, [armBeltBoxes, pickingArmPreviewVisible, spec.cols, spec.rows])
+  // 侧向出货口理货机械臂：运行时状态按臂索引，驱动各自取放动画。
+  const secondaryArmStates = useMemo(
+    () => new Map((armSecondaryRuntime ?? []).map((arm) => [arm.armId, arm])),
+    [armSecondaryRuntime],
+  )
+  // 理货臂的权威信号必须引用稳定：运行状态每 tick 都会送来新数组，若每帧新建
+  // 信号对象，PickingArmHandoff 里的重置 effect 会每帧触发，表现为机械臂抽搐。
+  const secondaryArmSignalSignature = (armSecondaryRuntime ?? [])
+    .map((arm) => `${arm.armId}:${arm.cargoToken ?? ''}`)
+    .join('|')
+  const secondaryArmSignals = useMemo(() => {
+    const map = new Map<string, Partial<PickingArmSignals>>()
+    for (const arm of armSecondaryRuntime ?? []) {
+      map.set(arm.armId, arm.cargoToken
+        ? {
+            cargoToken: arm.cargoToken,
+            pickedGoodsReady: true,
+            outputPositionAvailable: true,
+            legalPickupNode: true,
+            legalDropoffNode: true,
+            authoritativeHandoffCompleted: false,
+          }
+        : ARM_IDLE_SIGNALS)
+    }
+    return map
+    // 仅按「臂 + 货箱」签名重建：cargoToken 形如 `arm-01:task:1234` 自带冒号，
+    // 不能序列化后再切分解析，否则臂 ID 被截断、信号查不到，臂会一直待机。
+  }, [secondaryArmSignalSignature]) // eslint-disable-line react-hooks/exhaustive-deps
+  const armCellWorld = useCallback((cellId?: string | null): [number, number] | undefined => {
+    if (!cellId) return undefined
+    const parsed = parseCellId(String(cellId))
+    if (!parsed) return undefined
+    // 与带面货箱、四向车使用同一套世界坐标，保证机械臂抓的是箱子的实际位置。
+    const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, 1, spec.cols, spec.rows)
+    return [x, z]
+  }, [spec.cols, spec.rows])
+  // 机械臂已搬进放置区的货箱：按落位格渲染，同格多箱用小网格错开。
+  const armDropVisuals = useMemo(() => {
+    const boxes = (armDropBoxes ?? []).slice(-24)
+    const slots: Array<[number, number]> = [
+      [-0.5, -0.5], [0, -0.5], [0.5, -0.5],
+      [-0.5, 0], [0, 0], [0.5, 0],
+      [-0.5, 0.5], [0, 0.5], [0.5, 0.5],
+    ]
+    const perCell = new Map<string, number>()
+    return boxes.map((box, index) => {
+      const parsed = parseCellId(String(box.cellId))
+      if (!parsed) return null
+      const cellKey = `${parsed.row},${parsed.col}`
+      const slotIndex = perCell.get(cellKey) ?? 0
+      perCell.set(cellKey, slotIndex + 1)
+      const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, 1, spec.cols, spec.rows)
+      const [offsetX, offsetZ] = slots[slotIndex % slots.length]
+      const color = GOODS_CATEGORY_COLORS[box.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+      return {
+        key: `arm-drop-${box.taskId ?? index}-${slotIndex}`,
+        position: [x + offsetX, 0.16 + Math.floor(slotIndex / slots.length) * 0.3, z + offsetZ] as [number, number, number],
+        size: CONVEYOR_CARGO_SIZE,
+        color,
+        emissive: color,
+      }
+    }).filter((box): box is NonNullable<typeof box> => box !== null)
+  }, [armDropBoxes, spec.cols, spec.rows])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1977,24 +2094,48 @@ function Simulation3DScene({
         />
       ) : null}
 
-      {armLayout && activeFloor === '1F' ? (
-        <PickingArmHandoff
-          key={armPlaybackKey}
-          topology={topology}
-          layout={armLayout}
-          cargo={armDisplayedCargo}
-          preview={armPreviewing}
-          previewCycleToken={pickingArmPreviewCycleToken}
-          paused={paused}
-          speedMultiplier={speedMultiplier}
-          resetRequest={pickingArmResetRequest}
-          authoritativeSignals={armLive ? armAuthoritativeSignals : ARM_IDLE_SIGNALS}
-          pickupOverrideXZ={armPickupWorld}
-          variant={armLive ? 'live' : armPreviewing ? 'preview' : 'idle'}
-        />
-      ) : null}
+      {activeFloor === '1F'
+        ? armLayouts.map((arm) => {
+            const secondary = arm.primary ? undefined : secondaryArmStates.get(arm.id)
+            const secondaryBusy = Boolean(secondary?.cargoToken)
+            const secondaryCargo: PickingArmCargo = {
+              toteId: secondary?.taskId ?? `${arm.id}-idle`,
+              orderId: String(secondary?.cargo?.orderId ?? '侧向出货'),
+              skuId: String(secondary?.cargo?.skuId ?? '在途货物'),
+              pickedQuantity: Number(secondary?.cargo?.qty ?? 1),
+            }
+            return (
+              <PickingArmHandoff
+                key={`${arm.id}:${arm.primary ? armPlaybackKey : secondary?.cargoToken ?? 'idle'}`}
+                topology={topology}
+                layout={arm.layout}
+                cargo={arm.primary ? armDisplayedCargo : secondaryCargo}
+                preview={arm.primary && armPreviewing}
+                previewCycleToken={pickingArmPreviewCycleToken}
+                paused={paused}
+                speedMultiplier={speedMultiplier}
+                resetRequest={pickingArmResetRequest}
+                authoritativeSignals={
+                  arm.primary
+                    ? (armLive ? armAuthoritativeSignals : ARM_IDLE_SIGNALS)
+                    : (secondaryArmSignals.get(arm.id) ?? ARM_IDLE_SIGNALS)
+                }
+                pickupOverrideXZ={arm.primary ? armPickupWorld : armCellWorld(secondary?.portCellId)}
+                dropoffOverrideXZ={arm.primary ? undefined : armCellWorld(secondary?.dropCellId)}
+                variant={arm.primary && armLive ? 'live' : arm.primary && armPreviewing ? 'preview' : secondaryBusy ? 'live' : 'idle'}
+              />
+            )
+          })
+        : null}
 
       {armBeltVisuals.map((box) => (
+        <mesh key={box.key} position={box.position} castShadow>
+          <boxGeometry args={box.size} />
+          <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />
+        </mesh>
+      ))}
+
+      {armDropVisuals.map((box) => (
         <mesh key={box.key} position={box.position} castShadow>
           <boxGeometry args={box.size} />
           <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />

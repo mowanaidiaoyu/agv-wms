@@ -111,6 +111,12 @@ export function conveyorInputSides(config: Pick<ConveyorDeckConfig, 'inputSide' 
   return [...new Set(sides)]
 }
 
+/** 输送层允许的全部出口；旧数据只有 outputSide 时自动视为单出口。 */
+export function conveyorOutputSides(config: Pick<ConveyorDeckConfig, 'outputSide' | 'outputSides'>): ConveyorSide[] {
+  const sides = config.outputSides?.length ? config.outputSides : [config.outputSide]
+  return [...new Set(sides)]
+}
+
 export function conveyorAcceptsInput(
   config: Pick<ConveyorDeckConfig, 'inputSide' | 'inputSides'> | undefined,
   side: ConveyorSide,
@@ -760,7 +766,7 @@ export function validateConveyorTopology(topology: Pick<TopologyPayload, 'cells'
         if (previous) {
           const previousConfig = conveyorDecksOf(topology, previous.anchorCell)[deck]
           const expectedOutput = oppositeConveyorSide(inputSide)
-          if (!previousConfig?.enabled || previousConfig.outputSide !== expectedOutput) {
+          if (!previousConfig?.enabled || !conveyorOutputSides(previousConfig).includes(expectedOutput)) {
             issues.push({
               severity,
               blockKey: block.key,
@@ -770,16 +776,29 @@ export function validateConveyorTopology(topology: Pick<TopologyPayload, 'cells'
           }
         }
       }
-      const next = neighboringBlock(blocks, block, config.outputSide)
-      if (next) {
+      for (const outputSide of conveyorOutputSides(config)) {
+        const next = neighboringBlock(blocks, block, outputSide)
+        if (!next) continue
         const nextConfig = conveyorDecksOf(topology, next.anchorCell)[deck]
-        const expectedInput = oppositeConveyorSide(config.outputSide)
-        if (!nextConfig?.enabled || !conveyorAcceptsInput(nextConfig, expectedInput)) {
+        if (!nextConfig?.enabled) {
+          // 分流支线的下游未启用时允许悬空；主出口仍按断路报错。
+          if (outputSide === config.outputSide) {
+            issues.push({
+              severity,
+              blockKey: block.key,
+              deck,
+              message: `${CONVEYOR_SIDE_LABELS[outputSide]}出口与下一块${CONVEYOR_SIDE_LABELS[oppositeConveyorSide(outputSide)]}入口不匹配。`,
+            })
+          }
+          continue
+        }
+        const expectedInput = oppositeConveyorSide(outputSide)
+        if (!conveyorAcceptsInput(nextConfig, expectedInput)) {
           issues.push({
             severity,
             blockKey: block.key,
             deck,
-            message: `${CONVEYOR_SIDE_LABELS[config.outputSide]}出口与下一块${CONVEYOR_SIDE_LABELS[expectedInput]}入口不匹配。`,
+            message: `${CONVEYOR_SIDE_LABELS[outputSide]}出口与下一块${CONVEYOR_SIDE_LABELS[expectedInput]}入口不匹配。`,
           })
         }
       }
