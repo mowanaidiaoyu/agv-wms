@@ -29,6 +29,8 @@ SKU_FIELDS = (
     "grade",
     "material",
     "surfaceTreatment",
+    # 箱规：每箱件数。订单按件数/箱数拆四向车整箱与 CTU 尾箱时都要用它。
+    "caseCnt",
 )
 
 
@@ -139,6 +141,7 @@ def build_inventory(
                 "grade": sku.get("grade"),
                 "material": sku.get("material"),
                 "surfaceTreatment": sku.get("surfaceTreatment"),
+                "caseCnt": max(1, int(sku.get("caseCnt") or 1)),
                 "qty": rng.randint(1, 5),
             }
         )
@@ -169,6 +172,7 @@ def build_inventory(
                     "grade": sku.get("grade"),
                     "material": sku.get("material"),
                     "surfaceTreatment": sku.get("surfaceTreatment"),
+                    "caseCnt": max(1, int(sku.get("caseCnt") or 1)),
                     "qty": 1,
                 }
             )

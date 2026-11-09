@@ -5343,8 +5343,23 @@ select {
 
 .simulation-order-add-line {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 62px auto;
+  grid-template-columns: minmax(0, 1fr) 62px 96px auto;
   gap: 7px;
+}
+
+.simulation-order-qty-mode {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.simulation-order-qty-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.61rem;
+}
+
+.simulation-order-composer .simulation-order-qty-hint {
+  margin: 0.45rem 0 0.3rem;
+  line-height: 1.5;
 }
 
 .simulation-order-add-line button {

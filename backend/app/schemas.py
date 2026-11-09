@@ -131,7 +131,9 @@ class SimulationOrderLineInput(BaseModel):
     skuId: str
     skuName: str
     spec: str | None = None
-    quantity: int = Field(default=1, ge=1, le=20)
+    # 数量与计量单位：默认按箱（沿用旧行为）；pieces 表示按件，后端用箱规折算。
+    quantity: int = Field(default=1, ge=1, le=999)
+    qtyMode: Literal["pieces", "boxes"] = "boxes"
 
 
 class SimulationOrderInput(BaseModel):

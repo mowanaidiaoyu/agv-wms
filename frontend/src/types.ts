@@ -527,6 +527,18 @@ export interface SimulationTask {
   dockId?: string | null
   requestedVehicleId?: string | null
   robotType: RobotType
+  /** 任务种类：picking_box=单箱拣货子任务，picking_return=货箱回库子任务，placed_goods_delivery=已拣部分出货子任务 */
+  taskKind?: string
+  /** 父任务 id（拣货分裂产生的子任务才有） */
+  parentId?: string | null
+  /** 父任务已把货箱委托给单箱拣货子任务（前端跳过整单放置区渲染） */
+  pickingDelegated?: boolean
+  /** 拣货台所在输送块（如 1F:88:66，供分裂子任务定位起点） */
+  stationBlockId?: string | null
+  /** 升降注入块（如 1F:94:90，conveyor_to_lift 终点） */
+  liftBlockId?: string | null
+  /** 回库口输送块（conveyor_return/回库支线终点） */
+  returnEndBlockId?: string | null
   mode: 'direct' | 'cross_zone' | 'shuttle_transfer'
   status: string
   phase: string
@@ -587,6 +599,18 @@ export interface SimulationTask {
     movedTicks: number
     startedTick: number
   } | null
+  /** 占块门控待上线的子箱 transport：路线首块空闲后才转正为 conveyorTransport（前端不渲染） */
+  pendingTransport?: {
+    phase: string
+    deck: ConveyorDeckKey
+    route: string[]
+    index: number
+    currentBlockId?: string | null
+    nextBlockId?: string | null
+    waitingTicks: number
+    movedTicks: number
+    startedTick: number
+  } | null
   /** 回库时正在放置的订单行序号 */
   returnLineIndex?: number
   history: SimulationTaskHistory[]
@@ -622,6 +646,8 @@ export interface SimulationOrderLineInput {
   skuName: string
   spec?: string | null
   quantity: number
+  /** 数量单位：pieces=按件、boxes=按箱（按箱时后端用 SKU 箱规 caseCnt 折算件数） */
+  qtyMode?: 'pieces' | 'boxes'
 }
 
 export interface SimulationOrderInput {
@@ -653,6 +679,16 @@ export interface SimulationOrder extends SimulationOrderInput {
     requestedQuantity: number
     allocatedQuantity: number
     missingQuantity: number
+    /** 件数口径：需求/已拣/缺口；箱数口径见 requestedQuantity 等字段 */
+    requestedPieces?: number
+    allocatedPieces?: number
+    missingPieces?: number
+    pickedPieces?: number
+    pickedBoxes?: number
+    shuttleBoxes?: number
+    ctuBoxes?: number
+    shuttleTaskCount?: number
+    ctuTaskCount?: number
     taskCount: number
     assignedTaskCount: number
     activeVehicleIds: string[]
@@ -660,7 +696,18 @@ export interface SimulationOrder extends SimulationOrderInput {
     strategy: SimulationOrderDispatchMode
     maxParallelCtu: number
   }
-  lines: Array<SimulationOrderLineInput & { allocated?: number; picked?: number }>
+  lines: Array<SimulationOrderLineInput & {
+    allocated?: number
+    picked?: number
+    caseCnt?: number
+    requestedPieces?: number
+    requestedBoxes?: number
+    allocatedPieces?: number
+    pickedPieces?: number
+    shuttleBoxes?: number
+    ctuBoxes?: number
+    missingPieces?: number
+  }>
 }
 
 export interface GoodsCatalogSku {
@@ -671,6 +718,8 @@ export interface GoodsCatalogSku {
   material?: string | null
   largeCategory?: string | null
   subclass?: string | null
+  /** 箱规：每箱件数 */
+  caseCnt?: number | null
 }
 
 export interface GoodsCatalog {
@@ -763,6 +812,7 @@ export interface SimulationState {
     depth?: number
     skuId?: string | null
     skuName?: string | null
+    largeCategory?: string | null
     qty?: number
     placedTick?: number
     [key: string]: unknown

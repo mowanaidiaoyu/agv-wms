@@ -21,7 +21,7 @@ from .conveyor import (
     route_from_block_branch,
     route_from_cell,
 )
-from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes
+from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes, load_catalog
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -231,17 +231,23 @@ class SimulationService:
 
         # 运行库存中，已取走的料箱会被删除；尚未取货但已分配给
         # 其他任务的料箱仍在库存里，必须额外排除，避免重复预留。
+        # 四向车货道箱按 cellId+layer+depth 唯一；CTU 库位槽按 nodeId+layer 唯一。
+        def reservation_key(entry: dict[str, Any]) -> tuple[Any, ...]:
+            if entry.get("depth") is not None:
+                return (entry.get("cellId"), int(entry.get("layer", 1)), int(entry.get("depth")))
+            return (entry.get("nodeId"), int(entry.get("layer", 1)))
+
         reserved_slots = {
-            (line.get("nodeId"), int(line.get("layer", 1)))
+            reservation_key(line)
             for task in runtime.state.get("tasks", [])
             if task.get("status") not in TERMINAL_TASK_STATUSES
             for line in task.get("lines", [])
-            if line.get("nodeId")
+            if line.get("nodeId") or line.get("depth") is not None
         }
         available_inventory = [
             slot
             for slot in runtime.state.get("inventory", [])
-            if (slot.get("nodeId"), int(slot.get("layer", 1))) not in reserved_slots
+            if reservation_key(slot) not in reserved_slots
         ]
         existing_port_loads: dict[str, int] = {}
         for existing_task in runtime.state.get("tasks", []):
@@ -252,12 +258,19 @@ class SimulationService:
                 delivery_cell = str(existing_task.get("deliveryCellId") or "")
                 if delivery_cell:
                     existing_port_loads[delivery_cell] = existing_port_loads.get(delivery_cell, 0) + 1
+        # 认领状态是本次拆单的临时上下文，不能直接写回 runtime.state（含元组键）。
+        shuttle_batch = {"cursor": int((runtime.state.get("shuttleBatch") or {}).get("cursor") or 0)}
         tasks, order_states = self._seed_order_tasks(
             runtime.topology,
             [order],
             available_inventory,
             existing_port_loads,
+            shuttle_docks=runtime.state.get("shuttleDocks")
+            or self._shuttle_dock_states(runtime.topology),
+            shuttle_batch=shuttle_batch,
+            existing_tasks=runtime.state.get("tasks", []),
         )
+        runtime.state["shuttleBatch"] = {"cursor": int(shuttle_batch.get("cursor") or 0)}
         order_state = order_states[0]
         missing = int(order_state.get("missingQuantity") or 0)
         if missing or not tasks:
@@ -651,13 +664,19 @@ class SimulationService:
         robots.extend(robot for robot in transfer_robots if robot["id"] not in existing_robot_ids)
 
         inventory = build_inventory(topology)
-        # 四向车出货位运行时设置（可在「四向车搬运」工作台调整，独立于拓扑编辑）。
+        # 四向车出货位设置（订单任务沿用 dock-02/03 自动分配，不再单独驱动搬运）。
         shuttle_docks = self._shuttle_dock_states(topology)
+        # 订单之间共享同一批箱认领状态，避免同一货箱被两条任务重复取走。
+        shuttle_batch: dict[str, Any] = {"cursor": 0}
         if orders:
-            tasks, order_states = self._seed_order_tasks(topology, orders, inventory)
-            # 订单驱动模式同样派发四向车出库搬运任务（独立于订单、不挂订单），
-            # 否则 UI 带演示订单启动时四向车搬运永远不会出现。
-            tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks, inventory))
+            # 四向车只在订单确实拆出整箱任务时工作，不再额外派发与订单无关的搬运任务。
+            tasks, order_states = self._seed_order_tasks(
+                topology,
+                orders,
+                inventory,
+                shuttle_docks=shuttle_docks,
+                shuttle_batch=shuttle_batch,
+            )
         elif transfers:
             tasks, order_states = [], []
         else:
@@ -679,6 +698,9 @@ class SimulationService:
             "orders": order_states,
             "inventory": inventory,
             "shuttleDocks": shuttle_docks,
+            # 只持久化游标：箱/货道认领是运行时临时状态（键为元组，无法 JSON 序列化），
+            # 后续插入订单时会依据在途任务重新推导。
+            "shuttleBatch": {"cursor": int(shuttle_batch.get("cursor") or 0)},
             "transferInventory": transfer_inventory,
             "transferEvents": transfer_events,
             "alerts": [],
@@ -728,43 +750,190 @@ class SimulationService:
         orders: list[dict[str, Any]],
         inventory: list[dict[str, Any]],
         existing_port_loads: dict[str, int] | None = None,
+        shuttle_docks: list[dict[str, Any]] | None = None,
+        shuttle_batch: dict[str, Any] | None = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """将订单匹配到真实库存槽，按货位邻近性拆包并智能选口，拆成 CTU 多箱任务。"""
+        """按 SKU 箱规把订单拆成「四向车整箱 + CTU 尾箱」两库区子任务。
+
+        数量语义：订单行 qtyMode=boxes 时用 caseCnt 折算件数（默认按件数），
+        内部统一按件数计算：
+        - 整箱数 floor(件数 / caseCnt) 交给四向车（dock-02/03 自动分配）；
+        - 余下不足一箱的件数由 CTU 取 1 整箱送到拣货台，拣货时只拣所需件数。
+        降级：四向车整箱不足时缺口整箱转 CTU；CTU 无可用箱时缺口转四向车；
+        两侧都不足记 exception / missingQuantity。两侧子任务都挂同一个 orderId，
+        订单完成由 _refresh_orders 按 orderId 统一汇总。
+        """
         delivery_ports = self._ctu_delivery_ports(topology)
         if not delivery_ports:
             raise ValueError("当前拓扑没有输送线出入口，无法为订单生成交付任务")
         ctu_count = max(1, sum(1 for node in topology.get("nodes", []) if node.get("type") == "ctu_robot"))
         port_loads = dict(existing_port_loads or {})
+        case_counts = self._sku_case_counts()
 
-        inventory_by_sku: dict[str, list[dict[str, Any]]] = {}
+        # CTU 槽（无 depth）与四向车货道箱（有 depth）分池：两类库存不能互相顶替。
+        ctu_by_sku: dict[str, list[dict[str, Any]]] = {}
         for slot in inventory:
+            if slot.get("depth") is not None:
+                continue
             sku_id = str(slot.get("skuId") or "")
             if sku_id:
-                inventory_by_sku.setdefault(sku_id, []).append(slot)
+                ctu_by_sku.setdefault(sku_id, []).append(slot)
+        shuttle_sources = shuttle_servable_slots(topology)
+        docks = [
+            dock
+            for dock in (shuttle_docks if shuttle_docks is not None else self._shuttle_dock_states(topology))
+            if dock.get("enabled", True)
+        ]
+        # 四向车出货位：dock-02 / dock-03 自动分配，不按订单固定；缺省时退回全部出货位。
+        order_docks = [dock for dock in docks if dock.get("dockId") in {"dock-02", "dock-03"}] or docks
+        batch = shuttle_batch if shuttle_batch is not None else {"cursor": 0}
+        pool_tasks = list(existing_tasks or [])
+        shuttle_disabled = not (order_docks and shuttle_sources)
 
         tasks: list[dict[str, Any]] = []
         order_states: list[dict[str, Any]] = []
         used_slots: set[tuple[str, int]] = set()
 
+        def allocate_shuttle_box(
+            order: dict[str, Any],
+            sku_id: str,
+            line_id: str,
+            case_cnt: int,
+            demand_pieces: int,
+        ) -> list[dict[str, Any]]:
+            """生成一趟四向车整箱取货（含前置倒库），并把取货任务挂到订单上。"""
+            if shuttle_disabled:
+                return []
+            dock = order_docks[int(batch.get("order_dock_cursor") or 0) % len(order_docks)]
+            batch["order_dock_cursor"] = int(batch.get("order_dock_cursor") or 0) + 1
+            urgent = order.get("priority") == "urgent"
+            dock_cfg = {
+                **dock,
+                "skuId": sku_id,
+                "quantity": 1,
+                "priority": "urgent" if urgent else "normal",
+                "cursor": int(dock.get("cursor") or 0),
+                "requireSku": True,
+            }
+            dock_cfg.pop("vehicleId", None)
+            new_tasks = self._build_dock_tasks(
+                topology,
+                inventory,
+                dock_cfg,
+                shuttle_sources,
+                0,
+                batch,
+                pool_tasks,
+            )
+            dock["cursor"] = int(dock_cfg.get("cursor") or 0)
+            for task in new_tasks:
+                task["orderId"] = order["id"]
+                task["orderLineId"] = line_id
+                task["caseCnt"] = case_cnt
+                if task.get("taskKind") != "relocate":
+                    task["taskKind"] = "shuttle_order_pick"
+                    task["demandPieces"] = int(demand_pieces)
+                    task["phaseLabel"] = f"四向车整箱取货 · {demand_pieces} 件"
+            return new_tasks
+
         for order in orders:
             allocated_lines: list[dict[str, Any]] = []
             runtime_lines: list[dict[str, Any]] = []
-            missing = 0
+            order_task_ids: list[str] = []
+            missing_boxes = 0
+            missing_pieces = 0
+            shuttle_boxes_total = 0
+            ctu_boxes_total = 0
+
             for requested in order.get("lines", []):
-                requested_qty = max(1, int(requested.get("quantity", 1)))
-                matches = [
-                    slot
-                    for slot in inventory_by_sku.get(str(requested.get("skuId") or ""), [])
-                    if (slot["nodeId"], int(slot.get("layer", 1))) not in used_slots
-                ][:requested_qty]
-                for slot in matches:
-                    used_slots.add((slot["nodeId"], int(slot.get("layer", 1))))
-                    allocated_lines.append(dict(slot))
-                missing += requested_qty - len(matches)
+                sku_id = str(requested.get("skuId") or "")
+                line_id = str(requested.get("id") or "")
+                try:
+                    case_cnt = max(1, int(case_counts.get(sku_id) or requested.get("caseCnt") or 1))
+                except (TypeError, ValueError):
+                    case_cnt = 1
+                try:
+                    quantity = max(1, int(requested.get("quantity", 1)))
+                except (TypeError, ValueError):
+                    quantity = 1
+                qty_mode = "pieces" if str(requested.get("qtyMode") or "").lower() == "pieces" else "boxes"
+                # 内部统一按件数：按箱输入时用箱规折算。
+                pieces = quantity if qty_mode == "pieces" else quantity * case_cnt
+                full_boxes, tail_pieces = divmod(pieces, case_cnt)
+
+                # 1) 整箱优先给四向车。
+                shuttle_boxes = 0
+                attempts = 0
+                max_attempts = full_boxes * 3 + 3
+                while shuttle_boxes < full_boxes and attempts < max_attempts:
+                    attempts += 1
+                    created = allocate_shuttle_box(order, sku_id, line_id, case_cnt, case_cnt)
+                    if not created:
+                        break
+                    tasks.extend(created)
+                    pool_tasks.extend(created)
+                    picked = [task for task in created if task.get("taskKind") == "shuttle_order_pick"]
+                    shuttle_boxes += len(picked)
+                    order_task_ids.extend(task["id"] for task in picked)
+                shuttle_boxes_total += shuttle_boxes
+                line_shuttle_boxes = shuttle_boxes
+
+                # 2) 尾箱与四向车整箱缺口都由 CTU 取整箱；尾箱只拣所需件数。
+                ctu_requirements = [case_cnt] * max(0, full_boxes - shuttle_boxes)
+                if tail_pieces:
+                    ctu_requirements.append(tail_pieces)
+                line_ctu_boxes = 0
+                line_missing_boxes = 0
+                line_missing_pieces = 0
+                line_shuttle_degraded = 0
+                for need_pieces in ctu_requirements:
+                    slot = next(
+                        (
+                            item
+                            for item in ctu_by_sku.get(sku_id, [])
+                            if (item["nodeId"], int(item.get("layer", 1))) not in used_slots
+                        ),
+                        None,
+                    )
+                    if slot is not None:
+                        used_slots.add((slot["nodeId"], int(slot.get("layer", 1))))
+                        allocated_lines.append({**dict(slot), "qty": case_cnt, "pickPieces": need_pieces})
+                        line_ctu_boxes += 1
+                        continue
+                    # CTU 无可用整箱：缺口转四向车（整箱出库，只按需求件数记账）。
+                    created = allocate_shuttle_box(order, sku_id, line_id, case_cnt, need_pieces)
+                    tasks.extend(created)
+                    pool_tasks.extend(created)
+                    picked = [task for task in created if task.get("taskKind") == "shuttle_order_pick"]
+                    if picked:
+                        shuttle_boxes += len(picked)
+                        line_shuttle_degraded += len(picked)
+                        order_task_ids.extend(task["id"] for task in picked)
+                        continue
+                    # 两侧都不足：记异常缺口。
+                    line_missing_boxes += 1
+                    line_missing_pieces += need_pieces
+
+                missing_boxes += line_missing_boxes
+                missing_pieces += line_missing_pieces
+                shuttle_boxes_total += line_shuttle_degraded
+                ctu_boxes_total += line_ctu_boxes
+                requested_boxes = full_boxes + (1 if tail_pieces else 0)
+                allocated_boxes = line_shuttle_boxes + line_shuttle_degraded + line_ctu_boxes
                 runtime_lines.append(
                     {
                         **requested,
-                        "allocated": len(matches),
+                        "qtyMode": qty_mode,
+                        "caseCnt": case_cnt,
+                        "requestedPieces": pieces,
+                        "requestedBoxes": requested_boxes,
+                        "allocatedPieces": pieces - line_missing_pieces,
+                        "allocated": allocated_boxes,
+                        "shuttleBoxes": line_shuttle_boxes + line_shuttle_degraded,
+                        "ctuBoxes": line_ctu_boxes,
+                        "missingPieces": line_missing_pieces,
+                        "pickedPieces": 0,
                         "picked": 0,
                     }
                 )
@@ -772,7 +941,6 @@ class SimulationService:
             dispatch_mode = str(order.get("dispatchMode") or "balanced")
             max_parallel_ctu = max(1, min(7, int(order.get("maxParallelCtu") or 7), ctu_count))
             task_groups = self._split_ctu_order_lines(allocated_lines, dispatch_mode, max_parallel_ctu)
-            order_task_ids: list[str] = []
             for task_index, task_lines in enumerate(task_groups, start=1):
                 selected_port, port_cost = self._select_ctu_delivery_port(
                     topology,
@@ -794,6 +962,7 @@ class SimulationService:
                     1 if order.get("priority") == "urgent" else 2,
                     order_id=order["id"],
                 )
+                task["taskKind"] = "ctu_order_pick"
                 task["taskIndex"] = task_index
                 task["splitStrategy"] = dispatch_mode
                 task["sourceGroupLabel"] = self._source_group_label(task_lines)
@@ -802,11 +971,16 @@ class SimulationService:
                 task["portQueuePosition"] = port_loads.get(delivery, 0) + 1
                 task["portSelectionCost"] = port_cost
                 task["portSelectionReason"] = "综合取货终点距离与出库口排队时间"
+                task["pickPiecesList"] = [int(line.get("pickPieces") or 1) for line in task_lines]
+                task["demandPieces"] = sum(task["pickPiecesList"])
                 port_loads[delivery] = port_loads.get(delivery, 0) + 1
                 tasks.append(task)
 
-            requested_quantity = sum(max(1, int(line.get("quantity", 1))) for line in order.get("lines", []))
-            allocated_quantity = len(allocated_lines)
+            requested_pieces = sum(int(line.get("requestedPieces") or 0) for line in runtime_lines)
+            requested_boxes = sum(int(line.get("requestedBoxes") or 0) for line in runtime_lines)
+            allocated_pieces = sum(int(line.get("allocatedPieces") or 0) for line in runtime_lines)
+            allocated_boxes = shuttle_boxes_total + ctu_boxes_total
+            has_missing = missing_boxes > 0
             order_states.append(
                 {
                     "id": order["id"],
@@ -820,16 +994,27 @@ class SimulationService:
                     "totalTasks": len(order_task_ids),
                     "completedTasks": 0,
                     "progress": 0,
-                    "status": "exception" if missing or not order_task_ids else "waiting_dispatch",
-                    "statusLabel": "库存不足" if missing else "等待调度",
-                    "missingQuantity": missing,
+                    "status": "exception" if has_missing or not order_task_ids else "waiting_dispatch",
+                    "statusLabel": "库存不足" if has_missing else "等待调度",
+                    "missingQuantity": missing_boxes,
+                    "missingPieces": missing_pieces,
                     "startedTick": None,
                     "completedTick": None,
                     "decomposition": {
-                        "stage": "exception" if missing or not order_task_ids else "tasks_generated",
-                        "requestedQuantity": requested_quantity,
-                        "allocatedQuantity": allocated_quantity,
-                        "missingQuantity": missing,
+                        "stage": "exception" if has_missing or not order_task_ids else "tasks_generated",
+                        "requestedQuantity": requested_boxes,
+                        "allocatedQuantity": allocated_boxes,
+                        "missingQuantity": missing_boxes,
+                        "requestedPieces": requested_pieces,
+                        "allocatedPieces": allocated_pieces,
+                        "missingPieces": missing_pieces,
+                        "pickedPieces": 0,
+                        "shuttleBoxes": shuttle_boxes_total,
+                        "ctuBoxes": ctu_boxes_total,
+                        "shuttleTaskCount": len(
+                            [task_id for task_id in order_task_ids if task_id.startswith("task-dock-")]
+                        ),
+                        "ctuTaskCount": len(task_groups),
                         "taskCount": len(order_task_ids),
                         "assignedTaskCount": 0,
                         "activeVehicleIds": [],
@@ -840,6 +1025,20 @@ class SimulationService:
                 }
             )
         return tasks, order_states
+
+    def _sku_case_counts(self) -> dict[str, int]:
+        """商品目录里的 SKU → 每箱件数（caseCnt）。目录缺失时回退 1 件/箱。"""
+        catalog = load_catalog()
+        counts: dict[str, int] = {}
+        for sku in catalog.get("skus", []):
+            sku_id = str(sku.get("skuId") or "")
+            if not sku_id:
+                continue
+            try:
+                counts[sku_id] = max(1, int(sku.get("caseCnt") or 1))
+            except (TypeError, ValueError):
+                counts[sku_id] = 1
+        return counts
 
     def _first_delivery_cell(self, topology: dict[str, Any]) -> str:
         """输送线出入口（port 区域）入口格；无 port 区域时返回空串。
@@ -1009,6 +1208,17 @@ class SimulationService:
             )
             return False
 
+        # 同一订单两侧货物送同一个出货口：四向车整箱沿上层线也截断到订单固定的侧向口。
+        if task.get("orderId"):
+            port_block = self._output_port_for_order(
+                runtime,
+                task.get("orderId"),
+                self._delivery_output_ports(runtime, route),
+            )
+            if port_block:
+                route = self._route_to_output_port(runtime, route, port_block)
+                task["outputPortBlockId"] = port_block
+
         task["status"] = "assigned"
         task["phase"] = "arm_conveyor_delivery"
         task["phaseLabel"] = f"机械臂放箱后上层输送 1/{len(route)}"
@@ -1131,22 +1341,46 @@ class SimulationService:
         )
 
     def _advance_detached_conveyor_tasks(self, runtime: RunRuntime) -> None:
-        """推进已脱离机器人的机械臂放箱输送任务。"""
+        """推进已脱离机器人的机械臂放箱输送任务（含拣货分裂的 fwd/回库子任务）。"""
         tick = int(runtime.state["tick"])
         for task in runtime.state.get("tasks", []):
             if task.get("status") in TERMINAL_TASK_STATUSES or task.get("phase") != "arm_conveyor_delivery":
                 continue
             transport = task.get("conveyorTransport")
-            if not isinstance(transport, dict) or int(transport.get("startedTick", -1)) >= tick:
+            if not isinstance(transport, dict):
+                # 占块门控上线：等路线首块空闲（前箱已前进一格）才出现，避免源头重叠。
+                if task.get("pendingTransport") is not None:
+                    self._activate_child_transport(runtime, task)
+                continue
+            if int(transport.get("startedTick", -1)) >= tick:
                 continue
             if self._advance_conveyor_transport(runtime, None, task):
                 self._complete_detached_conveyor_task(runtime, task)
 
     def _complete_detached_conveyor_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
-        """货箱到达机械臂输送路线终点后完成任务并保留终点货箱快照。"""
+        """货箱到达机械臂输送路线终点后处理：回库子任务转等待 CTU 取回，其余完成任务。"""
         tick = int(runtime.state["tick"])
         transport = task.get("conveyorTransport") or {}
         final_block = transport.get("currentBlockId")
+        # ===== 回库子任务：到达回库口后不停留完成，转为等待 CTU 取回 =====
+        if task.get("taskKind") == "picking_return":
+            end_block = str(final_block or "").removesuffix(":upper")
+            task["returnEndBlockId"] = end_block
+            task["conveyorTransport"] = None
+            task["phase"] = "pickup_from_port"
+            task["phaseLabel"] = self._phase_label("pickup_from_port")
+            task["status"] = "assigned"
+            task["remainingStageTicks"] = 0
+            # 回库口停靠 transport：货箱视觉上停在回库口块等待 CTU 取回。
+            self._prepare_conveyor_transport(runtime, task, "pickup_from_port")
+            task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+            )
+            return
         final_node = runtime.conveyor_graph.get("nodes", {}).get(final_block, {})
         final_cell = cell_id(
             int(final_node.get("row", 0)),
@@ -1440,7 +1674,7 @@ class SimulationService:
                 break
             tasks.append(self._build_task(topology, f"task-ctu-{index + 1}", "ctu", "direct", lines, delivery, False, 2))
 
-        tasks.extend(self._seed_shuttle_tasks(topology, shuttle_docks, inventory))
+        # 无订单启动时只保留 CTU 演示任务；四向车只在订单拆出整箱任务时工作。
         return tasks
 
     @staticmethod
@@ -1472,6 +1706,8 @@ class SimulationService:
         topology: dict[str, Any],
         shuttle_docks: list[dict[str, Any]] | None = None,
         inventory: list[dict[str, Any]] | None = None,
+        batch: dict[str, Any] | None = None,
+        existing_tasks: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """四向车出库搬运任务：库位 → 驶出车库 → 地面输送线交付。
 
@@ -1480,6 +1716,7 @@ class SimulationService:
         目标箱被外层箱挡住时先生成倒库任务）；未传状态时回退读取拓扑上的出货位节点；
         都没有时自动派 6 个任务（随机库位）。
         取货源只使用「可服务货位」（邻接可达巷道），深藏货架内部的货位四向车物理上到不了。
+        `batch` / `existing_tasks` 可由订单拆解共享，避免订单任务与自动任务争抢同一箱。
         """
         shuttle_sources = shuttle_servable_slots(topology)
         if not shuttle_sources:
@@ -1492,13 +1729,13 @@ class SimulationService:
         ]
         if docks:
             tasks: list[dict[str, Any]] = []
-            batch: dict[str, Any] = {"cursor": 0}
+            shared_batch: dict[str, Any] = batch if batch is not None else {"cursor": 0}
             for dock in docks:
                 for _ in range(int(dock.get("quantity") or 1)):
                     tasks.extend(
                         self._build_dock_tasks(
                             topology, inventory or [], dock, shuttle_sources,
-                            0, batch, tasks,
+                            0, shared_batch, list(existing_tasks or []) + tasks,
                         )
                     )
             return tasks
@@ -1609,6 +1846,12 @@ class SimulationService:
                     else:
                         relocate_wanted.append(item)
         if pick_box is None:
+            # 订单驱动任务要求严格匹配 SKU：没货就返回空，由调用方降级到 CTU，
+            # 不能拿其它 SKU 的箱子顶上。
+            if sku and dock.get("requireSku"):
+                batch["claimed_boxes"] = claimed_boxes
+                batch["claimed_relocate_lanes"] = claimed_relocate_lanes
+                return []
             # 无 SKU / SKU 无匹配：轮转取第一个有箱且未被占用的货道的最浅箱
             for offset in range(len(shuttle_sources)):
                 idx = (int(batch.get("cursor") or 0) + offset) % len(shuttle_sources)
@@ -1643,7 +1886,12 @@ class SimulationService:
                 if dest_cell is None:
                     # 没有空货道承接倒库：放弃深处目标，降级取该货道最浅未认领箱
                     pick_box = next(
-                        (b for b in lane_boxes.get((str(pick_box["cellId"]), int(pick_box.get("layer", 1))), []) if box_key(b) not in claimed_boxes),
+                        (
+                            b
+                            for b in lane_boxes.get((str(pick_box["cellId"]), int(pick_box.get("layer", 1))), [])
+                            if box_key(b) not in claimed_boxes
+                            and (not dock.get("requireSku") or b.get("skuId") == sku)
+                        ),
                         None,
                     )
                     relocate_wanted = []
@@ -1874,6 +2122,9 @@ class SimulationService:
             # 货道深度（四向车库倒库/按深度取货用）；普通任务无此字段。
             if line.get("depth") is not None:
                 entry["depth"] = int(line["depth"])
+            # 箱内件数：CTU 尾箱需要按整箱件数携带，拣货时再按需求件数扣减。
+            if line.get("qty") is not None:
+                entry["qty"] = int(line["qty"])
             for field in SKU_FIELDS:
                 if line.get(field) not in (None, ""):
                     entry[field] = line[field]
@@ -2062,6 +2313,8 @@ class SimulationService:
         self._move_robots(runtime)
         self._advance_picking_arm(runtime)
         self._advance_detached_conveyor_tasks(runtime)
+        self._advance_detached_picking_tasks(runtime)
+        self._advance_feeding_parents(runtime)
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
@@ -2177,6 +2430,8 @@ class SimulationService:
         self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "status": "pending", "urgent": True})
 
     def _assign_tasks(self, runtime: RunRuntime) -> None:
+        # 回库子任务已在回库口等待：优先派空闲 CTU 取回，再派新任务。
+        self._assign_pickup_returns(runtime)
         pending = [task for task in runtime.state["tasks"] if task["status"] == "pending"]
         if not pending:
             return
@@ -2789,10 +3044,15 @@ class SimulationService:
         inventory = runtime.state.get("inventory") or []
         for index, slot in enumerate(inventory):
             if slot.get("nodeId") == node_id and int(slot.get("layer", 1)) == layer:
-                robot.setdefault("carrying", []).append(slot)
+                # 订单尾箱按整箱件数入车（线路上显式声明了 qty=箱规），拣货时再只拣所需件数；
+                # 普通任务沿用库存槽自身件数。
+                carried = dict(slot)
+                if line.get("qty") is not None:
+                    carried["qty"] = int(line["qty"])
+                robot.setdefault("carrying", []).append(carried)
                 del inventory[index]
                 runtime.inventory_delta.append({"op": "remove", "nodeId": node_id, "layer": layer})
-                return slot
+                return carried
         return None
 
     def _advance_ctu_pickup_action(
@@ -3017,7 +3277,10 @@ class SimulationService:
             return
         zone = self._pick_station_for(runtime, task)
         if zone is not None:
-            self._start_conveyor_to_lift(runtime, robot, task, zone, occupied_cells)
+            # 逐箱流水：交付完成后按货箱拆成多个单箱拣货子任务，父任务立即释放机器人。
+            # 每箱独立走 升降 → 上层 → 拣货台 → 分裂；升降/拣货台是一次一箱资源，
+            # 后续箱靠块容量检查与升降仲裁自然排队。
+            self._spawn_picking_box_tasks(runtime, robot, task, zone, occupied_cells)
         else:
             self._complete_task(runtime, robot, task, occupied_cells)
 
@@ -3307,10 +3570,89 @@ class SimulationService:
             return node_id[: -len(":upper")]
         return node_id
 
+    def _delivery_output_ports(self, runtime: RunRuntime, route: list[str]) -> list[str]:
+        """识别主出货线末端竖段上的侧向出货口块。
+
+        本拓扑主干沿 col 60 向南延伸，102/106/110/114/118 行的 col 62 块是
+        侧向出货口（帽口）。判定口径：竖段某一行的侧向相邻块 next 指回该行
+        主干块。按行号升序返回，保证同一个口在所有线路上的顺序一致。
+        """
+        nodes = runtime.conveyor_graph.get("nodes", {})
+        if not route or not nodes:
+            return []
+        last = nodes.get(route[-1])
+        if not isinstance(last, dict):
+            return []
+        trunk_col = int(last.get("col", 0))
+        floor = str(last.get("floor") or "1F")
+        trunk: list[str] = []
+        for block_id in reversed(route):
+            node = nodes.get(block_id)
+            if not isinstance(node, dict) or int(node.get("col", 0)) != trunk_col:
+                break
+            trunk.append(block_id)
+        ports: list[str] = []
+        route_set = set(route)
+        # 真正的出货口是挂在竖段上的死端支线：没有任何上游块指向它。
+        # 多线汇入点（如 84:58 由 84:56 喂入）不是出货口。
+        fed_blocks = {
+            str(node.get("next"))
+            for node in nodes.values()
+            if isinstance(node, dict) and node.get("next")
+        }
+        for block_id in trunk:
+            row = int(nodes[block_id].get("row", 0))
+            for step in (2, -2):
+                neighbor_id = f"{floor}:{row}:{trunk_col + step}:upper"
+                neighbor = nodes.get(neighbor_id)
+                # 只看侧向口：不能把路线自身的转弯段（如 84:62）误判成出货口。
+                if neighbor_id in route_set or not isinstance(neighbor, dict):
+                    continue
+                if neighbor.get("next") == block_id and neighbor_id not in fed_blocks:
+                    ports.append(neighbor_id)
+        ports.sort(key=lambda item: int(nodes[item].get("row", 0)))
+        return ports
+
+    def _output_port_for_order(self, runtime: RunRuntime, order_id: Any, ports: list[str]) -> str | None:
+        """同一订单固定使用同一出货口；不同订单优先均摊到空闲的口。"""
+        if not ports:
+            return None
+        assignments = runtime.state.setdefault("outputPortAssignments", {})
+        if not isinstance(assignments, dict):
+            assignments = {}
+            runtime.state["outputPortAssignments"] = assignments
+        order_key = str(order_id or "")
+        assigned = assignments.get(order_key) if order_key else None
+        if assigned in ports:
+            return str(assigned)
+        nodes = runtime.conveyor_graph.get("nodes", {})
+        usage = {port: 0 for port in ports}
+        for value in assignments.values():
+            if value in usage:
+                usage[value] += 1
+        chosen = min(ports, key=lambda port: (usage[port], int(nodes.get(port, {}).get("row", 0))))
+        if order_key:
+            assignments[order_key] = chosen
+        return chosen
+
+    def _route_to_output_port(self, runtime: RunRuntime, route: list[str], port_block: str) -> list[str]:
+        """把出货主干路线截断到该出货口所在行，再接入侧向出货口块。"""
+        nodes = runtime.conveyor_graph.get("nodes", {})
+        port_node = nodes.get(port_block)
+        if not isinstance(port_node, dict) or not route:
+            return route
+        port_row = int(port_node.get("row", 0))
+        for index in range(len(route) - 1, -1, -1):
+            node = nodes.get(route[index])
+            if isinstance(node, dict) and int(node.get("row", 0)) == port_row:
+                return route[: index + 1] + [port_block]
+        return route
+
     def _spawn_placed_goods_delivery(self, runtime: RunRuntime, parent_task: dict[str, Any]) -> None:
         """Picking 分裂：已拣部分（placedGoods）创建 forward 输送线子任务。
 
-        从拣货台对应的上层输送块出发，沿 next 方向走到出货口 (118,60)。
+        从拣货台对应的上层输送块出发，沿 next 方向走到该订单固定的出货口
+        （主出货线末端竖段上的侧向口，如同订单走 118:62，另一单走 114:62）。
         这是一个纯输送线任务——没有 robot 参与，只由 conveyorTransport 推进。
         """
         placed = parent_task.get("placedGoods") or []
@@ -3331,6 +3673,21 @@ class SimulationService:
             route = route_from_block(runtime.conveyor_graph, block_id, "upper") if block_id else []
         if not route:
             return  # 没有可走的 forward 路线 → 放弃（不会发货丢失，任务至少完成了回库）
+        # 出货口：同一订单的所有已拣箱固定走同一个侧向出货口。
+        port_block = self._output_port_for_order(
+            runtime,
+            parent_task.get("orderId"),
+            self._delivery_output_ports(runtime, route),
+        )
+        port_cell_id: str | None = None
+        if port_block:
+            route = self._route_to_output_port(runtime, route, port_block)
+            port_node = runtime.conveyor_graph.get("nodes", {}).get(port_block, {})
+            port_cell_id = cell_id(
+                int(port_node.get("row", 0)),
+                int(port_node.get("col", 0)),
+                str(port_node.get("floor") or "1F"),
+            )
         child_id = f"{parent_task['id']}-placed-fwd"
         # 确保不重复创建
         if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
@@ -3351,14 +3708,17 @@ class SimulationService:
             "history": [{"tick": runtime.state["tick"], "phase": "arm_conveyor_delivery", "status": "assigned"}],
             "pickStationCellId": pick_cell,
             "assignedPortId": parent_task.get("assignedPortId"),
-            "deliveryCellId": parent_task.get("deliveryCellId"),
+            # 已拣货物的实际交付点：订单固定的侧向出货口；无法识别时回退原交付点。
+            "deliveryCellId": port_cell_id or parent_task.get("deliveryCellId"),
+            "outputPortBlockId": port_block,
+            "outputPortCellId": port_cell_id,
             "createdTick": runtime.state["tick"],
             "startedTick": runtime.state["tick"],
             "completedTick": None,
             "urgent": bool(parent_task.get("urgent")),
             "orderId": parent_task.get("orderId"),
         }
-        child_task["conveyorTransport"] = {
+        child_task["pendingTransport"] = {
             "phase": "arm_conveyor_delivery",
             "deck": "upper",
             "route": route,
@@ -3377,6 +3737,523 @@ class SimulationService:
             "task_spawned",
             {"taskId": child_id, "parentId": parent_task["id"], "phase": "arm_conveyor_delivery", "placedGoodsCount": len(placed), "routeLen": len(route)},
         )
+
+    def _spawn_picking_box_tasks(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        zone: dict[str, Any],
+        occupied_cells: set[str] | None = None,
+    ) -> None:
+        """逐箱流水：把交付的全部货箱拆成单箱拣货子任务，父任务立即完成并释放机器人。
+
+        每个子任务只携带一箱（1 slot），错开 startedTick 依次启动；后续箱在升降机
+        前的下层块与拣货台前的上层块靠容量检查自动排队，升降互斥由
+        _lift_stage_has_priority 仲裁。
+        """
+        delivered = task.get("deliveredGoods") or robot.get("carrying") or []
+        if not delivered:
+            self._complete_task(runtime, robot, task, occupied_cells)
+            return
+        pick_cell = pick_station_entry_cell(runtime.topology, zone)
+        tick = int(runtime.state["tick"])
+        pick_list = task.get("pickPiecesList") or []
+        for index, slot in enumerate(delivered):
+            child_id = f"{task['id']}-pick-{index}"
+            if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
+                continue
+            # 该箱需要拣出的件数：订单尾箱只拣尾数，其余整箱按整箱件数拣。
+            pick_pieces = (
+                max(1, int(pick_list[index]))
+                if index < len(pick_list) and pick_list[index]
+                else max(1, int(task.get("pickPieces") or 1))
+            )
+            child: dict[str, Any] = {
+                "id": child_id,
+                "parentId": task["id"],
+                "taskKind": "picking_box",
+                "robotType": "none",  # 纯输送线任务，无 robot，由 detached 驱动器推进
+                "status": "assigned",
+                "phase": "conveyor_to_lift",
+                "phaseLabel": self._phase_label("conveyor_to_lift"),
+                "lines": [dict(slot)],
+                "transitGoods": [dict(slot)],
+                "placedGoods": [],
+                "deliveredGoods": [],
+                "picked": 0,
+                "pickPieces": pick_pieces,
+                "history": [{"tick": tick, "phase": "conveyor_to_lift", "status": "assigned"}],
+                "pickStationZoneId": zone.get("id"),
+                "pickStationCellId": pick_cell,
+                "assignedPortId": task.get("assignedPortId"),
+                "deliveryCellId": task.get("deliveryCellId"),
+                "createdTick": tick,
+                "startedTick": tick + index,  # 错开启动，逐箱进入输送线
+                "completedTick": None,
+                "urgent": bool(task.get("urgent")),
+                "orderId": task.get("orderId"),
+            }
+            self._prepare_conveyor_transport(runtime, child, "conveyor_to_lift")
+            transport = child.get("conveyorTransport")
+            if isinstance(transport, dict):
+                # 占块门控上线：先存 pendingTransport，等路线首块空闲才显示/推进，
+                # 避免多箱在同一源头块重叠"凭空出现"。
+                child["pendingTransport"] = child.pop("conveyorTransport")
+                child["pendingTransport"]["startedTick"] = child["startedTick"]
+            elif runtime.conveyor_graph.get("explicit"):
+                # 显式分层模式下没有可走的下层路线：标记失败，避免任务永久挂起。
+                child["status"] = "failed"
+                child["phase"] = "failed"
+                child["failureReason"] = "conveyor_route_missing"
+                child["completedTick"] = tick
+            # else: 旧拓扑无显式输送图，纯计时推进（驱动器回退路径）
+            runtime.state.setdefault("tasks", []).append(child)
+            self._record_event(
+                runtime,
+                tick,
+                "task_spawned",
+                {"taskId": child_id, "parentId": task["id"], "taskKind": "picking_box", "slotIndex": index, "startedTick": child["startedTick"]},
+            )
+        # 父任务进入"喂线"状态：机器人停在出货口旁，直到所有子箱都上线才释放。
+        # 这样每箱上线时 CTU 都在场，货箱不会在无车状态下凭空出现在输送线上。
+        task["transitGoods"] = []
+        task["deliveredGoods"] = [dict(slot) for slot in delivered]
+        task["pickingDelegated"] = True  # 前端据此跳过父任务的放置区幽灵渲染
+        robot["carrying"] = []
+        robot["load"] = 0
+        tick = int(runtime.state["tick"])
+        task["phase"] = "feeding_conveyor"
+        task["phaseLabel"] = self._phase_label("feeding_conveyor")
+        robot["status"] = "waiting"
+        robot["handlingAction"] = None
+        robot["path"] = [robot["currentCellId"]]
+        robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        robot["phaseLabel"] = task["phaseLabel"]
+        task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+        )
+        # 不要把车停在出入口堵住后面的车；喂线期间原地等待。
+        self._step_off_port(runtime, robot, occupied_cells)
+
+    def _activate_child_transport(self, runtime: RunRuntime, task: dict[str, Any]) -> bool:
+        """把子任务的 pendingTransport 升级为正式 transport（"上线"）。
+
+        仅当路线首块空闲时才允许上线：前箱还在首块时，后箱保持 pending（前端不渲染），
+        前箱前进一格后后箱出现在腾出的位置——货箱逐个出现，绝不在同一块上重叠。
+        """
+        pending = task.get("pendingTransport")
+        if not isinstance(pending, dict):
+            return False
+        head_block = str(pending.get("route", [""])[0])
+        deck = pending.get("deck")
+        for other in runtime.state.get("tasks", []):
+            if other.get("id") == task.get("id") or other.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            other_transport = other.get("conveyorTransport")
+            if (
+                isinstance(other_transport, dict)
+                and str(other_transport.get("currentBlockId")) == head_block
+                and other_transport.get("deck") == deck
+            ):
+                return False
+        activated = dict(pending)
+        activated["startedTick"] = int(runtime.state["tick"])
+        activated["waitingTicks"] = 0
+        activated["movedTicks"] = 0
+        task["conveyorTransport"] = activated
+        task.pop("pendingTransport", None)
+        self._record_event(
+            runtime,
+            int(runtime.state["tick"]),
+            "task_state_changed",
+            {"taskId": task["id"], "phase": task.get("phase"), "status": task.get("status"), "conveyorEntered": head_block},
+        )
+        return True
+
+    def _advance_feeding_parents(self, runtime: RunRuntime) -> None:
+        """喂线中的父任务：所有子箱都已上线（或终结）后完成父任务并释放机器人。"""
+        for task in runtime.state.get("tasks", []):
+            if task.get("phase") != "feeding_conveyor" or task.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            children = [
+                t for t in runtime.state.get("tasks", [])
+                if t.get("parentId") == task["id"] and t.get("taskKind") == "picking_box"
+            ]
+            if not children:
+                continue
+            all_entered = all(
+                t.get("status") in TERMINAL_TASK_STATUSES
+                or isinstance(t.get("conveyorTransport"), dict)
+                or t.get("phase") != "conveyor_to_lift"
+                for t in children
+            )
+            if not all_entered:
+                continue
+            robot = next(
+                (item for item in runtime.state.get("robots", []) if item.get("currentTaskId") == task["id"]),
+                None,
+            )
+            if robot is None:
+                # 机器人已不挂在此任务（异常兜底）：直接收尾，避免喂线状态卡死。
+                tick = int(runtime.state["tick"])
+                task["status"] = "completed"
+                task["phase"] = "completed"
+                task["phaseLabel"] = self._phase_label("completed")
+                task["completedTick"] = tick
+                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+                self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": "completed", "status": "completed"})
+                continue
+            self._complete_task(runtime, robot, task)
+
+    def _advance_detached_picking_tasks(self, runtime: RunRuntime) -> None:
+        """推进无机器人（detached）的单箱拣货任务：下层去程 → 升降 → 上层 → 拣货 → 放置分裂。"""
+        tick = int(runtime.state["tick"])
+        for task in runtime.state.get("tasks", []):
+            if task.get("taskKind") != "picking_box" or task.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            if int(task.get("startedTick", 0)) > tick:
+                continue  # 错开启动：后续箱依次进入输送线
+            self._advance_detached_picking_task(runtime, task)
+
+    def _advance_detached_picking_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """单个 detached 拣货任务的逐 tick 推进（与机器人驱动版阶段机等价，robot=None）。"""
+        phase = task.get("phase")
+        if phase in {"conveyor_to_lift", "conveyor_to_pick"}:
+            transport = task.get("conveyorTransport")
+            if transport is None and task.get("pendingTransport") is not None and phase == "conveyor_to_lift":
+                # 占块门控上线：路线首块空闲才出现（前箱已前进一格），避免源头重叠。
+                self._activate_child_transport(runtime, task)
+                return
+            if isinstance(transport, dict):
+                if phase == "conveyor_to_pick" and not self._station_clear_for_entry(runtime, task, transport):
+                    # 站台公平性：前一箱的出货/回库子任务还没放行，本箱留在 (90,c) 排队，
+                    # 不抢占拣货台块——避免分裂子任务被饿到最后一箱拣完才集中放出。
+                    transport["waitingTicks"] = int(transport.get("waitingTicks", 0)) + 1
+                    return
+                if not self._advance_conveyor_transport(runtime, None, task):
+                    return
+                current_block = str(transport.get("currentBlockId") or "")
+                if phase == "conveyor_to_lift":
+                    # 记录升降注入块，供 lift_to_upper / conveyor_to_pick 定位。
+                    task["liftBlockId"] = current_block.removesuffix(":lower")
+                else:
+                    # 记录拣货台块，供 picking / place_goods 停靠与分裂子任务起点使用。
+                    task["stationBlockId"] = current_block.removesuffix(":upper")
+                task["conveyorTransport"] = None
+                self._advance_detached_stage(runtime, task)
+                return
+            # 旧拓扑（无显式输送图）：纯计时推进。
+            remaining = int(task.get("remainingStageTicks", 0)) - 1
+            task["remainingStageTicks"] = max(0, remaining)
+            if remaining > 0:
+                return
+            self._advance_detached_stage(runtime, task)
+            return
+        if phase == "lift_to_upper":
+            if not self._lift_stage_has_priority(runtime, task):
+                return  # 升降机被其它箱占用：留在下层等待
+            # 升降编排：拿到升降权后货箱先滑上升降机设备块，
+            # 计时末段再在设备上抬升到上层（deck 翻转为 upper）。
+            lift_transport = task.get("conveyorTransport")
+            if isinstance(lift_transport, dict) and lift_transport.get("deck") != "upper":
+                device_block = self._lift_device_block(runtime, task)
+                if device_block:
+                    device_lower = f"{device_block}:lower"
+                    if lift_transport.get("currentBlockId") != device_lower:
+                        lift_transport["currentBlockId"] = device_lower
+                        lift_transport["route"] = [device_lower]
+                if int(task.get("remainingStageTicks", 0)) <= 1:
+                    # 末段抬升
+                    lift_transport["deck"] = "upper"
+                    if device_block:
+                        device_upper = f"{device_block}:upper"
+                        lift_transport["currentBlockId"] = device_upper
+                        lift_transport["route"] = [device_upper]
+                    else:
+                        base = str(lift_transport.get("currentBlockId") or "").removesuffix(":lower")
+                        lift_transport["currentBlockId"] = base + ":upper"
+                        lift_transport["route"] = [base + ":upper"]
+            remaining = int(task.get("remainingStageTicks", 0)) - 1
+            task["remainingStageTicks"] = max(0, remaining)
+            if remaining > 0:
+                return
+            self._advance_detached_stage(runtime, task)
+            return
+        if phase in {"picking", "place_goods"}:
+            remaining = int(task.get("remainingStageTicks", 0)) - 1
+            task["remainingStageTicks"] = max(0, remaining)
+            if remaining > 0:
+                return
+            if phase == "picking":
+                self._finish_picking(runtime, task, None)
+            else:
+                # 放置结束 → 分裂：已拣部分去出货口，货箱（含空箱）回库。
+                self._split_picking_box(runtime, task)
+            return
+
+    def _station_clear_for_entry(self, runtime: RunRuntime, task: dict[str, Any], transport: dict[str, Any]) -> bool:
+        """拣货台进入公平性：还有更早的分裂子任务（出货/回库）未上线时，本箱不得进站台。
+
+        分裂子任务的路线首块就是拣货台块；它们靠"站台空闲"门控上线。若下一箱
+        在前一箱拣完的同一 tick 抢占站台，前箱的出货箱/回库箱会被饿到很久之后
+        才集中出现。此门控强制：先放行前箱的分裂子任务，再让下一箱进站台。
+        """
+        route = transport.get("route") or []
+        index = int(transport.get("index", 0))
+        if index + 1 >= len(route):
+            return True  # 已在站台内，无"进入"动作
+        next_block = str(route[index + 1])
+        for other in runtime.state.get("tasks", []):
+            if other.get("id") == task.get("id") or other.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            if other.get("taskKind") not in ("placed_goods_delivery", "picking_return"):
+                continue
+            if other.get("conveyorTransport") is not None:
+                continue  # 已上线（在线上滑行或已到终点），由容量检查接管
+            pending = other.get("pendingTransport")
+            if isinstance(pending, dict) and str(pending.get("route", [""])[0]) == next_block:
+                return False
+        return True
+
+    def _advance_detached_stage(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """detached 任务的阶段链接续（conveyor_to_lift → lift_to_upper → conveyor_to_pick → picking）。"""
+        phase = task.get("phase")
+        if phase == "conveyor_to_lift":
+            lift_ticks = max(1, int(runtime.config.get("liftTicks", 3) or 3))
+            self._enter_timed_stage(runtime, None, task, "lift_to_upper", lift_ticks)
+            return
+        if phase == "lift_to_upper":
+            transfer_ticks = 1 if runtime.conveyor_graph.get("explicit") else max(
+                1, int(runtime.config.get("conveyorTransferTicks", 6) or 6)
+            )
+            self._enter_timed_stage(runtime, None, task, "conveyor_to_pick", transfer_ticks)
+            return
+        if phase == "conveyor_to_pick":
+            self._start_picking(runtime, None, task)
+            return
+
+    def _split_picking_box(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """单箱拣货任务的放置阶段结束：已拣部分（1 件）创建 forward 出货子任务，
+        货箱本体（无论剩余多少、是否已空）创建回库子任务，随后本任务完成。"""
+        transit = task.get("transitGoods") or []
+        if transit:
+            slot = dict(transit[0])
+            slot_qty = max(1, int(slot.get("qty", 1) or 1))
+            # 订单尾箱只拣所需件数（如整箱 20 件、只拣 10 件），其余留在箱内回库。
+            pick_qty = min(slot_qty, max(1, int(task.get("pickPieces") or 1)))
+            task["placedGoods"] = [dict(slot, qty=pick_qty)]
+            task["transitGoods"] = [dict(slot, qty=slot_qty - pick_qty)]
+        else:
+            task["placedGoods"] = []
+            task["transitGoods"] = []
+        if task.get("placedGoods"):
+            # 已拣部分：每箱各自一个 fwd 子任务，不与其它箱合并。
+            self._spawn_placed_goods_delivery(runtime, task)
+        # 回库：拣货完毕后每箱都要有回库货箱（空箱也回库）。
+        self._spawn_picking_return(runtime, task)
+        self._finish_detached_task(runtime, task)
+
+    def _spawn_picking_return(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """创建回库子任务：沿拣货台北侧回库支线滑回回库口，等待 CTU 取回并送回原库位。"""
+        station_block = task.get("stationBlockId")
+        if not station_block:
+            return  # 旧拓扑没有回库支线：跳过回库子任务（任务链仍可完成）
+        branch = route_from_block_branch(
+            runtime.conveyor_graph,
+            str(station_block),
+            "upper",
+            branch_side="north",
+        )
+        # 无分叉时 route_from_block_branch 退化为主线（终点是出货口）：
+        # 校验终点与拣货台同列且位于其北侧，避免回库箱错开去出货口。
+        last_parts = branch[-1].split(":") if branch else []
+        parts = str(station_block).split(":")
+        if (
+            not branch
+            or branch[0] != f"{station_block}:upper"
+            or len(branch) < 2
+            or len(last_parts) < 3
+            or len(parts) < 3
+            or int(last_parts[2]) != int(parts[2])
+            or int(last_parts[1]) >= int(parts[1])
+        ):
+            return
+        child_id = f"{task['id']}-return"
+        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
+            return
+        slot = (task.get("transitGoods") or [{}])[0]
+        child: dict[str, Any] = {
+            "id": child_id,
+            "parentId": task["id"],
+            "taskKind": "picking_return",
+            "robotType": "none",  # 先纯输送线滑回回库口，再由 CTU 取回
+            "status": "assigned",
+            "phase": "arm_conveyor_delivery",
+            "phaseLabel": "货箱回库输送",
+            "lines": [dict(slot)],
+            "transitGoods": [dict(slot)],  # 剩余数量可为 0：空箱回库
+            "placedGoods": [],
+            "deliveredGoods": [],
+            "picked": 0,
+            "history": [{"tick": int(runtime.state["tick"]), "phase": "arm_conveyor_delivery", "status": "assigned"}],
+            "pickStationCellId": task.get("pickStationCellId"),
+            "stationBlockId": str(station_block),
+            "assignedPortId": task.get("assignedPortId"),
+            "deliveryCellId": task.get("deliveryCellId"),
+            "createdTick": int(runtime.state["tick"]),
+            "startedTick": int(runtime.state["tick"]),
+            "completedTick": None,
+            "urgent": bool(task.get("urgent")),
+            "orderId": task.get("orderId"),
+        }
+        child["pendingTransport"] = {
+            "phase": "arm_conveyor_delivery",
+            "deck": "upper",
+            "route": branch,
+            "index": 0,
+            "currentBlockId": branch[0],
+            "nextBlockId": branch[1],
+            "waitingTicks": 0,
+            "movedTicks": 0,
+            "startedTick": int(runtime.state["tick"]),
+            "travelProgressSeconds": 0.0,
+        }
+        runtime.state.setdefault("tasks", []).append(child)
+        self._record_event(
+            runtime,
+            int(runtime.state["tick"]),
+            "task_spawned",
+            {"taskId": child_id, "parentId": task["id"], "taskKind": "picking_return", "routeLen": len(branch)},
+        )
+
+    def _finish_detached_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
+        """detached 任务收尾：无机器人参与，子任务不重复累加指标。"""
+        tick = int(runtime.state["tick"])
+        task["status"] = "completed"
+        task["phase"] = "completed"
+        task["phaseLabel"] = self._phase_label("completed")
+        task["completedTick"] = tick
+        task["remainingStageTicks"] = 0
+        task["conveyorTransport"] = None
+        if not task.get("parentId"):
+            runtime.metrics["completedTasks"] += 1
+            runtime.metrics["throughput"] += 1
+        task.setdefault("history", []).append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+        self._record_event(
+            runtime,
+            tick,
+            "task_state_changed",
+            {"taskId": task["id"], "phase": task["phase"], "status": task["status"]},
+        )
+
+    def _assign_pickup_returns(self, runtime: RunRuntime) -> None:
+        """给已在回库口等待的回库子任务分配空闲 CTU：取回货箱并按原库位回库。
+
+        批量取货：一台 CTU 认领同一回库口的"已到口箱 + 在途排队箱"（总量不超过
+        CTU 容量）。CTU 到口后由输送线逐箱喂到位、逐箱装车，然后一趟按各自
+        原库位回送——避免一箱一趟的低效往返。 followers 记录在
+        robot.returnPickupQueue，装载逻辑见 _advance_pickup_from_port。
+        在 _assign_tasks 开头调用，保证回库取回优先于新任务派单。
+        """
+        tasks = runtime.state.get("tasks", [])
+        capacity = ROBOT_CARRY_CAPACITY.get("ctu", 5)
+        waiting = [
+            task for task in tasks
+            if task.get("taskKind") == "picking_return"
+            and task.get("phase") == "pickup_from_port"
+            and task.get("status") not in TERMINAL_TASK_STATUSES
+            and not task.get("assignedRobotId")
+        ]
+        if not waiting:
+            return
+        tick = int(runtime.state["tick"])
+        for leader in waiting:
+            try:
+                _, port_row, port_col = parse_cell_id(str(leader.get("deliveryCellId") or ""))
+            except (TypeError, ValueError):
+                port_row, port_col = 0, 0
+            idle_robots = [
+                item for item in runtime.state.get("robots", [])
+                if item.get("type") == "ctu"
+                and item.get("status") == "idle"
+                and not item.get("currentTaskId")
+                and not item.get("returnPickupQueue")
+            ]
+            if not idle_robots:
+                return
+            # 取离回库口最近的空闲 CTU，减少取箱等待。
+            def robot_distance(item: dict[str, Any]) -> tuple[int, str]:
+                try:
+                    _, row, col = parse_cell_id(str(item.get("currentCellId") or ""))
+                except (TypeError, ValueError):
+                    row, col = 0, 0
+                return (abs(row - port_row) + abs(col - port_col), str(item["id"]))
+
+            robot = min(idle_robots, key=robot_distance)
+            robot["currentTaskId"] = leader["id"]
+            leader["assignedRobotId"] = robot["id"]
+            leader["status"] = "assigned"
+            if not self._set_robot_leg(
+                runtime,
+                robot,
+                leader,
+                "pickup_from_port",
+                leader.get("deliveryCellId"),
+                target_layer=2,
+            ):
+                # 去回库口不可达：释放，避免占住任务
+                leader["assignedRobotId"] = None
+                robot["currentTaskId"] = None
+                continue
+            leader["history"].append({"tick": tick, "phase": leader["phase"], "status": leader["status"]})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": leader["id"], "phase": leader["phase"], "status": leader["status"], "robotId": robot["id"]},
+            )
+            # 组队：同一回库口、还在支线上滑行、未被认领的回库箱，按到口先后排队
+            end_block = str(leader.get("returnEndBlockId") or "")
+            if not end_block:
+                continue
+            followers = []
+            for other in tasks:
+                if other.get("id") == leader.get("id"):
+                    continue
+                if other.get("taskKind") != "picking_return" or other.get("assignedRobotId"):
+                    continue
+                if other.get("status") in TERMINAL_TASK_STATUSES or other.get("phase") != "arm_conveyor_delivery":
+                    continue
+                tr = other.get("conveyorTransport")
+                if not isinstance(tr, dict):
+                    continue
+                route = tr.get("route") or []
+                if not route or str(route[-1]).removesuffix(":upper") != end_block:
+                    continue
+                followers.append(other)
+            # route index 越大越靠近回库口：先到先装
+            followers.sort(key=lambda t: -int((t.get("conveyorTransport") or {}).get("index", 0)))
+            for follower in followers[: max(0, capacity - 1)]:
+                follower["assignedRobotId"] = robot["id"]
+                robot.setdefault("returnPickupQueue", []).append(follower["id"])
+            if robot.get("returnPickupQueue"):
+                self._record_event(
+                    runtime,
+                    tick,
+                    "task_state_changed",
+                    {
+                        "taskId": leader["id"],
+                        "batchPickup": True,
+                        "robotId": robot["id"],
+                        "queue": list(robot["returnPickupQueue"]),
+                        "batchSize": len(robot["returnPickupQueue"]) + 1,
+                    },
+                )
 
     def _advance_conveyor_transport(
         self,
@@ -3400,7 +4277,12 @@ class SimulationService:
             task["remainingStageTicks"] = 0
             return True
 
-        if task.get("phase") == "arm_conveyor_delivery":
+        if task.get("phase") == "arm_conveyor_delivery" and task.get("taskKind") not in (
+            "placed_goods_delivery",
+            "picking_return",
+        ):
+            # 拣货分裂的 fwd/回库子任务与拣货链路同线同速（1 块/tick），
+            # 不走机械臂带面的固定慢速；dock 机械臂线保持原带速。
             seconds_per_block = ARM_CONVEYOR_BLOCK_DISTANCE / ARM_CONVEYOR_VISUAL_SPEED
             progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._tick_delay(runtime)
             if progress_seconds + 1e-9 < seconds_per_block:
@@ -3440,11 +4322,15 @@ class SimulationService:
         transport["movedTicks"] = int(transport.get("movedTicks", 0)) + 1
         task["remainingStageTicks"] = max(0, len(route) - index - 1)
         task["lastProgressTick"] = int(runtime.state["tick"])
-        transport_label = (
-            "机械臂放箱后上层输送"
-            if task.get("phase") == "arm_conveyor_delivery"
-            else "下层去程" if transport.get("deck") == "lower" else "上层回程"
-        )
+        task_kind = task.get("taskKind")
+        if task.get("phase") == "arm_conveyor_delivery":
+            transport_label = (
+                "回库箱上层输送" if task_kind == "picking_return"
+                else "已拣货物上层输送" if task_kind == "placed_goods_delivery"
+                else "机械臂放箱后上层输送"
+            )
+        else:
+            transport_label = "下层去程" if transport.get("deck") == "lower" else "上层回程"
         task["phaseLabel"] = f"{transport_label} {index + 1}/{len(route)}"
         if robot is not None:
             robot["status"] = "waiting"
@@ -3528,65 +4414,40 @@ class SimulationService:
             event.update(event_extra)
         self._record_event(runtime, tick, "task_state_changed", event)
 
-    def _start_conveyor_to_lift(
-        self,
-        runtime: RunRuntime,
-        robot: dict[str, Any],
-        task: dict[str, Any],
-        zone: dict[str, Any],
-        occupied_cells: set[str] | None = None,
-    ) -> None:
-        """货物已在出入口交付到下层输送线：机器人卸货，等待下层输送线把货箱运往升降移栽机。"""
-        # 逐箱交付完成后 carrying 已为空；转运阶段应沿用已经落带的货箱快照。
-        delivered_goods = task.get("deliveredGoods") or robot.get("carrying") or []
-        task["transitGoods"] = [dict(slot) for slot in delivered_goods]
-        task["deliveredGoods"] = [dict(slot) for slot in delivered_goods]
-        robot["carrying"] = []
-        robot["load"] = 0
-        task["pickStationZoneId"] = zone.get("id")
-        task["pickStationCellId"] = pick_station_entry_cell(runtime.topology, zone)
-        transfer_ticks = max(1, int(runtime.config.get("conveyorTransferTicks", 6) or 6))
-        self._enter_timed_stage(
-            runtime,
-            robot,
-            task,
-            "conveyor_to_lift",
-            transfer_ticks,
-            event_extra={
-                "pickStationZoneId": task["pickStationZoneId"],
-                "pickStationCellId": task["pickStationCellId"],
-            },
-        )
-        # 不要把车停在出入口堵住后面的车；转运期间原地等待。
-        self._step_off_port(runtime, robot, occupied_cells)
-
     def _start_picking(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
         """货物已升到上层并沿上层输送线到达人工拣货位，开始自动计时拣货。"""
         pick_ticks = max(1, int(runtime.config.get("pickTicks", 6) or 6))
         self._enter_timed_stage(runtime, robot, task, "picking", pick_ticks)
 
     def _finish_picking(self, runtime: RunRuntime, task: dict[str, Any], robot: dict[str, Any] | None) -> None:
-        """拣货计时结束（或人工跳过）：拣出的货物放到放置区；拓扑没有放置区时直接进入回程。"""
+        """拣货计时结束（或人工跳过）：拣出的货物放到放置区，随后进入放置分裂阶段。
+
+        detached 单箱任务没有放置区时也进入 place_goods：分裂点统一在 place_goods
+        结束处（fwd 出货 + 货箱回库）。
+        """
         task["remainingStageTicks"] = 0
         task["status"] = "assigned"
         drop_zone = self._drop_zone_for(runtime, task)
         if drop_zone is not None:
             task["dropZoneZoneId"] = drop_zone.get("id")
             task["dropZoneCellId"] = drop_zone_entry_cell(runtime.topology, drop_zone)
-            place_ticks = max(1, int(runtime.config.get("placeTicks", 3) or 3))
-            self._enter_timed_stage(
-                runtime,
-                robot,
-                task,
-                "place_goods",
-                place_ticks,
-                event_extra={
-                    "dropZoneZoneId": task["dropZoneZoneId"],
-                    "dropZoneCellId": task["dropZoneCellId"],
-                },
-            )
-        else:
-            self._start_conveyor_return(runtime, robot, task)
+        place_ticks = max(1, int(runtime.config.get("placeTicks", 3) or 3))
+        event_extra = (
+            {
+                "dropZoneZoneId": task["dropZoneZoneId"],
+                "dropZoneCellId": task["dropZoneCellId"],
+            }
+            if task.get("dropZoneCellId")
+            else None
+        )
+        self._enter_timed_stage(
+            runtime,
+            robot,
+            task,
+            "place_goods",
+            place_ticks,
+            event_extra=event_extra,
+        )
 
 
     def _start_conveyor_return(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
@@ -3596,22 +4457,75 @@ class SimulationService:
         self._enter_timed_stage(runtime, robot, task, "conveyor_return", return_ticks)
 
     def _advance_pickup_from_port(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
-        """CTU 在出入口取回经上层输送线返回的货箱，开始按原库位回库。"""
+        """CTU 在回库口取回货箱。支持批量：一次认领最多 CTU 容量个回库箱。
+
+        首次到达装载本任务的箱；若 robot.returnPickupQueue 有排队箱，则等待
+        输送线把下一箱喂到回库口块后逐箱装车（每 tick 至多吸收一箱），全部
+        装完后按合并后的 lines 逐库位回送（_start_return_leg 原生支持多站）。
+        """
         tick = runtime.state["tick"]
-        goods = task.get("transitGoods") or []
         capacity = int(robot.get("capacity", ROBOT_CARRY_CAPACITY.get("ctu", 5)))
-        robot["carrying"] = [dict(slot) for slot in goods]
-        robot["load"] = min(capacity, len(goods))
-        # 货箱已被 CTU 取走：清掉回库口停靠 transport，后续由车载渲染接管。
-        task["conveyorTransport"] = None
-        task["returnLineIndex"] = 0
-        task["history"].append({"tick": tick, "phase": "pickup_from_port", "status": task["status"]})
-        self._record_event(
-            runtime,
-            tick,
-            "task_state_changed",
-            {"taskId": task["id"], "phase": "pickup_from_port", "status": task["status"], "picked": task.get("picked", 0)},
-        )
+        if not task.get("portLoadingStarted"):
+            goods = task.get("transitGoods") or []
+            robot["carrying"] = [dict(slot) for slot in goods]
+            robot["load"] = min(capacity, len(goods))
+            # 货箱已被 CTU 取走：清掉回库口停靠 transport，后续由车载渲染接管。
+            task["conveyorTransport"] = None
+            task["returnLineIndex"] = 0
+            task["portLoadingStarted"] = True
+            task["history"].append({"tick": tick, "phase": "pickup_from_port", "status": task["status"]})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": task["id"], "phase": "pickup_from_port", "status": task["status"], "picked": task.get("picked", 0)},
+            )
+        queue = list(robot.get("returnPickupQueue") or [])
+        if queue:
+            next_id = queue[0]
+            child = find_task(runtime.state.get("tasks", []), next_id)
+            child_transport = (child or {}).get("conveyorTransport")
+            if child is None or child.get("status") in TERMINAL_TASK_STATUSES or not isinstance(child_transport, dict):
+                # 排队项失效（被取消/失败）：跳过
+                queue.pop(0)
+                robot["returnPickupQueue"] = queue
+                return
+            route = child_transport.get("route") or []
+            end_block = str(route[-1]) if route else ""
+            if str(child_transport.get("currentBlockId") or "") != end_block:
+                # 下一箱还在支线上滑行：CTU 原地等待输送线喂箱
+                robot["status"] = "waiting"
+                robot["handlingAction"] = None
+                robot["path"] = [robot["currentCellId"]]
+                robot["pathLayers"] = [robot.get("currentLayer", 1)]
+                robot["phaseLabel"] = f"回库口批量取货 · 等待下一箱到位（剩 {len(queue)} 箱）"
+                task["phaseLabel"] = robot["phaseLabel"]
+                return
+            # 下一箱已到口：吸收进本任务（箱上车、任务并单完成）
+            queue.pop(0)
+            robot["returnPickupQueue"] = queue
+            slot = (child.get("transitGoods") or [{}])[0]
+            line = (child.get("lines") or [{}])[0]
+            task.setdefault("transitGoods", []).append(dict(slot))
+            task.setdefault("lines", []).append(dict(line))
+            if len(robot["carrying"]) < capacity:
+                robot["carrying"].append(dict(slot))
+            robot["load"] = min(capacity, len(robot["carrying"]))
+            child["conveyorTransport"] = None
+            child["status"] = "completed"
+            child["phase"] = "completed"
+            child["phaseLabel"] = "并入批量回库"
+            child["completedTick"] = tick
+            child.setdefault("history", []).append({"tick": tick, "phase": "completed", "status": "completed"})
+            self._record_event(
+                runtime,
+                tick,
+                "task_state_changed",
+                {"taskId": child["id"], "phase": "completed", "status": "completed", "absorbedBy": task["id"]},
+            )
+            return
+        # 队列已空：出发，按合并后的 lines 逐库位回送
+        robot.pop("returnPickupQueue", None)
         self._start_return_leg(runtime, robot, task)
 
     def _start_return_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any]) -> None:
@@ -3750,6 +4664,7 @@ class SimulationService:
         robot["pathLayers"] = [robot.get("currentLayer", 1)]
         robot["load"] = 0
         robot["carrying"] = []
+        robot["returnPickupQueue"] = []
         # 交付/回库完成后退回一格，别把车停在出入口或库位旁堵住后面的车。
         self._step_off_port(runtime, robot, occupied_cells)
         home_cell = robot.get("homeCellId")
@@ -3765,7 +4680,8 @@ class SimulationService:
             robot["returningToStandby"] = False
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
-        if not cancelled:
+        if not cancelled and not task.get("parentId"):
+            # 子任务（拣货分裂）不重复累加指标：父任务完成时已计一次。
             runtime.metrics["completedTasks"] += 1
             runtime.metrics["throughput"] += 1
             if task.get("urgent"):
@@ -4025,10 +4941,17 @@ class SimulationService:
             else:
                 placed_fragments: list[dict[str, Any]] = []
                 new_transit: list[dict[str, Any]] = []
-                for slot in transit:
+                pick_list = task.get("pickPiecesList") or []
+                for slot_index, slot in enumerate(transit):
                     sku = slot.get("skuId")
                     slot_qty = max(1, int(slot.get("qty", 1)))
-                    pick_qty = min(slot_qty, 1)  # 每个货箱默认拣 1 件
+                    # 每箱拣出件数：订单尾箱只拣尾数，其余整箱按整箱件数拣。
+                    pick_qty = min(
+                        slot_qty,
+                        max(1, int(pick_list[slot_index]))
+                        if slot_index < len(pick_list) and pick_list[slot_index]
+                        else max(1, int(task.get("pickPieces") or 1)),
+                    )
                     placed_fragments.append({
                         "skuId": sku,
                         "skuName": slot.get("skuName"),
@@ -4061,11 +4984,10 @@ class SimulationService:
             if task.get("transitGoods"):
                 self._start_conveyor_return(runtime, robot, task)
             else:
-                task["phase"] = "completed"
-                task["status"] = "completed"
-                task["completedTick"] = runtime.state["tick"]
-                robot["carrying"] = []
-                robot["load"] = 0
+                # 空箱无剩余：必须走标准任务收尾（释放机器人、退回待命位、累加指标），
+                # 否则 CTU 的 currentTaskId 一直挂着已完成任务，滞留在回库口等
+                # 一个永远不会出现的回库箱。
+                self._complete_task(runtime, robot, task)
                 self._record_event(
                     runtime,
                     runtime.state["tick"],
@@ -4248,6 +5170,12 @@ class SimulationService:
         robot["currentTaskId"] = None
         robot["path"] = [robot["currentCellId"]]
         robot["pathLayers"] = [robot.get("currentLayer", 1)]
+        # 批量回库排队箱释放：让它们可以被重新派车，避免跟着失败任务卡死
+        for queued_id in list(robot.get("returnPickupQueue") or []):
+            queued = find_task(runtime.state.get("tasks", []), queued_id)
+            if queued is not None and queued.get("assignedRobotId") == robot["id"]:
+                queued["assignedRobotId"] = None
+        robot["returnPickupQueue"] = []
         self._record_event(runtime, tick, "task_failed", {"taskId": task["id"], "reason": reason, "robotId": robot["id"]})
 
     def _detect_contention(self, runtime: RunRuntime) -> None:
@@ -4359,36 +5287,83 @@ class SimulationService:
             related = [task for task in tasks if task.get("orderId") == order["id"]]
             if not related:
                 continue
+            # 订单级任务只统计两侧根任务（四向车整箱 / CTU 尾箱）；拣货、出货、
+            # 回库等子任务只参与完成判定，不重复计入任务数。
+            root_tasks = [
+                task
+                for task in related
+                if not task.get("parentId")
+                and task.get("taskKind") in {"shuttle_order_pick", "ctu_order_pick"}
+            ]
             completed = [task for task in related if task.get("status") == "completed"]
             active = [task for task in related if task.get("status") in {"assigned", "running"}]
             exceptions = [task for task in related if task.get("status") in {"exception", "failed"}]
+
+            # 已拣件数：四向车整箱按任务记账；CTU 尾箱按拣货子任务实际拣出件数记账。
+            picking_parents = {
+                task.get("parentId")
+                for task in related
+                if task.get("taskKind") == "picking_box"
+            }
             picked_by_sku: dict[str, int] = {}
+            picked_boxes = 0
             for task in related:
-                picked_count = max(0, int(task.get("picked", 0)))
-                for line in task.get("lines", [])[:picked_count]:
-                    sku_id = str(line.get("skuId") or "")
-                    if sku_id:
-                        picked_by_sku[sku_id] = picked_by_sku.get(sku_id, 0) + 1
-            total_quantity = 0
-            picked_quantity = 0
+                if task.get("status") != "completed":
+                    continue
+                kind = task.get("taskKind")
+                pieces = 0
+                if kind == "picking_box":
+                    pieces = sum(int(good.get("qty") or 0) for good in (task.get("placedGoods") or []))
+                    picked_boxes += 1
+                elif kind == "shuttle_order_pick":
+                    pieces = int(task.get("demandPieces") or 0)
+                    picked_boxes += 1
+                elif kind == "ctu_order_pick" and task.get("id") not in picking_parents:
+                    # 无拣货位时 CTU 整箱直接交付，按任务需求件数记账。
+                    pieces = int(task.get("demandPieces") or 0)
+                    picked_boxes += 1
+                if not pieces:
+                    continue
+                sku_id = str((task.get("lines") or [{}])[0].get("skuId") or "")
+                if sku_id:
+                    picked_by_sku[sku_id] = picked_by_sku.get(sku_id, 0) + pieces
+
+            total_pieces = 0
+            picked_pieces = 0
             for line in order.get("lines", []):
-                quantity = max(1, int(line.get("quantity", 1)))
+                requested = int(line.get("requestedPieces") or 0)
+                if not requested:
+                    case_cnt = max(1, int(line.get("caseCnt") or 1))
+                    requested = max(1, int(line.get("quantity", 1))) * case_cnt
+                    line["requestedPieces"] = requested
                 sku_id = str(line.get("skuId") or "")
-                available_picked = picked_by_sku.get(sku_id, 0)
-                picked = min(quantity, available_picked)
-                picked_by_sku[sku_id] = max(0, available_picked - picked)
+                available = picked_by_sku.get(sku_id, 0)
+                picked = min(requested, available)
+                picked_by_sku[sku_id] = max(0, available - picked)
+                line["pickedPieces"] = picked
                 line["picked"] = picked
-                total_quantity += quantity
-                picked_quantity += picked
-            order["completedTasks"] = len(completed)
-            order["totalTasks"] = len(related)
+                total_pieces += requested
+                picked_pieces += picked
+
+            completed_root = [task for task in root_tasks if task.get("status") == "completed"]
+            order["completedTasks"] = len(completed_root)
+            order["totalTasks"] = len(root_tasks)
             decomposition = order.setdefault("decomposition", {})
             assigned_tasks = [task for task in related if task.get("assignedRobotId")]
-            decomposition["taskCount"] = len(related)
+            decomposition["taskCount"] = len(root_tasks)
+            decomposition["shuttleTaskCount"] = len(
+                [task for task in root_tasks if task.get("taskKind") == "shuttle_order_pick"]
+            )
+            decomposition["ctuTaskCount"] = len(
+                [task for task in root_tasks if task.get("taskKind") == "ctu_order_pick"]
+            )
             decomposition["assignedTaskCount"] = len(assigned_tasks)
             decomposition["activeVehicleIds"] = list(dict.fromkeys(
                 str(task["assignedRobotId"]) for task in assigned_tasks if task.get("assignedRobotId")
             ))
+            decomposition["requestedPieces"] = total_pieces
+            decomposition["pickedPieces"] = picked_pieces
+            decomposition["pickedBoxes"] = picked_boxes
             if order.get("cancelRequested"):
                 cancelled_tasks = [task for task in related if task.get("status") == "cancelled"]
                 if len(cancelled_tasks) == len(related):
@@ -4402,8 +5377,10 @@ class SimulationService:
                     decomposition["stage"] = "returning"
                 continue
             # 取货占 80%，送达占 20%，让订单执行中也能给出真实进度而不是长期停在 0%。
-            pickup_progress = picked_quantity / total_quantity if total_quantity else 0
-            delivery_progress = len(completed) / len(related)
+            pickup_progress = picked_pieces / total_pieces if total_pieces else 0
+            delivery_progress = (
+                len(completed_root) / len(root_tasks) if root_tasks else 0
+            )
             order["progress"] = round(pickup_progress * 80 + delivery_progress * 20)
             if len(completed) == len(related) and not order.get("missingQuantity"):
                 order["status"] = "completed"
@@ -4467,6 +5444,7 @@ class SimulationService:
             "pickup_from_port": "出入口取回",
             "pickup_from_station": "拣货台取回",
             "return_to_storage": "回库",
+            "feeding_conveyor": "货箱逐箱上线",
             "completed": "已完成",
         }
         return mapping.get(phase, phase)

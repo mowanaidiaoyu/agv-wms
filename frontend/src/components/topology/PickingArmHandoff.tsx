@@ -124,7 +124,9 @@ export function PickingArmHandoff({
     worldZ(layout.dropoff.position.row, rows) - base[2],
   ], [base, cols, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
   const points = useMemo(() => ({
-    home: [1.4, 6.0, 0.25] as [number, number, number],
+    // 待机姿态与拓扑编辑器的机械臂朝向一致（rotation.y = -0.62 rad，
+    // yaw = atan2(-z, x) ⇒ 目标点取 [r·cos0.62, h, r·sin0.62]）。
+    home: [1.15, 6.0, 0.82] as [number, number, number],
     pickup,
     pickupLift: [pickup[0] * 0.55, layout.kinematics.safeTravelHeight, pickup[2] * 0.55] as [number, number, number],
     dropLift: [dropoff[0] * 0.55, layout.kinematics.safeTravelHeight, dropoff[2] * 0.55] as [number, number, number],

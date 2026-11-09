@@ -86,6 +86,8 @@ export type Simulation3DSceneProps = {
 
 const CTU_GOODS_COLOR = '#fde047'
 const CTU_GOODS_EMISSIVE = '#ca8a04'
+// 回库箱（picking_return）：与出货货物同色系区分，避免"凭空出现的箱子"被误认为幽灵箱
+const RETURN_BOX_COLOR = '#60a5fa'
 const CONVEYOR_CARGO_SIZE: [number, number, number] = [0.5, 0.3, 0.42]
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
@@ -374,6 +376,7 @@ function DeliveredBox({
   skipRise = false,
   smoothFollow = false,
   travelSpeed = DELIVERY_SPEED,
+  paused = false,
 }: {
   position: [number, number, number]
   color: string
@@ -390,10 +393,14 @@ function DeliveredBox({
   smoothFollow?: boolean
   /** 沿完整路径播放的世界单位/秒；机械臂输送按仿真 tick 对齐。 */
   travelSpeed?: number
+  /** 仿真暂停时冻结路径播放与平滑跟随（否则暂停后箱子还在自己滑行）。 */
+  paused?: boolean
 }) {
   const ref = useRef<Group>(null)
   const platformRef = useRef<Group>(null)
-  const startRef = useRef<number | null>(null)
+  // 路径播放的累计时钟：只在仿真运行时推进，暂停时冻结（否则 dock 机械臂
+  // 线的固定带速箱子在暂停后仍会自己滑完整条路径，看起来像幽灵动画）。
+  const playClockRef = useRef(0)
   const route = useMemo(() => {
     const segments: {
       from: [number, number, number]
@@ -425,11 +432,11 @@ function DeliveredBox({
   const travelEnd = (skipRise ? 0 : DELIVERY_RISE_SECONDS) + route.totalDuration
   const fadeStart = travelEnd + DELIVERY_DWELL_SECONDS
 
-  useFrame(({ clock, invalidate }, delta) => {
+  useFrame(({ invalidate }, delta) => {
     const group = ref.current
     if (!group) return
-    if (startRef.current === null) startRef.current = clock.elapsedTime
-    const elapsed = clock.elapsedTime - startRef.current
+    if (!paused) playClockRef.current += delta
+    const elapsed = playClockRef.current
     const riseSeconds = skipRise ? 0 : DELIVERY_RISE_SECONDS
     const rise = riseSeconds ? Math.min(1, elapsed / riseSeconds) : 1
     const eased = 1 - Math.pow(1 - rise, 3)
@@ -469,7 +476,7 @@ function DeliveredBox({
         group.visible = fade < 1
       }
     }
-    if (smoothFollow) {
+    if (smoothFollow && !paused) {
       const alpha = 1 - Math.exp(-Math.min(delta, 0.1) * 7)
       x = group.position.x + (x - group.position.x) * alpha
       y = group.position.y + (y - group.position.y) * alpha
@@ -1122,14 +1129,16 @@ function Simulation3DScene({
       )
       const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, level, spec.cols, spec.rows)
       const [offsetX, offsetZ] = endpointSlots[index] ?? [0, 0]
+      // 终点快照沿用运输中货箱的类别色：箱子到站不换色，只切换数据所有权。
+      const beltColor = GOODS_CATEGORY_COLORS[box.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
       return {
         key: `arm-belt-${taskKey}`,
         position: [x + offsetX, beltBase + 0.16, z + offsetZ] as [number, number, number],
         // 与运输中的 DeliveredBox 使用相同尺寸，完成瞬间只切换数据所有权，
         // 不会像在终点又突然生成一只更大的黄色方块。
         size: CONVEYOR_CARGO_SIZE,
-        color: CTU_GOODS_COLOR,
-        emissive: CTU_GOODS_EMISSIVE,
+        color: beltColor,
+        emissive: beltColor,
       }
     }).filter((box): box is NonNullable<typeof box> => box !== null)
   }, [armBeltBoxes, pickingArmPreviewVisible, spec.cols, spec.rows])
@@ -1351,9 +1360,16 @@ function Simulation3DScene({
         || task.deliveredGoods?.length
       if (!hasRenderableGoods) continue
 
+      // 占块门控待上线的子箱：路线首块被前箱占用时不渲染，
+      // 前箱前进腾出位置后后箱才出现——避免多个箱重叠在同一块上。
+      if (task.pendingTransport) continue
+
       // 拣出货物渲染到放置区：优先用 task.dropZoneCellId，解析失败回退到最近 drop_zone 的底边中点。
-      if (dropGoodsPhases.has(task.phase)) {
-        const goods = task.placedGoods?.length ? task.placedGoods : task.lines
+      // pickingDelegated 的父任务已把货箱交给单箱子任务，不再重复渲染整单放置区货物。
+      if (dropGoodsPhases.has(task.phase) && !task.pickingDelegated) {
+        // 只渲染真正拣出的货物（placedGoods）：lines 兜底会让回库子任务完成后
+        // 把回库箱错误地画进放置区。
+        const goods = task.placedGoods?.length ? task.placedGoods : []
         const parsedDrop = task.dropZoneCellId ? parseCellId(task.dropZoneCellId) : null
         let dropRow: number | null = null
         let dropCol: number | null = null
@@ -1600,6 +1616,29 @@ function Simulation3DScene({
             worldZ(transportRow, rows) - CELL / 2,
           ]
         : null
+      // 同任务多箱按"一箱一箱"排队：第 i 箱落后箱头 i 个输送模块（前箱进、
+      // 后箱跟），不再并排叠放。起点段（index < i）时后箱暂叠在首块等待上线。
+      const slotBlockPoint = (slotIndex: number): [number, number, number] | null => {
+        if (!activeTransport || slotIndex <= 0 || !transportPoint) return transportPoint
+        const route = activeTransport.route ?? []
+        if (route.length < 2) return transportPoint
+        const headIndex = Number.isFinite(activeTransport.index)
+          ? Math.max(0, Number(activeTransport.index))
+          : 0
+        const trailingBlock = route[Math.max(0, headIndex - slotIndex)]
+        if (!trailingBlock) return transportPoint
+        const parts = trailingBlock.split(':')
+        if (parts.length < 4) return transportPoint
+        const trailRow = Number(parts[parts.length - 3])
+        const trailCol = Number(parts[parts.length - 2])
+        const trailDeck = parts[parts.length - 1]
+        if (!Number.isFinite(trailRow) || !Number.isFinite(trailCol)) return transportPoint
+        return [
+          worldX(trailCol, cols) + CELL / 2,
+          lowerY + (trailDeck === 'upper' ? CONVEYOR_DECK_STEP : 0),
+          worldZ(trailRow, rows) - CELL / 2,
+        ]
+      }
       // 机械臂货箱与 CTU 货箱共用完整路径播放器。后端 route 只保存
       // 2×2 模块锚点，因此在相邻模块中心之间补入共同边界点，形成
       // “模块中心 → 模块出口/下一模块入口 → 下一模块中心”的连续路径。
@@ -1648,28 +1687,29 @@ function Simulation3DScene({
           baseY + Math.floor(stack / 2) * 0.32,
           z,
         ]
-        const boxColor = task.phase === 'arm_conveyor_delivery' || Boolean(task.armPlacedCellId)
+        const boxColor = task.taskKind === 'picking_return'
+          ? RETURN_BOX_COLOR
+          : task.taskKind === 'placed_goods_delivery'
+          ? GOODS_CATEGORY_COLORS[task.transitGoods?.[0]?.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+          : task.phase === 'arm_conveyor_delivery' || Boolean(task.armPlacedCellId)
           ? CTU_GOODS_COLOR
           : task.robotType === 'ctu' || robot?.type === 'ctu'
           ? CTU_GOODS_COLOR
           : GOODS_CATEGORY_COLORS[line.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
-        // 同任务多箱的横向展开：默认 0.12 会让两箱几乎完全重叠，看起来像一箱
-        const slotLateral = (lineIndex % 2) * 0.36 - 0.18
-        const slotStack = Math.floor(lineIndex / 2) * 0.16
+        // 同任务多箱：一箱一箱排队（后箱落后前箱一个模块），不再并排偏移
         if (transportPoint) {
-          const synchronizedPoint: [number, number, number] = [
-            transportPoint[0] + slotLateral,
-            transportPoint[1] + slotStack,
-            transportPoint[2] + slotLateral,
-          ]
-          if (task.phase === 'arm_conveyor_delivery' && armTransportPath.length > 1) {
-            const offsetX = slotLateral
-            const offsetY = slotStack
-            const offsetZ = slotLateral
+          // 拣货分裂的 fwd/回库子任务与拣货链路同线同速（1 块/tick），
+          // 使用块级平滑跟随；dock 机械臂线保持固定带速连续路径播放。
+          if (
+            task.phase === 'arm_conveyor_delivery'
+            && armTransportPath.length > 1
+            && task.taskKind !== 'placed_goods_delivery'
+            && task.taskKind !== 'picking_return'
+          ) {
             const continuousPath = armTransportPath.map((point) => [
-              point[0] + offsetX,
-              point[1] + offsetY,
-              point[2] + offsetZ,
+              point[0],
+              point[1],
+              point[2],
             ] as [number, number, number])
             boxes.push({
               key: `${task.id}-${lineIndex}-transport`,
@@ -1685,6 +1725,7 @@ function Simulation3DScene({
             })
             return
           }
+          const synchronizedPoint = slotBlockPoint(lineIndex) ?? transportPoint
           boxes.push({
             // 块变化时保持同一个 React 实例，避免每跨一块都重新播放“从下方升起”。
             key: `${task.id}-${lineIndex}-transport`,
@@ -1887,6 +1928,7 @@ function Simulation3DScene({
           skipRise={box.skipRise}
           smoothFollow={box.smoothFollow}
           travelSpeed={box.travelSpeed}
+          paused={paused}
         />
       ))}
 

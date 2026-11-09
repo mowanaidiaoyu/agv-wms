@@ -415,14 +415,18 @@ def test_reset_restores_default_speed(monkeypatch) -> None:
 def test_unreachable_pending_task_becomes_explicit_failure() -> None:
     topology = _topology()
     service = SimulationService(MemoryRepository())
+    # 按件下单（1 件 < 箱规）才会生成 CTU 尾箱任务，本用例验证这类任务的不可达失败。
+    order = _order(topology)
+    order["lines"][0]["qtyMode"] = "pieces"
+    order["lines"][0]["quantity"] = 1
     runtime = service._create_runtime(
         "run-unreachable",
         topology,
         build_simulation_config(topology),
-        [_order(topology)],
+        [order],
         [],
     )
-    task = runtime.state["tasks"][0]
+    task = next(t for t in runtime.state["tasks"] if t.get("taskKind") == "ctu_order_pick")
     task["sourceCellId"] = "cell-r999-c999"
 
     service._assign_tasks(runtime)
@@ -451,14 +455,20 @@ def test_running_order_insertion_reserves_inventory_and_rejects_duplicates() -> 
             "ORD-TICK-001",
             "ORD-INSERTED-002",
         ]
+        def reserved_key(line: dict[str, Any]) -> tuple[Any, ...]:
+            # 四向车货道箱按 cellId+layer+depth 唯一；CTU 库位槽按 nodeId+layer 唯一。
+            if line.get("depth") is not None:
+                return (line.get("cellId"), line.get("layer"), line.get("depth"))
+            return (line.get("nodeId"), line.get("layer"))
+
         original_slots = {
-            (line["nodeId"], line["layer"])
+            reserved_key(line)
             for task in state["tasks"]
             if task.get("orderId") == "ORD-TICK-001"
             for line in task["lines"]
         }
         inserted_slots = {
-            (line["nodeId"], line["layer"])
+            reserved_key(line)
             for task in state["tasks"]
             if task.get("orderId") == "ORD-INSERTED-002"
             for line in task["lines"]
@@ -583,7 +593,8 @@ def test_parallel_order_spreads_tasks_across_reachable_delivery_ports() -> None:
     }
 
     service = SimulationService(MemoryRepository())
-    tasks, _ = service._seed_order_tasks(topology, [order], inventory)
+    # 本用例验证 CTU 多出库口分摊：关闭四向车出货位，强制整箱也走 CTU 拆包。
+    tasks, _ = service._seed_order_tasks(topology, [order], inventory, shuttle_docks=[])
 
     assert len(tasks) == 7
     assert len({task["assignedPortId"] for task in tasks}) >= 2

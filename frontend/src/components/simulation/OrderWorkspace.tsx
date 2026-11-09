@@ -24,7 +24,9 @@ import type {
   SimulationTask,
 } from '../../types'
 
-type OrderView = SimulationOrderInput & Partial<SimulationOrder>
+type OrderView = Omit<SimulationOrderInput, 'lines'>
+  & Partial<Omit<SimulationOrder, 'lines'>>
+  & { lines: SimulationOrder['lines'] }
 
 const statusLabels: Record<string, string> = {
   ready: '待启动',
@@ -42,8 +44,16 @@ const dispatchModeLabels: Record<SimulationOrderDispatchMode, string> = {
   parallel: '并行优先',
 }
 
-function orderQuantity(order: OrderView) {
-  return order.lines.reduce((sum, line) => sum + line.quantity, 0)
+function orderPieces(order: OrderView) {
+  const decomposition = order.decomposition
+  if (decomposition?.requestedPieces) return decomposition.requestedPieces
+  return order.lines.reduce((sum, line) => sum + (line.requestedPieces ?? line.quantity), 0)
+}
+
+function orderBoxes(order: OrderView) {
+  const decomposition = order.decomposition
+  if (decomposition?.requestedQuantity) return decomposition.requestedQuantity
+  return order.lines.reduce((sum, line) => sum + (line.requestedBoxes ?? line.quantity), 0)
 }
 
 function orderStatus(order: OrderView) {
@@ -130,12 +140,15 @@ export function OrderRail({
                     </span>
                     <span className="simulation-order-progress"><i style={{ width: `${order.progress ?? 0}%` }} /></span>
                     <span className="simulation-order-card-meta">
-                      <small><Package2 size={12} />{order.lines.length} SKU · {orderQuantity(order)} 箱</small>
+                      <small>
+                        <Package2 size={12} />
+                        {order.lines.length} SKU · {order.decomposition?.pickedPieces ?? 0}/{orderPieces(order)} 件 · {orderBoxes(order)} 箱
+                      </small>
                       <small><MapPin size={12} />{order.targetStation}</small>
                     </span>
                     <span className="simulation-order-card-plan">
                       <GitBranch size={12} />
-                      {order.totalTasks ? `${order.totalTasks} 个 CTU 任务` : status === 'ready' ? '待下次启动' : dispatchModeLabels[order.dispatchMode ?? 'balanced']}
+                      {order.totalTasks ? `${order.totalTasks} 个任务` : status === 'ready' ? '待下次启动' : dispatchModeLabels[order.dispatchMode ?? 'balanced']}
                       {order.decomposition?.activeVehicleIds.length ? ` · ${order.decomposition.activeVehicleIds.length} 辆已分配` : ''}
                     </span>
                   </button>
@@ -200,11 +213,32 @@ export function OrderComposer({
   const [maxParallelCtu, setMaxParallelCtu] = useState(7)
   const [targetStation, setTargetStation] = useState('出库口 01')
   const [selectedSkuId, setSelectedSkuId] = useState('')
+  const [qtyMode, setQtyMode] = useState<'pieces' | 'boxes'>('boxes')
   const [quantity, setQuantity] = useState(1)
   const [lines, setLines] = useState<SimulationOrderLineInput[]>([])
   const [formError, setFormError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const selectedSku = catalog.find((sku) => sku.skuId === selectedSkuId)
+  const caseCnt = Math.max(1, Number(selectedSku?.caseCnt) || 1)
+  const pieces = qtyMode === 'pieces' ? quantity : quantity * caseCnt
+  const draftPieces = lines.reduce((sum, line) => {
+    if (line.qtyMode === 'pieces') return sum + line.quantity
+    const sku = catalog.find((item) => item.skuId === line.skuId)
+    return sum + line.quantity * Math.max(1, Number(sku?.caseCnt) || 1)
+  }, 0)
+  // 下单前预估拆单结果：整箱走四向车、不足一箱的尾数走 CTU。
+  const draftSplit = lines.reduce(
+    (acc, line) => {
+      const sku = catalog.find((item) => item.skuId === line.skuId)
+      const cnt = Math.max(1, Number(sku?.caseCnt) || 1)
+      const linePieces = line.qtyMode === 'pieces' ? line.quantity : line.quantity * cnt
+      const full = Math.floor(linePieces / cnt)
+      acc.shuttle += full
+      acc.ctu += linePieces % cnt > 0 ? 1 : 0
+      return acc
+    },
+    { shuttle: 0, ctu: 0 },
+  )
 
   useEffect(() => {
     if (!catalog.length) {
@@ -226,18 +260,24 @@ export function OrderComposer({
       setFormError('所选商品已不在当前目录中，请重新选择。')
       return
     }
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
-      setFormError('商品数量必须是 1～20 箱的整数。')
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > (qtyMode === 'boxes' ? 20 : 999)) {
+      setFormError(qtyMode === 'boxes' ? '商品数量必须是 1～20 箱的整数。' : '商品数量必须是 1～999 件的整数。')
       return
     }
-    const existing = lines.find((line) => line.skuId === selectedSku.skuId)
-    if (existing && existing.quantity + quantity > 20) {
-      setFormError(`同一 SKU 单个订单最多 20 箱；当前已有 ${existing.quantity} 箱。`)
-      return
+    const linePieces = qtyMode === 'pieces' ? quantity : quantity * caseCnt
+    const existing = lines.find((line) => line.skuId === selectedSku.skuId && (line.qtyMode ?? 'boxes') === qtyMode)
+    if (existing) {
+      const existingPieces = existing.qtyMode === 'pieces'
+        ? existing.quantity
+        : existing.quantity * Math.max(1, Number(selectedSku.caseCnt) || 1)
+      if (existingPieces + linePieces > 999) {
+        setFormError(`同一 SKU 单个订单最多 999 件；当前已有 ${existingPieces} 件。`)
+        return
+      }
     }
     setLines((current) => {
       if (existing) {
-        return current.map((line) => line.skuId === selectedSku.skuId ? { ...line, quantity: line.quantity + quantity } : line)
+        return current.map((line) => line.id === existing.id ? { ...line, quantity: line.quantity + quantity } : line)
       }
       return [...current, {
         id: `line-${current.length + 1}-${Date.now()}`,
@@ -245,6 +285,7 @@ export function OrderComposer({
         skuName: selectedSku.name,
         spec: selectedSku.spec,
         quantity,
+        qtyMode,
       }]
     })
     setQuantity(1)
@@ -295,6 +336,7 @@ export function OrderComposer({
       skuName: sku.name,
       spec: sku.spec,
       quantity: index === 0 && templatePriority === 'normal' ? 2 : 1,
+      qtyMode: 'boxes' as const,
     })))
   }
 
@@ -314,6 +356,7 @@ export function OrderComposer({
       skuName: sku.name,
       spec: sku.spec,
       quantity: 2,
+      qtyMode: 'boxes' as const,
     })))
   }
 
@@ -383,15 +426,22 @@ export function OrderComposer({
               {!catalog.length ? <option value="">{catalogError ? '商品目录不可用' : '商品目录加载中…'}</option> : null}
               {catalog.map((sku) => <option key={sku.skuId} value={sku.skuId}>{sku.name}</option>)}
             </select>
-            <input aria-label="数量" type="number" min={1} max={20} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+            <input aria-label="数量" type="number" min={1} max={qtyMode === 'boxes' ? 20 : 999} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+            <div className="simulation-order-priority simulation-order-qty-mode" role="group" aria-label="数量单位">
+              <button className={qtyMode === 'pieces' ? 'active' : ''} type="button" onClick={() => setQtyMode('pieces')}>件</button>
+              <button className={qtyMode === 'boxes' ? 'active' : ''} type="button" onClick={() => setQtyMode('boxes')}>箱</button>
+            </div>
             <button type="button" onClick={addLine} disabled={!catalog.length}><Plus size={15} />添加</button>
           </div>
+          <p className="simulation-order-qty-hint">
+            1 箱 = {caseCnt} 件 · 本次需求 {pieces} 件（{Math.max(1, Math.ceil(pieces / caseCnt))} 箱）
+          </p>
           {formError ? <p className="form-error" role="alert">{formError}</p> : null}
           <div className="simulation-order-lines">
             {lines.map((line) => (
               <div key={line.id}>
                 <span><b>{line.skuName}</b><small>{line.spec || line.skuId}</small></span>
-                <strong>× {line.quantity}</strong>
+                <strong>× {line.quantity} {line.qtyMode === 'pieces' ? '件' : '箱'}</strong>
                 <button type="button" onClick={() => setLines((current) => current.filter((item) => item.id !== line.id))} aria-label={`删除 ${line.skuName}`}><X size={14} /></button>
               </div>
             ))}
@@ -399,8 +449,11 @@ export function OrderComposer({
           </div>
         </section>
       </div>
+      <p className="simulation-order-qty-hint">
+        预计拆单：四向车 {draftSplit.shuttle} 个整箱任务 · CTU {draftSplit.ctu} 个尾箱任务；没有四向车任务的订单不会启动四向车。
+      </p>
       <div className="simulation-order-composer-footer">
-        <span>{lines.length} 种SKU · {lines.reduce((sum, line) => sum + line.quantity, 0)} 箱 · {dispatchModeLabels[dispatchMode]}</span>
+        <span>{lines.length} 种SKU · {draftPieces} 件 · {dispatchModeLabels[dispatchMode]}</span>
         <button className="accent-button" type="button" onClick={() => void submit()} disabled={!lines.length || submitting}>
           {submitting ? '提交中…' : '提交订单'}
         </button>
@@ -433,20 +486,27 @@ export function OrderOrchestrationPanel({
 }) {
   if (!order) return null
   const decomposition = order.decomposition
-  const requested = decomposition?.requestedQuantity ?? orderQuantity(order)
+  const requested = decomposition?.requestedQuantity ?? orderBoxes(order)
+  const requestedPieces = decomposition?.requestedPieces ?? orderPieces(order)
   const allocated = decomposition?.allocatedQuantity ?? 0
   const assigned = tasks.filter((task) => task.assignedRobotId).length
+  const taskCount = decomposition?.taskCount ?? tasks.length
+  const shuttleTasks = decomposition?.shuttleTaskCount ?? 0
+  const ctuTasks = decomposition?.ctuTaskCount ?? 0
   const strategy = order.dispatchMode ?? decomposition?.strategy ?? 'balanced'
   return (
     <section className="simulation-order-orchestration" aria-label="订单拆解与 CTU 分配">
       <header>
         <span><GitBranch size={15} /><b>订单编排</b><small>{dispatchModeLabels[strategy]}</small></span>
-        <strong>{requested} 箱 → {tasks.length || '待拆解'} 个任务 → {assigned} 辆 CTU</strong>
+        <strong>
+          {requestedPieces} 件 / {requested} 箱 → {taskCount || '待拆解'} 个任务
+          {taskCount ? `（四向车 ${shuttleTasks} · CTU ${ctuTasks}）` : ''}
+        </strong>
       </header>
       <div className="simulation-order-orchestration-flow">
         <span className={decomposition ? 'done' : 'active'}><Boxes size={14} /><b>库存匹配</b><small>{decomposition ? `${allocated}/${requested} 箱` : '启动后匹配'}</small></span>
         <i>→</i>
-        <span className={tasks.length ? 'done' : ''}><GitBranch size={14} /><b>任务拆解</b><small>{tasks.length ? `${tasks.length} 个工作包` : `目标 ${order.maxParallelCtu ?? 7} 辆`}</small></span>
+        <span className={tasks.length ? 'done' : ''}><GitBranch size={14} /><b>任务拆解</b><small>{tasks.length ? `${taskCount} 个任务` : `目标 ${order.maxParallelCtu ?? 7} 辆`}</small></span>
         <i>→</i>
         <span className={assigned === tasks.length && tasks.length ? 'done' : tasks.length ? 'active' : ''}><Bot size={14} /><b>CTU 分配</b><small>{assigned}/{tasks.length || 0} 已分配</small></span>
       </div>

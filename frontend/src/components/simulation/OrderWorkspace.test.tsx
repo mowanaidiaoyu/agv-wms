@@ -19,8 +19,8 @@ describe('OrderComposer', () => {
 
     // 「演示商品二」同时出现在下拉选项和新增明细行里，这里只断言明细行本身。
     expect(screen.getByText('演示商品二', { selector: 'b' })).toBeInTheDocument()
-    expect(screen.getByText('× 5')).toBeInTheDocument()
-    expect(screen.getByText(/1 种SKU · 5 箱/)).toBeInTheDocument()
+    expect(screen.getByText('× 5 箱')).toBeInTheDocument()
+    expect(screen.getByText(/1 种SKU · 5 件/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
@@ -41,7 +41,7 @@ describe('OrderComposer', () => {
     render(<OrderComposer open catalog={fleetCatalog} onClose={vi.fn()} onSubmit={onSubmit} />)
 
     fireEvent.click(screen.getByRole('button', { name: /多车协同订单/ }))
-    expect(screen.getByText(/7 种SKU · 14 箱 · 并行优先/)).toBeInTheDocument()
+    expect(screen.getByText(/7 种SKU · 14 件 · 并行优先/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
 
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
