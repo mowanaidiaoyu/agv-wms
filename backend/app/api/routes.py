@@ -185,6 +185,7 @@ async def start_simulation(payload: SimulationStartRequest):
             topology["payload"],
             [order.model_dump() for order in payload.orders],
             [transfer.model_dump() for transfer in payload.transfers],
+            payload.motionPhysicsContract.model_dump() if payload.motionPhysicsContract else None,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -342,6 +343,74 @@ def get_simulation_metrics(run_id: str):
         return simulation_service.get_metrics(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.get("/simulations/{run_id}/metrics/tasks")
+def get_simulation_task_metric_summary(run_id: str):
+    summary = repo.get_task_metric_summary(run_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return summary
+
+
+@router.get("/simulations/{run_id}/metrics/history/quality")
+def get_simulation_metrics_history_quality(run_id: str, max_points: int = 240):
+    if not 20 <= max_points <= 1000:
+        raise HTTPException(status_code=422, detail="max_points must be between 20 and 1000")
+    history = repo.get_metrics_history_quality(run_id, max_points=max_points)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return history
+
+
+@router.get("/simulations/{run_id}/metrics/ctu-contention")
+def get_simulation_assignment_contention_metrics(run_id: str):
+    metrics = repo.get_assignment_contention_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/path-planning")
+def get_simulation_path_planning_metrics(run_id: str):
+    metrics = repo.get_path_planning_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/conveyor-coordination")
+def get_simulation_conveyor_coordination_metrics(run_id: str):
+    metrics = repo.get_conveyor_coordination_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/deadlock-lifecycle")
+def get_simulation_deadlock_lifecycle_metrics(
+    run_id: str,
+    generation: int | None = None,
+):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_deadlock_lifecycle_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/motion-distance")
+def get_simulation_motion_distance_metrics(
+    run_id: str,
+    generation: int | None = None,
+):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_motion_distance_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
 
 
 @ws_router.websocket("/ws/simulation/{run_id}")

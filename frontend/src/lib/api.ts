@@ -6,6 +6,17 @@ import type {
   ShuttlePlan,
   ShuttleTransferInput,
   SimulationMetrics,
+  TaskMetricSummary,
+  MetricHistoryQuality,
+  AssignmentContentionMetrics,
+  PathPlanningMetrics,
+  ConveyorCoordinationMetrics,
+  DeadlockLifecycleMetrics,
+  MotionDistanceMetrics,
+  MotionPhysicsContractInput,
+  SyntheticAbcHeatResult,
+  SyntheticEtaPredictionResult,
+  SyntheticWaveOptimizationResult,
   SimulationState,
   SimulationTask,
   StoredRecord,
@@ -71,6 +82,43 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+async function requestStatic<T>(path: string): Promise<T> {
+  const response = await fetch(path, { method: 'GET' })
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`)
+  }
+  return response.json() as Promise<T>
+}
+
+type SyntheticResultHeader = {
+  dataSource?: unknown
+  datasetVersion?: unknown
+  seed?: unknown
+  inputDatasetHash?: unknown
+  validationStatus?: unknown
+  algorithmVersion?: unknown
+  modelVersion?: unknown
+}
+
+async function requestSynthetic<T extends SyntheticResultHeader>(path: string, acceptedStatuses: string[]): Promise<T> {
+  const result = await requestStatic<T>(path)
+  const version = result.algorithmVersion ?? result.modelVersion
+  if (
+    result.dataSource !== 'SYNTHETIC'
+    || result.datasetVersion !== 'analytics-synthetic-v1'
+    || result.seed !== 42
+    || typeof result.inputDatasetHash !== 'string'
+    || !result.inputDatasetHash
+    || typeof version !== 'string'
+    || !version
+    || typeof result.validationStatus !== 'string'
+    || !acceptedStatuses.includes(result.validationStatus)
+  ) {
+    throw new Error('实验 JSON 元数据或质量状态不符合 analytics-synthetic-v1 契约')
+  }
+  return result
+}
+
 export const api = {
   wsUrl(runId: string) {
     return `${WS_BASE}/simulation/${runId}`
@@ -102,10 +150,16 @@ export const api = {
     topologyId: string,
     orders: SimulationOrderInput[] = [],
     transfers: ShuttleTransferInput[] = [],
+    motionPhysicsContract?: MotionPhysicsContractInput,
   ) {
     return request<{ runId: string; status: string }>('/simulations/start', {
       method: 'POST',
-      body: JSON.stringify({ topologyId, orders, transfers }),
+      body: JSON.stringify({
+        topologyId,
+        orders,
+        transfers,
+        ...(motionPhysicsContract ? { motionPhysicsContract } : {}),
+      }),
     })
   },
   insertSimulationOrder(runId: string, order: SimulationOrderInput) {
@@ -166,6 +220,44 @@ export const api = {
   },
   getSimulationMetrics(runId: string) {
     return request<SimulationMetrics>(`/simulations/${runId}/metrics`)
+  },
+  getSimulationTaskMetrics(runId: string) {
+    return request<TaskMetricSummary>(`/simulations/${runId}/metrics/tasks`)
+  },
+  getSimulationMetricsHistoryQuality(runId: string, maxPoints = 240) {
+    return request<MetricHistoryQuality>(`/simulations/${runId}/metrics/history/quality?max_points=${maxPoints}`)
+  },
+  getSimulationAssignmentContentionMetrics(runId: string) {
+    return request<AssignmentContentionMetrics>(`/simulations/${runId}/metrics/ctu-contention`)
+  },
+  getSimulationPathPlanningMetrics(runId: string) {
+    return request<PathPlanningMetrics>(`/simulations/${runId}/metrics/path-planning`)
+  },
+  getSimulationConveyorCoordinationMetrics(runId: string) {
+    return request<ConveyorCoordinationMetrics>(`/simulations/${runId}/metrics/conveyor-coordination`)
+  },
+  getSimulationDeadlockLifecycleMetrics(runId: string, generation?: number) {
+    const encodedRunId = encodeURIComponent(runId)
+    const query = generation === undefined
+      ? ''
+      : `?generation=${encodeURIComponent(String(generation))}`
+    return request<DeadlockLifecycleMetrics>(`/simulations/${encodedRunId}/metrics/deadlock-lifecycle${query}`)
+  },
+  getSimulationMotionDistanceMetrics(runId: string, generation?: number) {
+    const encodedRunId = encodeURIComponent(runId)
+    const query = generation === undefined
+      ? ''
+      : `?generation=${encodeURIComponent(String(generation))}`
+    return request<MotionDistanceMetrics>(`/simulations/${encodedRunId}/metrics/motion-distance${query}`)
+  },
+  getSyntheticAbcHeatResult() {
+    return requestSynthetic<SyntheticAbcHeatResult>('/analytics-synthetic-v1/abc_heat_seed42.json', ['PASS'])
+  },
+  getSyntheticWaveOptimizationResult() {
+    return requestSynthetic<SyntheticWaveOptimizationResult>('/analytics-synthetic-v1/wave_optimization_seed42.json', ['PASS'])
+  },
+  getSyntheticEtaPredictionResult() {
+    return requestSynthetic<SyntheticEtaPredictionResult>('/analytics-synthetic-v1/eta_prediction_seed42.json', ['PASS_WITH_STRICT_TARGET_AVAILABILITY_CUTOFF'])
   },
   getGoodsInventory(topologyId: string) {
     return request<GoodsInventory>(`/goods/inventory/${topologyId}`)

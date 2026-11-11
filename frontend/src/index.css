@@ -3576,10 +3576,72 @@ select {
 /* 仿真工作台：场景为主体，诊断信息按需从右侧打开 */
 .simulation-workbench {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   height: calc(100vh - 82px);
   min-height: 640px;
+}
+
+.simulation-physics-panel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid rgba(14, 116, 144, 0.16);
+  border-radius: 14px;
+  background: rgba(240, 249, 255, 0.84);
+}
+
+.simulation-physics-heading {
+  display: grid;
+  min-width: 250px;
+}
+
+.simulation-physics-heading strong,
+.simulation-physics-frozen strong {
+  font-size: 0.76rem;
+}
+
+.simulation-physics-heading span,
+.simulation-physics-frozen span {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.simulation-physics-panel > label:not(.simulation-physics-toggle) {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) 74px auto;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+}
+
+.simulation-physics-panel input[type='number'] {
+  width: 74px;
+  min-height: 30px;
+  padding: 4px 6px;
+}
+
+.simulation-physics-panel small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.simulation-physics-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.simulation-physics-frozen {
+  display: grid;
+  margin-left: auto;
+  min-width: 210px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(14, 116, 144, 0.18);
 }
 
 .simulation-command-bar {
@@ -6011,6 +6073,14 @@ select {
   .simulation-run-summary {
     order: 3;
     width: 100%;
+  }
+
+  .simulation-physics-panel {
+    flex-wrap: wrap;
+  }
+
+  .simulation-physics-frozen {
+    margin-left: 0;
   }
 }
 

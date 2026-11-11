@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
@@ -179,10 +180,35 @@ class ShuttleTransferInput(BaseModel):
         return self
 
 
+class MotionPhysicsContractRequest(BaseModel):
+    """User-defined, unverified distance conversion frozen into one Run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    physicsContractVersion: str = Field(min_length=1)
+    coordinateContractVersion: str = Field(min_length=1)
+    metersPerCell: float
+    shuttleLevelHeightMeters: float
+    floorHeightMeters: float
+    source: Literal["USER_DEFINED_SIMULATION"] = "USER_DEFINED_SIMULATION"
+    calibrationStatus: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+    @field_validator("metersPerCell", "shuttleLevelHeightMeters", "floorHeightMeters", mode="before")
+    @classmethod
+    def validate_positive_finite_number(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite positive number")
+        result = float(value)
+        if not isfinite(result) or result <= 0:
+            raise ValueError("must be a finite positive number")
+        return result
+
+
 class SimulationStartRequest(BaseModel):
     topologyId: str
     orders: list[SimulationOrderInput] = Field(default_factory=list)
     transfers: list[ShuttleTransferInput] = Field(default_factory=list)
+    motionPhysicsContract: MotionPhysicsContractRequest | None = None
 
 
 class ShuttleDockSettingsRequest(BaseModel):

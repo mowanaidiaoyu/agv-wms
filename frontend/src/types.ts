@@ -308,6 +308,8 @@ export interface SimulationMetrics {
   activeRobots: number
   blockedRobots: number
   conveyorUtilization: number
+  /** 0 means no active conveyor graph; missing means the field was not collected. */
+  conveyorGraphNodes?: number
   deadlocksDetected: number
   congestionEvents: number
   urgentOrdersHandled: number
@@ -317,6 +319,583 @@ export interface SimulationMetrics {
   conveyorQueueDepth: number
   bufferOccupancy: number
 }
+
+export type MetricImplementationStatus = 'IMPLEMENTED' | 'PARTIAL' | 'UNAVAILABLE'
+export type MetricDataQuality = 'GOOD' | 'DEGRADED' | 'MISSING_SOURCE' | 'SUCCESS_ONLY_SAMPLE' | 'INVALID'
+
+export interface ContractMetric<T = unknown> {
+  metricId: string
+  displayName?: string
+  value: T | null
+  unit: string
+  sampleCount: number | null
+  implementationStatus: MetricImplementationStatus
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+  [key: string]: unknown
+}
+
+export interface TaskMetricSummary {
+  runId: string
+  metrics: ContractMetric[]
+}
+
+export interface MetricHistoryPoint extends Partial<SimulationMetrics> {
+  tick: number
+  dataQuality?: MetricDataQuality | string
+  reason?: string | null
+  missingFields?: string[]
+  invalidFields?: string[]
+}
+
+export interface MetricHistoryStatistic {
+  description: string
+  unit: string
+  minimum: number | null
+  maximum: number | null
+  maximumTick: number | null
+  average: number | null
+  validSampleCount: number
+  missingSampleCount: number
+  invalidSampleCount: number
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+}
+
+export interface MetricHistoryQuality {
+  runId: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  collectionCompleteness: 'UNCONFIRMED' | 'MISSING' | string
+  qualityIssues: string[]
+  rawSampleCount: number
+  uniqueTickCount: number
+  duplicateSnapshotCount: number
+  outputSampleCount: number
+  invalidSnapshotCount: number
+  points: MetricHistoryPoint[]
+  statistics: Record<string, MetricHistoryStatistic>
+  acceptanceEligible: boolean
+}
+
+export interface AssignmentContentionMetrics {
+  runId: string
+  eventCollectionCompleteness: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  metrics: ContractMetric[]
+  quality: {
+    ctuParentTaskCount: number | null
+    invalidTaskRecordCount: number
+    conflictingTaskIdCount: number
+    validAssignmentEventCount: number
+    invalidAssignmentEventCount: number
+    ignoredAssignedStateEventCount: number
+    outOfScopeAssignmentEventCount: number
+    validDeadlockEventCount: number
+    invalidDeadlockEventCount: number
+    validYieldEventCount: number
+    invalidYieldEventCount: number
+  }
+  acceptanceEligible: boolean
+}
+
+export interface PathMetricGroup {
+  runId: string
+  algorithm: 'astar' | 'dijkstra'
+  topologyRevision: string | null
+  configRevision: string | null
+  coordinateContractRevision: string | null
+  sampleKind: string
+}
+
+export interface PathAggregateGroup {
+  group: PathMetricGroup
+  minimum: number
+  maximum: number
+  average: number
+  validSampleCount: number
+  samplePreview: Array<{ taskId: string; value: number }>
+  previewSampleCount: number
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+}
+
+export interface PathQuantileValue {
+  value: number | null
+  unit: 'ms' | string
+  requiredSampleCount: number
+  actualSampleCount: number
+  reason: string | null
+}
+
+export interface PathQuantileGroup {
+  group: PathMetricGroup
+  sampleCount: number
+  quantiles: {
+    p50: PathQuantileValue
+    p90: PathQuantileValue
+    p99: PathQuantileValue
+  }
+  implementationStatus: MetricImplementationStatus
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+}
+
+export interface PathPlanningMetrics {
+  runId: string
+  sampleKind: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  metrics: ContractMetric[]
+  quality: Record<string, number | null>
+  acceptanceEligible: boolean
+}
+
+export interface ConveyorCoordinationMetrics {
+  runId: string
+  scope: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  metrics: ContractMetric[]
+  historyTrendSource: string
+  acceptanceEligible: boolean
+}
+
+export interface DeadlockLifecycleMetric<T = number> {
+  metricId: string
+  displayName: string
+  value: T | null
+  unit: string
+  sampleCount: number
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+  source: string
+  generation: number | null
+  snapshotAsOfTick: number | null
+}
+
+export interface DeadlockRobotBlocking {
+  robotId: string
+  blockerRobotId: string | null
+  blockedCellId: string | null
+  nextCellId: string | null
+  metrics: DeadlockLifecycleMetric[]
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+  source: string
+  generation: number | null
+  snapshotAsOfTick: number | null
+}
+
+export interface DeadlockHotspot {
+  cellId: string
+  row: number | null
+  col: number | null
+  floor: string | null
+  observedEpisodeCount: number
+  unit: string
+  involvedRobotCount: number
+  sampleCount: number
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+  source: string
+  generation: number | null
+  snapshotAsOfTick: number | null
+}
+
+export interface DeadlockRecentEpisode {
+  episodeId: string
+  status: string | null
+  firstObservedTick: number | null
+  persistentAtTick: number | null
+  resolvedAtTick: number | null
+  lastObservedTick: number | null
+  participantRobotIds: string[]
+  involvedCellIds: string[]
+  dataQuality: MetricDataQuality | string | null
+  source: string
+  generation: number | null
+  snapshotAsOfTick: number | null
+}
+
+export interface DeadlockEventPersistenceWatermark {
+  databaseEventId: number | null
+  databaseEventTick: number | null
+  lastTransitionKey: string | null
+  uniqueTransitionCount: number
+  duplicateTransitionCount: number
+  conflictingTransitionCount: number
+  invalidEventCount: number
+  snapshotLastAcknowledgedTransitionKey: string | null
+  snapshotPendingTransitionCount: number | null
+}
+
+export interface DeadlockLifecycleMetrics {
+  contractVersion: 'deadlock-lifecycle-metrics-v1' | string
+  runId: string
+  generation: number | null
+  availableGenerations: number[]
+  runStatus: string
+  stopReason: string | null
+  snapshotAsOfTick: number | null
+  observationCompleteness: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  qualityIssues: string[]
+  acceptanceEligible: boolean
+  eventPersistenceWatermark: DeadlockEventPersistenceWatermark
+  metrics: DeadlockLifecycleMetric[]
+  robotBlocking: DeadlockRobotBlocking[]
+  hotspots: DeadlockHotspot[]
+  recentEpisodes: DeadlockRecentEpisode[]
+  limits: {
+    hotspotLimit: number
+    recentEpisodeLimit: number
+    fullEpisodeHistoryReturned: boolean
+  }
+  semantics: {
+    persistentCycleMeaning: string
+    durationFormula: string
+    blockedRobotTicksUnit: string
+    thresholdCalibration: string
+    legacyDeadlockDetectedUsed: boolean
+  }
+}
+
+export interface MotionPhysicsContractInput {
+  physicsContractVersion: string
+  coordinateContractVersion: string
+  metersPerCell: number
+  shuttleLevelHeightMeters: number
+  floorHeightMeters: number
+  source?: 'USER_DEFINED_SIMULATION'
+  calibrationStatus?: 'UNVERIFIED'
+}
+
+export interface MotionDistanceMetricValue {
+  value: number | null
+  unit: string
+  sampleCount: number
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  source: string
+}
+
+export interface MotionDistanceMovementTypeMetric {
+  movementCount: number
+  horizontalMeters: number | null
+  verticalMeters: number | null
+  unit: string
+  dataQuality: MetricDataQuality | string
+  source: string
+}
+
+export interface MotionDistanceRobotMetric {
+  robotId: string
+  robotType: string
+  horizontalMeters: number | null
+  verticalMeters: number | null
+  movementCount: number
+  yieldMeters: number | null
+  backoffMeters: number | null
+  returnToStandbyMeters: number | null
+  observationCompleteness: string
+  dataQuality: MetricDataQuality | string
+}
+
+export interface MotionDistanceMetrics {
+  contractVersion: 'motion-distance-metrics-v1' | string
+  runId: string
+  generation: number | null
+  runInstanceId: string | null
+  physicsContractVersion: string | null
+  metersPerCell: number | null
+  physicsContractSource?: 'USER_DEFINED_SIMULATION' | null
+  calibrationStatus?: 'UNVERIFIED' | null
+  snapshotAsOfTick: number | null
+  eventPersistenceWatermark: {
+    movementId: string
+    tick: number
+    eventSequence: number
+  } | null
+  totalMetrics: Record<string, MotionDistanceMetricValue>
+  vehicleTypeMetrics: Record<string, {
+    horizontalMeters: MotionDistanceMetricValue
+    movementCount: number
+  }>
+  movementTypeMetrics: Record<string, MotionDistanceMovementTypeMetric>
+  perRobotMetrics: MotionDistanceRobotMetric[]
+  perRobotMetricsLimit: number
+  totalRobotCount: number
+  perRobotMetricsTruncated: boolean
+  evidenceSummary: Record<string, unknown>
+  plannedHorizontalMeters: number | null
+  extraDistanceMeters: number | null
+  attributableReplanExtraMeters: number | null
+  algorithmDistanceImprovementRate: number | null
+  observationCompleteness: string
+  dataQuality: MetricDataQuality | string
+  reason: string | null
+  acceptanceEligible: boolean
+  semantics: Record<string, unknown>
+}
+
+export interface SyntheticExperimentBase {
+  experimentId: string
+  datasetVersion: 'analytics-synthetic-v1' | string
+  seed: number
+  dataSource: 'SYNTHETIC'
+  inputDatasetHash: string
+  validationStatus: string
+  limitations: string[]
+}
+
+export interface SyntheticAbcItem {
+  skuId: string
+  abcClass: 'A' | 'B' | 'C'
+  historicalDemandValue: number
+  historicalDemandUnits: number
+  contributionRate: number
+  cumulativeContributionRate: number
+  lookbackDays: number
+  asOfDayIndex: number
+  classificationVersion: string
+}
+
+export interface SyntheticAbcSnapshot {
+  asOfDayIndex: number
+  lookbackDays: number
+  observedDayRange: { startDayIndex: number; endDayIndex: number }
+  classCounts: Record<'A' | 'B' | 'C', number>
+  classHistoricalDemandValueShare: Record<'A' | 'B' | 'C', number>
+  changeFromPreviousSnapshot: {
+    changedSkuCount: number | null
+    reason: string | null
+    transitionCounts: Record<string, number>
+  }
+  items: SyntheticAbcItem[]
+}
+
+export interface SyntheticForecastEvaluation {
+  backtestStrategy: string
+  evaluationWindow: { days: number; startDayIndex: number; endDayIndex: number }
+  forecastMethod: string
+  mae: number | null
+  mape: number | null
+  mapeReason: string | null
+  mapeSampleCount: number
+  predictionHorizon: string
+  totalPredictionCount: number
+  validPredictionCount: number
+  zeroActualExcludedCount: number
+  excludedSampleCount: number
+}
+
+export interface SyntheticAbcHeatResult extends SyntheticExperimentBase {
+  algorithmVersion: string
+  sampleCount: number
+  abcSnapshots: SyntheticAbcSnapshot[]
+  latestAbcSummary: {
+    asOfDayIndex: number
+    classCounts: Record<'A' | 'B' | 'C', number>
+    classHistoricalDemandValueShare: Record<'A' | 'B' | 'C', number>
+    topSkus: SyntheticAbcItem[]
+  }
+  skuForecasts: Array<{
+    skuId: string
+    predictions: Array<{
+      dayIndex: number
+      date: string
+      actual: number
+      sma7: number
+      wma7: number
+      historyDayIndices: number[]
+      backtestStrategy: string
+      predictionHorizon: string
+    }>
+  }>
+  forecastEvaluation: {
+    SMA7: SyntheticForecastEvaluation
+    WMA7: SyntheticForecastEvaluation
+    comparison: {
+      lowerMaeMethod: string | null
+      maeBaseline: string
+      sameEvaluationSamples: boolean
+      wma7RelativeMaeImprovementPercent: number | null
+    }
+  }
+}
+
+export interface SyntheticWaveDetail {
+  waveId: string
+  algorithm: string
+  priority: string
+  orderCount: number
+  lineCount: number
+  totalQuantity: number
+  distanceCells: number
+  ordersCapacityUsage: number
+  linesCapacityUsage: number
+  quantityCapacityUsage: number
+  capacityValidation: string
+}
+
+export interface SyntheticWaveSummary {
+  algorithm: string
+  status: string
+  waveCount: number
+  totalDistanceCells: number
+  capacityUtilization: {
+    ordersCapacityUsage: number
+    linesCapacityUsage: number
+    quantityCapacityUsage: number
+    unit: string
+  }
+  dataQuality: {
+    inputOrderCount: number
+    inputLineCount: number
+    inputQuantity: number
+    assignedOrderCount: number
+    assignedLineCount: number
+    assignedQuantity: number
+    orderConservation: boolean
+    lineConservation: boolean
+    quantityConservation: boolean
+    duplicateAssignmentCount: number
+    unassignedOrderCount: number
+  }
+}
+
+export interface SyntheticWaveOptimizationResult extends SyntheticExperimentBase {
+  algorithmVersion: string
+  distanceMetric: {
+    name: string
+    unit: string
+    routeRule: string
+    acceptanceEligibleAsRealWarehousePath: boolean
+  }
+  baseline: SyntheticWaveSummary
+  optimized: SyntheticWaveSummary
+  comparison: {
+    baselineDistanceCells: number
+    optimizedDistanceCells: number
+    baselineWaveCount: number
+    optimizedWaveCount: number
+    distanceImprovementRate: number | null
+    reason: string | null
+    unit: string
+  }
+  dataQuality: {
+    input: {
+      orderCount: number
+      lineCount: number
+      quantityCount: number
+      validationStatus: string
+    }
+    formalAcceptanceEligible: boolean
+    sameDistanceCalculator: boolean
+    sameInputOrders: boolean
+  }
+  waveDetails: {
+    baseline: SyntheticWaveDetail[]
+    optimized: SyntheticWaveDetail[]
+  }
+}
+
+export interface SyntheticEtaEvaluation {
+  sampleCount: number
+  maeTicks: number | null
+  mapePercent: number | null
+  mapeSampleCount: number
+  mapeReason: string | null
+  zeroActualExcludedCount: number
+  p90AbsoluteErrorTicks: number | null
+  p90Reason: string | null
+  p90RequiredSampleCount: number
+  p90Method: string
+}
+
+export interface SyntheticEtaPredictionResult extends SyntheticExperimentBase {
+  modelVersion: string
+  trainSampleCount: number
+  fitSampleCount: number
+  testSampleCount: number
+  featureNames: string[]
+  trainingCutoff: {
+    policy: string
+    comparison: string
+    firstTestCreatedTick: number
+    nominalTrainSampleCount: number
+    fitSampleCount: number
+    excludedUnavailableTargetCount: number
+    excludedTaskIds: string[]
+    maxFitCompletedTick: number
+    maxNominalTrainCompletedTick: number
+    temporalLeakagePrevented: boolean
+    deployabilityStatus: string
+  }
+  baselineModel: {
+    modelVersion: string
+    trainingSampleCount: number
+    taskTypeMedians: Record<string, number>
+    globalMedian: number
+  }
+  ridgeModel: {
+    modelVersion: string
+    trainingSampleCount: number
+    ridgeLambda: number
+    interceptPenalized: boolean
+    solver: string
+    negativePredictionClampedCount: number
+    unknownCategorySampleCount: number
+  }
+  overallEvaluation: {
+    baseline: SyntheticEtaEvaluation
+    ridge: SyntheticEtaEvaluation
+    maeImprovementPercent: number | null
+    maeImprovementReason: string | null
+    evaluationSampleIdentity: string
+    durationUnit: string
+  }
+  taskTypeEvaluation: Record<string, {
+    sampleCount: number
+    baselineMAE: number | null
+    modelMAE: number | null
+    baselineMAPE: number | null
+    modelMAPE: number | null
+    baselineP90AbsoluteErrorTicks: number | null
+    modelP90AbsoluteErrorTicks: number | null
+    baselineP90Reason: string | null
+    modelP90Reason: string | null
+    zeroActualExcludedCount: number
+    dataSource: 'SYNTHETIC'
+  }>
+  predictions: Array<{
+    taskId: string
+    taskType: string
+    createdTick: number
+    actualDurationTicks: number
+    baselinePredictedTicks: number
+    modelPredictedTicks: number
+    baselineAbsoluteErrorTicks: number
+    modelAbsoluteErrorTicks: number
+    distanceCells: number
+    loadQuantity: number
+    queueLength: number
+    congestionLevel: number
+    assignedRobotType: string
+    dataSource: 'SYNTHETIC'
+  }>
+  fallbackSampleCount: number
+}
+
 
 export interface SimulationRobot {
   id: string
@@ -448,6 +1027,9 @@ export interface ShuttlePlan {
   }>
   lift_transitions: ShuttleLiftTransition[]
   estimated_duration_seconds: number
+  horizontal_distance_cells?: number
+  planning_time_ms?: number
+  visited_states?: number
   result_status: 'success' | 'failed'
   failure_reason?: string | null
   timing_source: 'synthetic_demo'
@@ -779,6 +1361,7 @@ export interface SimulationState {
   tickIntervalSeconds?: number
   eventCount?: number
   topologyId: string
+  motionPhysicsContract?: MotionPhysicsContractInput | null
   robots: SimulationRobot[]
   tasks: SimulationTask[]
   orders?: SimulationOrder[]

@@ -34,7 +34,7 @@ import { api } from '../lib/api'
 import { createDemoOrders } from '../lib/orders'
 import { findLayoutPreviewItem } from '../lib/transportLayout'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput } from '../types'
+import type { MotionPhysicsContractInput, ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
@@ -52,6 +52,20 @@ const robotTypeLabels = {
 type DetailTab = 'metrics' | 'devices' | 'tasks' | 'alerts'
 type WorkspaceTab = 'orders' | 'transfer' | 'inventory'
 type RunControlAction = 'pause' | 'resume' | 'stop' | 'reset'
+
+const DEFAULT_MOTION_PHYSICS_DRAFT = {
+  metersPerCell: '0.8',
+  shuttleLevelHeightMeters: '3.0',
+  floorHeightMeters: '4.0',
+}
+
+function positiveFiniteDraftValue(label: string, value: string): number {
+  const parsed = Number(value)
+  if (!value.trim() || !Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label}必须是有限正数。`)
+  }
+  return parsed
+}
 
 const runControlProgressLabels: Record<RunControlAction, string> = {
   pause: '暂停中…',
@@ -96,6 +110,8 @@ export function SimulationPage() {
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [motionPhysicsEnabled, setMotionPhysicsEnabled] = useState(false)
+  const [motionPhysicsDraft, setMotionPhysicsDraft] = useState(DEFAULT_MOTION_PHYSICS_DRAFT)
   const [controlAction, setControlAction] = useState<RunControlAction | null>(null)
   const [controlNotice, setControlNotice] = useState('')
   const [completingPicking, setCompletingPicking] = useState(false)
@@ -189,7 +205,10 @@ export function SimulationPage() {
   }, [resolvedTopologyId, selectedTopologyId, setSelectedTopologyId])
 
   const candidateState = selectSimulationStateSource(liveState, stateQuery.data, socketConnected)
-  const currentState = candidateState?.topologyId === resolvedTopologyId ? candidateState : undefined
+  const currentState = candidateState?.topologyId === resolvedTopologyId
+    && candidateState.id === selectedRunId
+    ? candidateState
+    : undefined
   const simulationActive = currentState?.status === 'running' || currentState?.status === 'paused'
   const currentMetrics = currentState
     ? (socketConnected ? (liveMetrics ?? metricsQuery.data) : (metricsQuery.data ?? liveMetrics))
@@ -199,6 +218,20 @@ export function SimulationPage() {
   const selectedLayoutItem = transportLayoutQuery.data && selectedLayoutItemId
     ? findLayoutPreviewItem(transportLayoutQuery.data, selectedLayoutItemId)
     : undefined
+
+  function openPerformanceAnalytics() {
+    const params = new URLSearchParams()
+    if (resolvedTopologyId) params.set('topologyId', resolvedTopologyId)
+    if (
+      selectedRunId
+      && currentState?.id === selectedRunId
+      && currentState.topologyId === resolvedTopologyId
+    ) {
+      params.set('runId', selectedRunId)
+    }
+    const query = params.toString()
+    navigate(`/simulation/analytics${query ? `?${query}` : ''}`)
+  }
 
   useEffect(() => {
     if (candidateState?.topologyId && resolvedTopologyId && candidateState.topologyId !== resolvedTopologyId) {
@@ -318,10 +351,21 @@ export function SimulationPage() {
         setStartError('请先新建订单或加入跨层运输任务，再启动统一仿真。')
         return
       }
+      const motionPhysicsContract: MotionPhysicsContractInput | undefined = motionPhysicsEnabled
+        ? {
+            physicsContractVersion: 'motion-physics-v1',
+            coordinateContractVersion: 'topology-grid-v1',
+            metersPerCell: positiveFiniteDraftValue('每格水平长度', motionPhysicsDraft.metersPerCell),
+            shuttleLevelHeightMeters: positiveFiniteDraftValue('Shuttle层高', motionPhysicsDraft.shuttleLevelHeightMeters),
+            floorHeightMeters: positiveFiniteDraftValue('仓库楼层高度', motionPhysicsDraft.floorHeightMeters),
+            source: 'USER_DEFINED_SIMULATION',
+            calibrationStatus: 'UNVERIFIED',
+          }
+        : undefined
       setShowPickingArmPreview(false)
       setPickingArmResetRequest((request) => request + 1)
       resetRun()
-      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers)
+      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers, motionPhysicsContract)
       if (!result.runId || result.status !== 'running') {
         throw new Error('后端未返回有效的运行实例。')
       }
@@ -454,6 +498,7 @@ export function SimulationPage() {
   const robots = currentState?.robots ?? []
   const isRunning = currentState?.status === 'running'
   const isRunActive = ['running', 'paused'].includes(currentState?.status ?? '')
+  const frozenMotionPhysicsContract = currentState?.motionPhysicsContract
   const sceneTasks = useMemo(() => workspaceTab === 'orders'
     ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
     : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
@@ -590,11 +635,81 @@ export function SimulationPage() {
         </div>
       </header>
 
+      <section className="simulation-physics-panel" aria-labelledby="motion-physics-title">
+        <div className="simulation-physics-heading">
+          <strong id="motion-physics-title">物理距离模拟参数</strong>
+          <span>用户自定义模拟值，不代表实际设备尺寸或正式 CAD 标定。</span>
+        </div>
+        <label className="simulation-physics-toggle">
+          <input
+            type="checkbox"
+            checked={motionPhysicsEnabled}
+            disabled={isRunActive}
+            onChange={(event) => setMotionPhysicsEnabled(event.target.checked)}
+          />
+          启用米制模拟
+        </label>
+        <label>
+          <span>每格水平长度</span>
+          <input
+            aria-label="每格水平长度"
+            type="number"
+            min="0"
+            step="0.1"
+            value={motionPhysicsDraft.metersPerCell}
+            disabled={!motionPhysicsEnabled || isRunActive}
+            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, metersPerCell: event.target.value }))}
+          />
+          <small>m/格</small>
+        </label>
+        <label>
+          <span>Shuttle 层高</span>
+          <input
+            aria-label="Shuttle层高"
+            type="number"
+            min="0"
+            step="0.1"
+            value={motionPhysicsDraft.shuttleLevelHeightMeters}
+            disabled={!motionPhysicsEnabled || isRunActive}
+            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, shuttleLevelHeightMeters: event.target.value }))}
+          />
+          <small>m/层</small>
+        </label>
+        <label>
+          <span>仓库楼层高度</span>
+          <input
+            aria-label="仓库楼层高度"
+            type="number"
+            min="0"
+            step="0.1"
+            value={motionPhysicsDraft.floorHeightMeters}
+            disabled={!motionPhysicsEnabled || isRunActive}
+            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, floorHeightMeters: event.target.value }))}
+          />
+          <small>m/层</small>
+        </label>
+        {selectedRunId && currentState ? (
+          <div className="simulation-physics-frozen" data-run-id={currentState.id}>
+            <span>当前 Run 冻结值</span>
+            {frozenMotionPhysicsContract ? (
+              <strong>
+                {frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle {frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 {frozenMotionPhysicsContract.floorHeightMeters} m/层
+              </strong>
+            ) : <strong>未启用米制模拟</strong>}
+          </div>
+        ) : null}
+      </section>
+
       <main className={`simulation-scene-stage ${workspaceTab === 'orders' && ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
-        <div className="simulation-workspace-tabs" role="tablist" aria-label="工作台功能">
-          <button className={workspaceTab === 'orders' ? 'active' : ''} onClick={() => setWorkspaceTab('orders')} type="button">订单调度</button>
-          <button className={workspaceTab === 'transfer' ? 'active' : ''} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
-          <button className={workspaceTab === 'inventory' ? 'active' : ''} onClick={() => setWorkspaceTab('inventory')} type="button">库存详情</button>
+        <div className="simulation-workspace-tabs" role="navigation" aria-label="工作台功能">
+          <button className={workspaceTab === 'orders' ? 'active' : ''} aria-pressed={workspaceTab === 'orders'} onClick={() => setWorkspaceTab('orders')} type="button">订单调度</button>
+          <button className={workspaceTab === 'transfer' ? 'active' : ''} aria-pressed={workspaceTab === 'transfer'} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
+          <button onClick={openPerformanceAnalytics} type="button">性能分析</button>
+          {workspaceTab === 'transfer' ? (
+            <button onClick={() => setWorkspaceTab('inventory')} type="button">查看库存</button>
+          ) : workspaceTab === 'inventory' ? (
+            <button className="active" aria-pressed={true} onClick={() => setWorkspaceTab('transfer')} type="button">返回跨层运输</button>
+          ) : null}
         </div>
         {workspaceTab === 'orders' ? (
           <OrderRail

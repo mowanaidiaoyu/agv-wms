@@ -21,7 +21,23 @@ from .conveyor import (
     route_from_block_branch,
     route_from_cell,
 )
+from .deadlock_episodes import ResourceType
+from .deadlock_runtime_adapter import (
+    DIAGNOSTICS_NAMESPACE,
+    DeadlockRuntimeObserver,
+    LifecycleEvent,
+    RuntimeBlockEvidence,
+)
 from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes, load_catalog
+from .motion_distance import MovementType
+from .motion_runtime_adapter import (
+    DIAGNOSTICS_NAMESPACE as MOTION_DIAGNOSTICS_NAMESPACE,
+    EVENT_TYPE as MOTION_EVENT_TYPE,
+    MAX_BATCH_SIZE as MOTION_MAX_BATCH_SIZE,
+    MotionRuntimeObserver,
+    RuntimePosition,
+    physics_contract_from_config,
+)
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -85,7 +101,14 @@ ARM_DROPZONE_PLACE_TICKS = 8
 # 相邻 2×2 模块中心相距 2 个世界单位，因此每段需要约 1.11 秒。
 ARM_CONVEYOR_VISUAL_SPEED = 1.8
 ARM_CONVEYOR_BLOCK_DISTANCE = 2.0
-TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position", "conveyor_position", "arm_handoff"}
+TELEMETRY_EVENT_TYPES = {
+    "metrics_snapshot",
+    "resource_occupied",
+    "robot_position",
+    "conveyor_position",
+    "arm_handoff",
+    MOTION_EVENT_TYPE,
+}
 # 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
 # 排序逐车推进时，后车最多需要等待数个 tick 才能观察到前车离格。
 # 过早绕行会让两车同时改道并形成 A-B-A-B 活锁，因此先稳定等待 4 tick。
@@ -118,6 +141,12 @@ class RunRuntime:
     arm_handoff: dict[str, Any] | None = None
     # 侧向出货口理货机械臂：把送到出货口的货箱搬运到放置区（drop_zone）
     secondary_arms: list[dict[str, Any]] = field(default_factory=list)
+    # P2-2A 只读死锁观测器；不参与路径、调度或车辆状态决策。
+    deadlock_observer: DeadlockRuntimeObserver | None = None
+    # P3-2 read-only mileage observer; it never participates in movement decisions.
+    motion_observer: MotionRuntimeObserver | None = None
+    motion_collection_enabled: bool = True
+    resetting: bool = False
 
 
 class WebSocketHub:
@@ -168,8 +197,25 @@ class SimulationService:
         topology: dict[str, Any],
         orders: list[dict[str, Any]] | None = None,
         transfers: list[dict[str, Any]] | None = None,
+        motion_physics_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         config = build_simulation_config(topology)
+        if motion_physics_contract is not None:
+            source = motion_physics_contract.get("source", "USER_DEFINED_SIMULATION")
+            calibration_status = motion_physics_contract.get("calibrationStatus", "UNVERIFIED")
+            if source != "USER_DEFINED_SIMULATION":
+                raise ValueError("motionPhysicsContract.source must be USER_DEFINED_SIMULATION")
+            if calibration_status != "UNVERIFIED":
+                raise ValueError("motionPhysicsContract.calibrationStatus must be UNVERIFIED")
+            candidate_config = {**config, "motionPhysicsContract": deepcopy(motion_physics_contract)}
+            contract = physics_contract_from_config(candidate_config)
+            if contract is None:
+                raise ValueError("motionPhysicsContract is required when metric distance is enabled")
+            config["motionPhysicsContract"] = {
+                **contract.to_dict(),
+                "source": source,
+                "calibrationStatus": calibration_status,
+            }
         if not config["robots"]:
             raise ValueError("当前拓扑没有 CTU 或四向车设备，无法启动仿真")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
@@ -202,6 +248,8 @@ class SimulationService:
         runtime.stopped = True
         runtime.state["status"] = "stopped"
         runtime.state["stopReason"] = "user"
+        self._finalize_deadlock_observation(runtime, "user")
+        self._finalize_motion_observation(runtime, "user")
         self._persist(runtime)
         return {"runId": run_id, "status": "stopped"}
 
@@ -471,6 +519,7 @@ class SimulationService:
 
     async def reset(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
+        runtime.resetting = True
         runtime.stopped = True
         if runtime.task_handle and not runtime.task_handle.done():
             runtime.task_handle.cancel()
@@ -478,6 +527,10 @@ class SimulationService:
                 await runtime.task_handle
             except asyncio.CancelledError:
                 pass
+        self._finalize_deadlock_observation(runtime, "reset")
+        previous_observer = self._ensure_deadlock_observer(runtime)
+        self._finalize_motion_observation(runtime, "reset")
+        previous_motion_observer = runtime.motion_observer
         runtime.state = deepcopy(runtime.initial_state)
         runtime.metrics = deepcopy(runtime.initial_metrics)
         runtime.state["status"] = "paused"
@@ -492,6 +545,13 @@ class SimulationService:
         runtime.speed_multiplier = DEFAULT_SPEED_MULTIPLIER
         runtime.state["speedMultiplier"] = DEFAULT_SPEED_MULTIPLIER
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.deadlock_observer = previous_observer.new_generation(runtime.topology)
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        if previous_motion_observer is not None:
+            runtime.motion_observer = previous_motion_observer.new_generation()
+            runtime.motion_observer.register_robots(runtime.state.get("robots", []))
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = runtime.motion_observer.diagnostics_payload()
+        runtime.resetting = False
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
         self._record_event(runtime, 0, "simulation_reset", {"runId": run_id})
         self._persist(runtime)
@@ -602,6 +662,273 @@ class SimulationService:
             raise KeyError(run_id)
         return runtime
 
+    def _ensure_deadlock_observer(self, runtime: RunRuntime) -> DeadlockRuntimeObserver:
+        if runtime.deadlock_observer is not None:
+            return runtime.deadlock_observer
+        saved = runtime.state.get(DIAGNOSTICS_NAMESPACE) or {}
+        generation = max(1, int(saved.get("generation") or 1))
+        runtime.deadlock_observer = DeadlockRuntimeObserver(
+            runtime.run_id,
+            generation,
+            runtime.topology,
+            initial_tick=int(runtime.state.get("tick") or 0),
+        )
+        if saved.get("activeEpisodes") and not saved.get("ended"):
+            runtime.deadlock_observer.mark_incomplete_recovery(
+                saved,
+                int(runtime.state.get("tick") or 0),
+            )
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        return runtime.deadlock_observer
+
+    def _begin_deadlock_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.begin_tick(tick, runtime.state)
+
+    def _observe_robot_block(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        attempted_next_cell_id: str | None,
+        blocker_robot_id: str | None,
+        resource_type: ResourceType,
+        reason: str,
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.observe_block(
+            RuntimeBlockEvidence(
+                tick=int(runtime.state.get("tick") or 0),
+                robot_id=str(robot.get("id") or ""),
+                current_cell_id=robot.get("currentCellId"),
+                attempted_next_cell_id=attempted_next_cell_id,
+                blocker_robot_id=blocker_robot_id,
+                resource_type=resource_type,
+                reason=reason,
+                task_id=robot.get("currentTaskId"),
+                current_layer=int(robot.get("currentLayer") or 1),
+                current_floor=robot.get("currentFloor"),
+            )
+        )
+
+    def _observe_deadlock_mitigation(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        action: str,
+        details: str | None = None,
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.observe_mitigation(
+            int(runtime.state.get("tick") or 0),
+            str(robot.get("id") or ""),
+            action,
+            details,
+        )
+
+    def _flush_deadlock_events(
+        self,
+        runtime: RunRuntime,
+        events: tuple[LifecycleEvent, ...],
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        for event in events:
+            try:
+                self._record_event(runtime, event.tick, event.event_type, event.payload)
+            except Exception:
+                logger.exception(
+                    "Failed to persist deadlock lifecycle event: run_id=%s transition=%s",
+                    runtime.run_id,
+                    event.transition_key,
+                )
+                break
+            observer.acknowledge_event(event.transition_key)
+        runtime.state[DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _advance_deadlock_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        try:
+            events = observer.process_tick(tick, runtime.state)
+        except Exception as error:
+            logger.exception(
+                "Deadlock diagnostics failed without stopping simulation: run_id=%s tick=%s",
+                runtime.run_id,
+                tick,
+            )
+            observer.record_failure(tick, error)
+            events = observer.pending_events()
+        self._flush_deadlock_events(runtime, events)
+
+    def _finalize_deadlock_observation(self, runtime: RunRuntime, reason: str) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        try:
+            events = observer.finish(int(runtime.state.get("tick") or 0), reason)
+        except Exception as error:
+            logger.exception(
+                "Deadlock diagnostics finalization failed: run_id=%s reason=%s",
+                runtime.run_id,
+                reason,
+            )
+            observer.record_failure(int(runtime.state.get("tick") or 0), error)
+            events = observer.pending_events()
+        self._flush_deadlock_events(runtime, events)
+
+    def _ensure_motion_observer(self, runtime: RunRuntime) -> MotionRuntimeObserver | None:
+        if not runtime.motion_collection_enabled:
+            return None
+        if runtime.motion_observer is not None:
+            return runtime.motion_observer
+        saved = runtime.state.get(MOTION_DIAGNOSTICS_NAMESPACE)
+        deadlock_diagnostics = runtime.state.get(DIAGNOSTICS_NAMESPACE) or {}
+        generation = max(
+            1,
+            int(
+                (saved or {}).get("generation")
+                or deadlock_diagnostics.get("generation")
+                or 1
+            ),
+        )
+        physics_config = runtime.config
+        if physics_config.get("motionPhysicsContract") is None and isinstance(saved, dict):
+            frozen = saved.get("physicsContract")
+            if isinstance(frozen, dict):
+                physics_config = {**runtime.config, "motionPhysicsContract": frozen}
+        observer = MotionRuntimeObserver(
+            runtime.run_id,
+            generation,
+            physics_contract_from_config(physics_config),
+            initial_tick=int(runtime.state.get("tick") or 0),
+            recovered_diagnostics=saved if isinstance(saved, dict) else None,
+        )
+        observer.register_robots(runtime.state.get("robots", []))
+        runtime.motion_observer = observer
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+        return observer
+
+    def _begin_motion_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        observer.begin_tick(tick)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _motion_position(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> RuntimePosition | None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return None
+        try:
+            return RuntimePosition.from_robot(robot)
+        except Exception as error:
+            observer.record_observation_failure(
+                int(runtime.state.get("tick") or 0),
+                str(robot.get("id") or "unknown"),
+                str(robot.get("type") or "unknown"),
+                error,
+            )
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+            logger.exception(
+                "Motion position snapshot failed without changing simulation: run_id=%s robot_id=%s",
+                runtime.run_id,
+                robot.get("id"),
+            )
+            return None
+
+    def _record_committed_motion(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        from_position: RuntimePosition | None,
+        movement_type: MovementType | None,
+        source: str,
+    ) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None or from_position is None:
+            return
+        try:
+            to_position = RuntimePosition.from_robot(robot)
+            resolved_type = movement_type
+            if resolved_type is None:
+                resolved_type = (
+                    MovementType.LIFT
+                    if from_position.layer != to_position.layer
+                    or from_position.floor != to_position.floor
+                    else MovementType.NORMAL
+                )
+            outcome = observer.capture_committed_move(
+                robot_id=str(robot.get("id") or "unknown"),
+                robot_type=str(robot.get("type") or "unknown"),
+                from_position=from_position,
+                to_position=to_position,
+                tick=int(runtime.state.get("tick") or 0),
+                movement_type=resolved_type,
+                source=source,
+                # Current runtime paths have no stable, persisted plan/replan identity.
+                planned_path_id=None,
+                replan_id=None,
+            )
+        except Exception as error:
+            observer.record_observation_failure(
+                int(runtime.state.get("tick") or 0),
+                str(robot.get("id") or "unknown"),
+                str(robot.get("type") or "unknown"),
+                error,
+            )
+            logger.exception(
+                "Motion observation failed without changing simulation: run_id=%s robot_id=%s",
+                runtime.run_id,
+                robot.get("id"),
+            )
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _flush_motion_events(self, runtime: RunRuntime) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        pending = observer.pending_events()
+        offset = 0
+        while offset < len(pending):
+            tick = pending[offset].tick
+            same_tick = []
+            while (
+                offset < len(pending)
+                and pending[offset].tick == tick
+                and len(same_tick) < MOTION_MAX_BATCH_SIZE
+            ):
+                same_tick.append(pending[offset])
+                offset += 1
+            batch = tuple(same_tick)
+            try:
+                self._record_event(
+                    runtime,
+                    tick,
+                    MOTION_EVENT_TYPE,
+                    observer.batch_payload(batch),
+                )
+            except Exception as error:
+                for event in batch:
+                    observer.record_persistence_failure(event, error)
+                logger.exception(
+                    "Motion event batch persistence failed without stopping simulation: run_id=%s tick=%s count=%s",
+                    runtime.run_id,
+                    tick,
+                    len(batch),
+                )
+            else:
+                for event in batch:
+                    observer.acknowledge_persistence(event)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _finalize_motion_observation(self, runtime: RunRuntime, reason: str) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        self._flush_motion_events(runtime)
+        observer.finish(int(runtime.state.get("tick") or 0), reason)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
     def _create_runtime(
         self,
         run_id: str,
@@ -700,6 +1027,7 @@ class SimulationService:
             "tickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
             "eventCount": len(transfer_events),
             "topologyId": topology["id"],
+            "motionPhysicsContract": deepcopy(config.get("motionPhysicsContract")),
             "orderDriven": bool(orders or transfers),
             "robots": robots,
             "tasks": tasks,
@@ -762,7 +1090,24 @@ class SimulationService:
             conveyor_graph=conveyor_graph,
             arm_handoff=arm_handoff,
             secondary_arms=secondary_arms,
+            motion_collection_enabled=bool(config.get("motionDistanceCollectionEnabled", True)),
         )
+        runtime.deadlock_observer = DeadlockRuntimeObserver(
+            run_id,
+            1,
+            runtime.topology,
+            initial_tick=0,
+        )
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        if runtime.motion_collection_enabled:
+            runtime.motion_observer = MotionRuntimeObserver(
+                run_id,
+                1,
+                physics_contract_from_config(config),
+                initial_tick=0,
+            )
+            runtime.motion_observer.register_robots(robots)
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = runtime.motion_observer.diagnostics_payload()
         # Every WebSocket connection receives one complete snapshot. Normal
         # tick frames can therefore omit the potentially very large inventory.
         runtime.last_broadcast_inventory_size = len(inventory)
@@ -2486,6 +2831,16 @@ class SimulationService:
         except asyncio.CancelledError:
             # reset() intentionally cancels the old loop before restoring the
             # initial snapshot; it must not be reported as a runtime failure.
+            if not runtime.resetting:
+                self._finalize_deadlock_observation(runtime, "background_task_cancelled")
+                self._finalize_motion_observation(runtime, "background_task_cancelled")
+                try:
+                    self._persist(runtime)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist cancelled-run deadlock diagnostics: run_id=%s",
+                        runtime.run_id,
+                    )
             raise
         except Exception as error:
             await self._handle_loop_failure(runtime, error)
@@ -2529,6 +2884,14 @@ class SimulationService:
                 },
                 suggestion="检查不可达任务、设备故障或持续交通阻塞。",
             )
+        self._finalize_deadlock_observation(
+            runtime,
+            str(runtime.state.get("stopReason") or runtime.state.get("status") or "completed"),
+        )
+        self._finalize_motion_observation(
+            runtime,
+            str(runtime.state.get("stopReason") or runtime.state.get("status") or "completed"),
+        )
         self._persist(runtime)
         await self.hub.broadcast(runtime.run_id, {"type": "simulation_completed", "tick": runtime.state["tick"], "payload": runtime.metrics})
 
@@ -2566,6 +2929,8 @@ class SimulationService:
             self._record_event(runtime, tick, "simulation_runtime_error", runtime.state["runtimeError"])
         except Exception:
             logger.exception("Failed to record simulation runtime error: run_id=%s", runtime.run_id)
+        self._finalize_deadlock_observation(runtime, "runtime_error")
+        self._finalize_motion_observation(runtime, "runtime_error")
         try:
             self._persist(runtime)
         except Exception:
@@ -2594,6 +2959,8 @@ class SimulationService:
         runtime.state["tick"] += 1
         runtime.state["updatedAt"] = now_dt().isoformat()
         tick = runtime.state["tick"]
+        self._begin_deadlock_observation(runtime, tick)
+        self._begin_motion_observation(runtime, tick)
         self._inject_faults(runtime, tick)
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
@@ -2606,6 +2973,7 @@ class SimulationService:
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
+        self._advance_deadlock_observation(runtime, tick)
         # 全量状态落库很重（任务含完整 plan，状态随历史增长）；常规 tick 降频为
         # 每 10 tick 一次，结束/控制操作仍即时落库（其余 _persist 调用点不变）。
         if persist and tick % 10 == 0:
@@ -2893,6 +3261,15 @@ class SimulationService:
                 robot["yieldTicks"] -= 1
                 robot["status"] = "blocked"
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 主动让行"
+                yield_path = robot.get("path") or []
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    yield_path[1] if len(yield_path) > 1 else None,
+                    None,
+                    ResourceType.OTHER,
+                    "ACTIVE_YIELD_WAIT",
+                )
                 continue
 
             path = robot["path"]
@@ -2914,10 +3291,40 @@ class SimulationService:
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
                 occupied_cells.add(current_cell_id)
                 blocker = next((item for item in movable if item["currentCellId"] == next_cell_id), None)
+                observed_blocker = next(
+                    (
+                        item for item in runtime.state["robots"]
+                        if item.get("id") != robot.get("id")
+                        and item.get("currentCellId") == next_cell_id
+                    ),
+                    None,
+                )
+                block_resource = (
+                    ResourceType.ROBOT
+                    if observed_blocker is not None
+                    else ResourceType.RESERVATION
+                    if next_cell_id in reserved_targets
+                    else ResourceType.UNKNOWN_BLOCKER
+                )
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    observed_blocker.get("id") if observed_blocker else None,
+                    block_resource,
+                    (
+                        "NEXT_CELL_OCCUPIED"
+                        if observed_blocker is not None
+                        else "TARGET_RESERVED"
+                        if next_cell_id in reserved_targets
+                        else "UNKNOWN_BLOCKER"
+                    ),
+                )
                 # 连续等待后仍无法前进：CTU 先绕开其它设备重新寻路，绕不开再处理头对头死锁；
                 # 四向车同样先绕行（带面/巷道有并行道），头对头时退一格再绕。
                 if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_ctu(runtime, robot, occupied_cells):
+                        self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
@@ -2929,6 +3336,7 @@ class SimulationService:
                         self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
                 elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_shuttle(runtime, robot, occupied_cells):
+                        self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
@@ -2938,6 +3346,7 @@ class SimulationService:
                         robot["phaseLabel"] = task["phaseLabel"]
                 continue
 
+            motion_from = self._motion_position(runtime, robot)
             robot["status"] = "moving"
             robot["lastCellId"] = current_cell_id
             robot["currentCellId"] = next_cell_id
@@ -2974,10 +3383,19 @@ class SimulationService:
                 robot["phaseLabel"] = task["phaseLabel"]
             occupied_cells.add(next_cell_id)
             reserved_targets.add(next_cell_id)
+            self._record_committed_motion(
+                runtime,
+                robot,
+                motion_from,
+                None,
+                "_move_robots",
+            )
             self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]})
 
             if len(robot["path"]) <= 1:
                 self._advance_robot_phase(runtime, robot, task, occupied_cells)
+
+        self._flush_motion_events(runtime)
 
     def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
         """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
@@ -3058,6 +3476,7 @@ class SimulationService:
         last = robot.get("lastCellId")
         if not last or last == robot["currentCellId"] or last in occupied_cells or last in reserved_targets:
             return False
+        motion_from = self._motion_position(runtime, robot)
         old_path = robot.get("path") or [robot["currentCellId"]]
         old_layers = robot.get("pathLayers") or [int(robot.get("currentLayer", 1))] * len(old_path)
         floor, row, col = parse_cell_id(last)
@@ -3070,6 +3489,14 @@ class SimulationService:
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         stage = task.get("phase", "moving") if task else "moving"
         robot["pathStages"] = [stage] * len(robot["path"])
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_back_off_shuttle",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "BACKTRACK", "shuttle_head_on")
         return True
 
     def _clear_shuttle_head_on(
@@ -3139,6 +3566,7 @@ class SimulationService:
         )
         if not path_cells or len(path_cells) <= 1:
             return False
+        motion_from = self._motion_position(runtime, robot)
         occupied_cells.discard(robot["currentCellId"])
         robot["lastCellId"] = robot["currentCellId"]
         robot["currentCellId"] = last
@@ -3150,6 +3578,14 @@ class SimulationService:
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
         occupied_cells.add(last)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_yield_one_cell",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "BACKTRACK", "ctu_head_on")
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -3195,6 +3631,15 @@ class SimulationService:
             robot["yieldTicks"] -= 1
             robot["status"] = "blocked"
             robot["phaseLabel"] = "返回待命位 / 主动让行"
+            yield_path = robot.get("path") or []
+            self._observe_robot_block(
+                runtime,
+                robot,
+                yield_path[1] if len(yield_path) > 1 else None,
+                None,
+                ResourceType.OTHER,
+                "ACTIVE_YIELD_WAIT",
+            )
             return
 
         path = robot.get("path") or [robot["currentCellId"]]
@@ -3212,8 +3657,38 @@ class SimulationService:
             robot["status"] = "blocked"
             robot["waitTicks"] += 1
             robot["phaseLabel"] = "返回待命位 / 等待让行"
+            observed_blocker = next(
+                (
+                    item for item in runtime.state["robots"]
+                    if item.get("id") != robot.get("id")
+                    and item.get("currentCellId") == next_cell_id
+                ),
+                None,
+            )
+            block_resource = (
+                ResourceType.ROBOT
+                if observed_blocker is not None
+                else ResourceType.RESERVATION
+                if next_cell_id in reserved_targets
+                else ResourceType.UNKNOWN_BLOCKER
+            )
+            self._observe_robot_block(
+                runtime,
+                robot,
+                next_cell_id,
+                observed_blocker.get("id") if observed_blocker else None,
+                block_resource,
+                (
+                    "NEXT_CELL_OCCUPIED"
+                    if observed_blocker is not None
+                    else "TARGET_RESERVED"
+                    if next_cell_id in reserved_targets
+                    else "UNKNOWN_BLOCKER"
+                ),
+            )
             if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                 if self._reroute_ctu(runtime, robot, occupied_cells):
+                    self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                     robot["waitTicks"] = 0
                     robot["status"] = "returning"
                     robot["phaseLabel"] = "返回待命位"
@@ -3221,11 +3696,13 @@ class SimulationService:
                     self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
             elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                 if self._reroute_shuttle(runtime, robot, occupied_cells):
+                    self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                     robot["waitTicks"] = 0
                     robot["status"] = "returning"
                     robot["phaseLabel"] = "返回待命位"
             return
 
+        motion_from = self._motion_position(runtime, robot)
         path_layers = robot.get("pathLayers") or [1] * len(path)
         next_layer = path_layers[1] if len(path_layers) > 1 else 1
         robot["currentCellId"] = next_cell_id
@@ -3243,6 +3720,13 @@ class SimulationService:
         robot["phaseLabel"] = "返回待命位"
         occupied_cells.add(next_cell_id)
         reserved_targets.add(next_cell_id)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.RETURN_TO_STANDBY,
+            "_move_robot_to_standby",
+        )
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -3289,6 +3773,7 @@ class SimulationService:
         _, yield_cell_id, (_, yield_row, yield_col) = max(candidates, key=lambda item: (item[0], item[1]))
         previous_cell = robot["currentCellId"]
         target_cell = robot.get("targetCellId")
+        motion_from = self._motion_position(runtime, robot)
         occupied_cells.discard(previous_cell)
         occupied_cells.add(yield_cell_id)
         reserved_targets.add(yield_cell_id)
@@ -3310,6 +3795,14 @@ class SimulationService:
                 robot.get("targetLayer", 1),
                 stop_adjacent=bool(task and task.get("phase") == "pickup_from_ctu"),
             )
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.YIELD,
+            "_yield_ctu",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "YIELD", "adjacent_free_cell")
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -5328,6 +5821,7 @@ class SimulationService:
             return
         if parse_cell_id(back) in build_occupied_lookup(runtime.topology):
             return
+        motion_from = self._motion_position(runtime, robot)
         robot["lastCellId"] = current
         robot["currentCellId"] = back
         robot["currentNode"] = back
@@ -5340,6 +5834,13 @@ class SimulationService:
         if occupied_cells is not None:
             occupied_cells.discard(current)
             occupied_cells.add(back)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_step_off_port",
+        )
         self._record_event(
             runtime,
             runtime.state["tick"],

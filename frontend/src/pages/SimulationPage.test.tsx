@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationTask, TopologyPayload, TransportLayoutPlan } from '../types'
+import type { SimulationState, SimulationTask, TopologyPayload, TransportLayoutPlan } from '../types'
 import { SimulationPage } from './SimulationPage'
 
 const sceneMock = vi.hoisted(() => ({
@@ -152,6 +152,28 @@ function taskFixture(id: string, orderId: string, phase: string): SimulationTask
   }
 }
 
+function simulationStateFixture(id: string, topologyId = topology.id): SimulationState {
+  return {
+    id,
+    status: 'running',
+    tick: 12,
+    topologyId,
+    robots: [],
+    tasks: [],
+    orders: [],
+    inventory: [],
+    alerts: [],
+    queues: { conveyor: [], station: [], buffer: [] },
+    createdAt: '2026-10-28T00:00:00Z',
+    updatedAt: '2026-10-28T00:00:12Z',
+  }
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location-probe">{location.pathname}{location.search}</output>
+}
+
 vi.mock('../lib/api', () => ({
   api: {
     listTopologies: vi.fn(async () => [{ id: topology.id, name: topology.name, payload: topology }]),
@@ -211,6 +233,17 @@ vi.mock('../components/topology/Simulation3DScene', () => ({
     return <div data-testid="simulation-3d" />
   },
 }))
+
+function renderSimulationPage() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+        <SimulationPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}
 
 describe('SimulationPage', () => {
   beforeEach(() => {
@@ -287,6 +320,74 @@ describe('SimulationPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '关闭运行详情' }))
     expect(screen.queryByRole('heading', { name: '设备状态' })).not.toBeInTheDocument()
+  })
+
+  it('replaces the inventory primary entry with analytics and passes only topologyId without a verified run', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    expect(screen.queryByRole('button', { name: '库存详情' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test'))
+    expect(screen.getByTestId('location-probe')).not.toHaveTextContent(/runId=(?:undefined|null)?(?:&|$)/)
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+    expect(api.insertSimulationOrder).not.toHaveBeenCalled()
+    expect(api.cancelSimulationOrder).not.toHaveBeenCalled()
+    expect(api.pauseSimulation).not.toHaveBeenCalled()
+    expect(api.resumeSimulation).not.toHaveBeenCalled()
+    expect(api.stopSimulation).not.toHaveBeenCalled()
+  })
+
+  it('passes a runId only after the authoritative state confirms the selected run and topology', async () => {
+    const state = simulationStateFixture('run-verified')
+    usePlatformStore.setState({ selectedRunId: state.id, liveState: state })
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test&runId=run-verified'))
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+  })
+
+  it('does not leak a stale runId from another topology into analytics navigation', async () => {
+    const staleState = simulationStateFixture('run-stale', 'topology-other')
+    usePlatformStore.setState({ selectedRunId: staleState.id, liveState: staleState })
+    vi.mocked(api.getSimulationState).mockResolvedValue(staleState)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test'))
+    expect(screen.getByTestId('location-probe')).not.toHaveTextContent('run-stale')
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
   })
 
   it('inserts a new order into the active run and refreshes the authoritative queue', async () => {
@@ -488,7 +589,7 @@ describe('SimulationPage', () => {
     confirm.mockRestore()
   })
 
-  it('keeps one 3D scene mounted while transfer and inventory tabs render distinct content', async () => {
+  it('keeps one 3D scene mounted while the transfer area opens and returns from its inventory panel', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
       <QueryClientProvider client={queryClient}>
@@ -506,13 +607,81 @@ describe('SimulationPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '跨层运输' }))
     expect(screen.getByLabelText('跨层运输')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划路径' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看库存' })).toBeInTheDocument()
     expect(screen.getByTestId('simulation-3d')).toBe(scene)
 
-    fireEvent.click(screen.getByRole('button', { name: '库存详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '查看库存' }))
     expect(screen.getByLabelText('库存详情')).toBeInTheDocument()
     expect(screen.getByText(/此处不生成或猜测 WMS 库存/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '规划路径' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '返回跨层运输' })).toBeInTheDocument()
     expect(screen.getByTestId('simulation-3d')).toBe(scene)
+
+    fireEvent.click(screen.getByRole('button', { name: '返回跨层运输' }))
+    expect(screen.getByLabelText('跨层运输')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看库存' })).toBeInTheDocument()
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+
+    fireEvent.click(screen.getByRole('button', { name: '订单调度' }))
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+  })
+
+  it('preserves pending transfer and order drafts across transfer and inventory workspace switches', async () => {
+    vi.mocked(api.getShuttleContract).mockResolvedValueOnce({
+      topologyId: topology.id,
+      topologyRevision: 'test',
+      configRevision: 'test',
+      coordinateContractRevision: 'shuttle-internal-levels-v1',
+      verificationStatus: 'program_verified_pending_human',
+      planningEnabled: true,
+      warnings: [],
+      lifts: [],
+      tracks: [
+        { topology_id: topology.id, zone_id: 'zone-1', track_node_id: 'L1-r100-c7', shuttle_level: 1, row: 100, col: 7, world_x: 0, world_y: 0, world_z: 0, track_type: 'straight', traversable: true, neighbors: [] },
+        { topology_id: topology.id, zone_id: 'zone-4', track_node_id: 'L4-r100-c51', shuttle_level: 4, row: 100, col: 51, world_x: 10, world_y: 4, world_z: 0, track_type: 'straight', traversable: true, neighbors: [] },
+      ],
+    })
+    vi.mocked(api.planShuttleTransfer).mockResolvedValueOnce({
+      topologyId: topology.id,
+      topologyRevision: 'test',
+      configRevision: 'test',
+      coordinateContractRevision: 'shuttle-internal-levels-v1',
+      algorithm: 'astar',
+      chosen_lift: null,
+      path_nodes: [],
+      path_edges: [],
+      lift_transitions: [],
+      estimated_duration_seconds: 10,
+      result_status: 'success',
+      timing_source: 'synthetic_demo',
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation/orders?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '跨层运输' }))
+    const planButton = await screen.findByRole('button', { name: '规划路径' })
+    await waitFor(() => expect(planButton).toBeEnabled())
+    fireEvent.click(planButton)
+    await screen.findByText(/ASTAR · 0 节点/)
+    fireEvent.click(screen.getByRole('button', { name: '加入仿真' }))
+    expect(screen.getByText('SKU-001 · 2 箱')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看库存' }))
+    expect(screen.getByLabelText('库存详情')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '返回跨层运输' }))
+    expect(screen.getByText('SKU-001 · 2 箱')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '订单调度' }))
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
   })
 
   it('toggles the isolated handoff layout preview without changing topology or simulation state', async () => {
@@ -735,7 +904,59 @@ describe('SimulationPage', () => {
         maxParallelCtu: 7,
       })]),
       [],
+      undefined,
     )
     expect(within(screen.getByLabelText('仿真运行状态')).getByText('运行中')).toBeInTheDocument()
+  })
+
+  it('keeps metric distance disabled by default and exposes editable example values', async () => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    expect(screen.getByLabelText('启用米制模拟')).not.toBeChecked()
+    expect(screen.getByLabelText('每格水平长度')).toHaveValue(0.8)
+    expect(screen.getByLabelText('Shuttle层高')).toHaveValue(3)
+    expect(screen.getByLabelText('仓库楼层高度')).toHaveValue(4)
+    expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
+  })
+
+  it('sends the complete user-defined physics contract and displays the frozen Run values', async () => {
+    const frozen = {
+      physicsContractVersion: 'motion-physics-v1',
+      coordinateContractVersion: 'topology-grid-v1',
+      metersPerCell: 1.2,
+      shuttleLevelHeightMeters: 3,
+      floorHeightMeters: 4,
+      source: 'USER_DEFINED_SIMULATION' as const,
+      calibrationStatus: 'UNVERIFIED' as const,
+    }
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-physics', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...simulationStateFixture('run-physics'),
+      motionPhysicsContract: frozen,
+    })
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value: '1.2' } })
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalledWith(
+      topology.id,
+      expect.any(Array),
+      [],
+      frozen,
+    ))
+    expect(await screen.findByText(/1.2 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
+    expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
+    expect(screen.getByText(/用户自定义模拟值，不代表实际设备尺寸/)).toBeInTheDocument()
+  })
+
+  it.each(['0', '-0.1', ''])('blocks Run creation for invalid metersPerCell %s', async (value) => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    expect(await screen.findByText('每格水平长度必须是有限正数。')).toBeInTheDocument()
+    expect(api.startSimulation).not.toHaveBeenCalled()
   })
 })
