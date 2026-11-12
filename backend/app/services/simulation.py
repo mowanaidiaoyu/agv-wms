@@ -56,6 +56,7 @@ from .pathfinding import (
     shuttle_servable_slots,
 )
 from .simulation_config import build_simulation_config
+from .text_encoding import restore_utf8_cjk_label
 from .transport_layout import _load_raw_plan
 from .unified_transfer import (
     apply_drop,
@@ -2104,7 +2105,7 @@ class SimulationService:
             ports.append(
                 {
                     "id": str(zone.get("id") or entry),
-                    "label": str(zone.get("label") or zone.get("id") or entry),
+                    "label": restore_utf8_cjk_label(str(zone.get("label") or zone.get("id") or entry)),
                     "cellId": entry,
                 }
             )

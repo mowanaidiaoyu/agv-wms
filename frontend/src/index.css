@@ -5063,13 +5063,14 @@ select {
 
 .simulation-order-task-map {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(225px, 100%), 1fr));
   gap: 6px;
   overflow-y: auto;
 }
 
 .simulation-order-task-map button {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(54px, auto) 12px minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 44px;
@@ -5090,6 +5091,44 @@ select {
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+.simulation-order-task-map .simulation-order-task-sequence {
+  max-width: 92px;
+}
+
+.simulation-order-task-map .simulation-order-task-assignment {
+  overflow: hidden;
+}
+
+.simulation-order-task-map .simulation-order-task-destination {
+  display: grid;
+  grid-template-columns: max-content auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-family: inherit;
+}
+
+.simulation-order-task-map .simulation-order-task-destination span {
+  display: block;
+  min-width: 0;
+}
+
+.simulation-order-task-map .simulation-order-task-robot {
+  font-family: 'Fira Code', monospace;
+  white-space: nowrap;
+}
+
+.simulation-order-task-map .simulation-order-task-separator {
+  color: #64748b;
+}
+
+.simulation-order-task-map .simulation-order-task-port {
+  overflow: hidden;
+  font-family: Inter, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .simulation-order-task-map button b {
@@ -6110,6 +6149,13 @@ select {
 
   .simulation-detail-drawer {
     width: calc(100% - 20px);
+  }
+
+  .simulation-order-orchestration,
+  .simulation-orders-collapsed .simulation-order-orchestration {
+    right: 10px;
+    left: 10px;
+    width: auto;
   }
 }
 

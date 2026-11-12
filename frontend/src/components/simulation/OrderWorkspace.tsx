@@ -23,6 +23,7 @@ import type {
   SimulationOrderPriority,
   SimulationTask,
 } from '../../types'
+import { restoreUtf8CjkLabel } from '../../lib/displayText'
 
 type OrderView = Omit<SimulationOrderInput, 'lines'>
   & Partial<Omit<SimulationOrder, 'lines'>>
@@ -513,12 +514,31 @@ export function OrderOrchestrationPanel({
       {tasks.length ? (
         <div className="simulation-order-task-map">
           {tasks.map((task, index) => (
-            <button type="button" key={task.id} disabled={!task.assignedRobotId} onClick={() => task.assignedRobotId && onFocusRobot?.(task.assignedRobotId)}>
-              <span><b>T{String(task.taskIndex ?? index + 1).padStart(2, '0')}</b><small>{task.lines.length} 箱</small></span>
+            <button
+              className="simulation-order-task-card"
+              type="button"
+              key={task.id}
+              title={task.id}
+              disabled={!task.assignedRobotId}
+              onClick={() => task.assignedRobotId && onFocusRobot?.(task.assignedRobotId)}
+            >
+              <span className="simulation-order-task-sequence">
+                <b>T{String(task.taskIndex ?? index + 1).padStart(2, '0')}</b>
+                <small title={task.id}>{task.id} · {task.lines.length} 箱</small>
+              </span>
               <em>→</em>
-              <span>
-                <b>{task.assignedRobotId ?? '等待分配'} · {task.assignedPortLabel ?? '出库口待选'}</b>
-                <small>{task.sourceGroupLabel ?? task.phaseLabel}{task.portQueuePosition ? ` · 出口队列 ${task.portQueuePosition}` : ''}</small>
+              <span className="simulation-order-task-assignment">
+                <b
+                  className="simulation-order-task-destination"
+                  title={`${task.assignedRobotId ?? '等待分配'} · ${restoreUtf8CjkLabel(task.assignedPortLabel ?? '出库口待选')}`}
+                >
+                  <span className="simulation-order-task-robot">{task.assignedRobotId ?? '等待分配'}</span>
+                  <span className="simulation-order-task-separator" aria-hidden="true">·</span>
+                  <span className="simulation-order-task-port">{restoreUtf8CjkLabel(task.assignedPortLabel ?? '出库口待选')}</span>
+                </b>
+                <small title={task.sourceGroupLabel ?? task.phaseLabel}>
+                  {task.sourceGroupLabel ?? task.phaseLabel}{task.portQueuePosition ? ` · 出口队列 ${task.portQueuePosition}` : ''}
+                </small>
               </span>
             </button>
           ))}

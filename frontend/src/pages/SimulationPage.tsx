@@ -31,6 +31,7 @@ import { SimulationSceneBoundary } from '../components/simulation/SimulationScen
 import { TransferInventoryPanel } from '../components/simulation/TransferInventoryPanel'
 import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
+import { restoreUtf8CjkLabel } from '../lib/displayText'
 import { createDemoOrders } from '../lib/orders'
 import { findLayoutPreviewItem } from '../lib/transportLayout'
 import { usePlatformStore } from '../store/usePlatformStore'
@@ -372,6 +373,9 @@ export function SimulationPage() {
       setSelectedRunId(result.runId)
       const nextState = await api.getSimulationState(result.runId)
       setLiveState(nextState)
+      if (motionPhysicsContract && !nextState.motionPhysicsContract) {
+        setStartError('当前后端未冻结已提交的米制合同；此 Run 不采用米制参数。请保留该 Run，并在人工确认后端版本后再新建 Run。')
+      }
       setLocalOrders([])
       setLocalTransfers([])
       await queryClient.invalidateQueries({ queryKey: ['runs'] })
@@ -534,7 +538,7 @@ export function SimulationPage() {
     : focusTask?.mode === 'shuttle_transfer'
       ? `${focusTask.destinationLocationId ?? focusTask.deliveryCellId} · L${focusTask.targetLayer}`
       : focusTask
-        ? `${focusTask.assignedPortLabel ?? '出库交付点'} · ${focusTask.deliveryCellId}`
+        ? `${restoreUtf8CjkLabel(focusTask.assignedPortLabel ?? '出库交付点')} · ${focusTask.deliveryCellId}`
         : ''
   const runStatusLabel = starting
     ? '启动中…'
@@ -637,8 +641,8 @@ export function SimulationPage() {
 
       <section className="simulation-physics-panel" aria-labelledby="motion-physics-title">
         <div className="simulation-physics-heading">
-          <strong id="motion-physics-title">物理距离模拟参数</strong>
-          <span>用户自定义模拟值，不代表实际设备尺寸或正式 CAD 标定。</span>
+          <strong id="motion-physics-title">下一次启动配置（草稿）</strong>
+          <span>仅在新建 Run 时提交；不会改写当前或历史 Run。用户自定义值不代表正式 CAD 标定。</span>
         </div>
         <label className="simulation-physics-toggle">
           <input
@@ -647,7 +651,7 @@ export function SimulationPage() {
             disabled={isRunActive}
             onChange={(event) => setMotionPhysicsEnabled(event.target.checked)}
           />
-          启用米制模拟
+          下次新建 Run 启用米制模拟
         </label>
         <label>
           <span>每格水平长度</span>
@@ -690,12 +694,12 @@ export function SimulationPage() {
         </label>
         {selectedRunId && currentState ? (
           <div className="simulation-physics-frozen" data-run-id={currentState.id}>
-            <span>当前 Run 冻结值</span>
+            <span>当前 Run 已冻结的物理配置</span>
             {frozenMotionPhysicsContract ? (
               <strong>
                 {frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle {frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 {frozenMotionPhysicsContract.floorHeightMeters} m/层
               </strong>
-            ) : <strong>未启用米制模拟</strong>}
+            ) : <strong>当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效</strong>}
           </div>
         ) : null}
       </section>
@@ -1099,7 +1103,7 @@ export function SimulationPage() {
                             <td>{task.status}</td>
                             <td>{task.phaseLabel}</td>
                             <td>{task.sourceCellId}<br /><span className="muted-copy">{task.lines?.length ?? 1} 项 · 已取 {task.picked ?? 0}</span></td>
-                            <td>{task.assignedPortLabel ?? task.targetCellId}<br /><span className="muted-copy">{task.deliveryCellId}{task.portQueuePosition ? ` · 队列 ${task.portQueuePosition}` : ''}</span></td>
+                            <td>{restoreUtf8CjkLabel(task.assignedPortLabel ?? task.targetCellId)}<br /><span className="muted-copy">{task.deliveryCellId}{task.portQueuePosition ? ` · 队列 ${task.portQueuePosition}` : ''}</span></td>
                             <td>{task.assignedRobotId ?? '-'}</td>
                           </tr>
                         ))}

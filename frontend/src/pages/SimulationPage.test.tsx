@@ -912,7 +912,7 @@ describe('SimulationPage', () => {
   it('keeps metric distance disabled by default and exposes editable example values', async () => {
     renderSimulationPage()
     await screen.findByTestId('simulation-3d')
-    expect(screen.getByLabelText('启用米制模拟')).not.toBeChecked()
+    expect(screen.getByLabelText('下次新建 Run 启用米制模拟')).not.toBeChecked()
     expect(screen.getByLabelText('每格水平长度')).toHaveValue(0.8)
     expect(screen.getByLabelText('Shuttle层高')).toHaveValue(3)
     expect(screen.getByLabelText('仓库楼层高度')).toHaveValue(4)
@@ -923,7 +923,7 @@ describe('SimulationPage', () => {
     const frozen = {
       physicsContractVersion: 'motion-physics-v1',
       coordinateContractVersion: 'topology-grid-v1',
-      metersPerCell: 1.2,
+      metersPerCell: 0.8,
       shuttleLevelHeightMeters: 3,
       floorHeightMeters: 4,
       source: 'USER_DEFINED_SIMULATION' as const,
@@ -936,8 +936,7 @@ describe('SimulationPage', () => {
     })
     renderSimulationPage()
     await screen.findByTestId('simulation-3d')
-    fireEvent.click(screen.getByLabelText('启用米制模拟'))
-    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value: '1.2' } })
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
     fireEvent.click(screen.getByRole('button', { name: '启动' }))
     await waitFor(() => expect(api.startSimulation).toHaveBeenCalledWith(
       topology.id,
@@ -945,18 +944,42 @@ describe('SimulationPage', () => {
       [],
       frozen,
     ))
-    expect(await screen.findByText(/1.2 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
+    expect(await screen.findByText(/0.8 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
     expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
-    expect(screen.getByText(/用户自定义模拟值，不代表实际设备尺寸/)).toBeInTheDocument()
+    expect(screen.getByText(/仅在新建 Run 时提交；不会改写当前或历史 Run/)).toBeInTheDocument()
   })
 
   it.each(['0', '-0.1', ''])('blocks Run creation for invalid metersPerCell %s', async (value) => {
     renderSimulationPage()
     await screen.findByTestId('simulation-3d')
-    fireEvent.click(screen.getByLabelText('启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
     fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value } })
     fireEvent.click(screen.getByRole('button', { name: '启动' }))
     expect(await screen.findByText('每格水平长度必须是有限正数。')).toBeInTheDocument()
     expect(api.startSimulation).not.toHaveBeenCalled()
+  })
+
+  it('states that a legacy Run without a frozen contract is unaffected by the next-Run draft', async () => {
+    const state = simulationStateFixture('run-legacy')
+    state.status = 'completed'
+    usePlatformStore.setState({ selectedRunId: state.id, liveState: state })
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+
+    renderSimulationPage()
+
+    expect(await screen.findByText('当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效')).toBeInTheDocument()
+    expect(screen.getByText('下一次启动配置（草稿）')).toBeInTheDocument()
+  })
+
+  it('reports a backend contract-loss error instead of claiming the new Run is metric-enabled', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-contract-lost', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-contract-lost'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+
+    expect(await screen.findByText(/当前后端未冻结已提交的米制合同/)).toBeInTheDocument()
+    expect(screen.getByText('当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效')).toBeInTheDocument()
   })
 })
