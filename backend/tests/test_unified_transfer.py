@@ -65,10 +65,13 @@ def test_unified_start_request_accepts_orders_and_transfers_together() -> None:
 
 
 def test_pyc_topology_uses_validated_c_shuttle_graph_contract() -> None:
-    contract = shuttle_contract(_topology())
+    topology = _topology()
+    contract = shuttle_contract(topology)
 
     assert contract["topologyId"] == "topology-6ceb4920"
-    assert contract["topologyRevision"] == "2.0.0:1ec8cf4490635105"
+    assert len(topology["nodes"]) == 2520
+    assert len([node for node in topology["nodes"] if node["type"] == "picking_arm"]) == 3
+    assert contract["topologyRevision"] == "2.0.0:16e70cca04bee0ef"
     assert contract["planningEnabled"] is True
     assert {lift["lift_id"] for lift in contract["lifts"]} == {
         "shuttle-lift-a",

@@ -3584,6 +3584,7 @@ select {
 
 .simulation-physics-panel {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -3591,6 +3592,15 @@ select {
   border: 1px solid rgba(14, 116, 144, 0.16);
   border-radius: 14px;
   background: rgba(240, 249, 255, 0.84);
+}
+
+.simulation-speed-heading {
+  flex: 1 0 100%;
+  grid-template-columns: minmax(150px, auto) minmax(280px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(14, 116, 144, 0.12);
 }
 
 .simulation-physics-heading {
@@ -3620,6 +3630,13 @@ select {
 .simulation-physics-panel input[type='number'] {
   width: 74px;
   min-height: 30px;
+  padding: 4px 6px;
+}
+
+.simulation-physics-panel input:not([type]),
+.simulation-physics-panel select {
+  min-height: 30px;
+  min-width: 110px;
   padding: 4px 6px;
 }
 

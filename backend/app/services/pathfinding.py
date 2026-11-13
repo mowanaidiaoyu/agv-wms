@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import time
 from typing import Any
 
 DEFAULT_FLOOR = "1F"
@@ -256,15 +257,21 @@ def shortest_path(
     policy: str = "astar",
     avoid_storage: bool = False,
     extra_blocked: set[tuple[str, int, int]] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    started = time.perf_counter()
     if start_cell == goal_cell:
         start = cell_from_id(topology, start_cell)
+        if evidence is not None:
+            evidence.update({"visitedStateCount": 1 if start else 0, "planningDurationMs": (time.perf_counter() - started) * 1000.0})
         return [start] if start else []
 
     try:
         start = parse_cell_id(start_cell)
         goal = parse_cell_id(goal_cell)
     except ValueError:
+        if evidence is not None:
+            evidence.update({"visitedStateCount": 0, "planningDurationMs": (time.perf_counter() - started) * 1000.0})
         return []
 
     walkable = build_walkable_lookup(topology)
@@ -285,16 +292,28 @@ def shortest_path(
         walkable.update(endpoints)
 
     if start not in walkable or goal not in walkable:
+        if evidence is not None:
+            evidence.update({"visitedStateCount": 0, "planningDurationMs": (time.perf_counter() - started) * 1000.0})
         return []
 
     frontier: list[tuple[float, tuple[str, int, int]]] = [(0.0, start)]
     came_from: dict[tuple[str, int, int], tuple[str, int, int]] = {}
     cost_so_far: dict[tuple[str, int, int], float] = {start: 0.0}
+    visited: set[tuple[str, int, int]] = set()
 
     while frontier:
         _, current = heapq.heappop(frontier)
+        if current in visited:
+            continue
+        visited.add(current)
         if current == goal:
             positions = reconstruct_path(came_from, current)
+            if evidence is not None:
+                evidence.update({
+                    "visitedStateCount": len(visited),
+                    "planningDurationMs": (time.perf_counter() - started) * 1000.0,
+                    "pathCost": cost_so_far[current],
+                })
             return [walkable[position] for position in positions]
 
         for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -314,6 +333,8 @@ def shortest_path(
                 heapq.heappush(frontier, (priority, nxt))
                 came_from[nxt] = current
 
+    if evidence is not None:
+        evidence.update({"visitedStateCount": len(visited), "planningDurationMs": (time.perf_counter() - started) * 1000.0})
     return []
 
 
@@ -530,6 +551,7 @@ def shortest_path_shuttle(
     goal_layer: int,
     policy: str = "astar",
     extra_blocked: set[tuple[int, int, int]] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*，结果按 (起点, 终点, 层, 策略) 记忆化。
 
@@ -539,9 +561,9 @@ def shortest_path_shuttle(
     extra_blocked：动态障碍（其它设备占用的 (row,col,layer)），每次都不同，
     带动态障碍的规划绕过记忆化缓存直接计算。
     """
-    if extra_blocked:
+    if extra_blocked or evidence is not None:
         return _shortest_path_shuttle_uncached(
-            topology, start_cell, start_layer, goal_cell, goal_layer, policy, extra_blocked
+            topology, start_cell, start_layer, goal_cell, goal_layer, policy, extra_blocked, evidence
         )
     bundle = _derived_bundle(topology)
     cache_key = (start_cell, start_layer, goal_cell, goal_layer, policy)
@@ -564,13 +586,17 @@ def _shortest_path_shuttle_uncached(
     goal_layer: int,
     policy: str = "astar",
     extra_blocked: set[tuple[int, int, int]] | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> list[tuple[int, int, int]]:
     """四向车 A*：状态为 (row, col, layer)。车库内只在巷道格水平移动、经电梯竖井跨层；
     车库外视为地面层（layer=1）的普通空格。返回 [(row, col, layer), ...]，首元素为起点。"""
+    started = time.perf_counter()
     try:
         _, start_row, start_col = parse_cell_id(start_cell)
         _, goal_row, goal_col = parse_cell_id(goal_cell)
     except ValueError:
+        if evidence is not None:
+            evidence.update({"visitedStateCount": 0, "planningDurationMs": (time.perf_counter() - started) * 1000.0})
         return []
 
     zone_at, aisle, lift = build_shuttle_lookup(topology)
@@ -616,20 +642,33 @@ def _shortest_path_shuttle_uncached(
         return (row, col) in ground
 
     if start == goal:
+        if evidence is not None:
+            evidence.update({"visitedStateCount": 1, "planningDurationMs": (time.perf_counter() - started) * 1000.0, "pathCost": 0.0})
         return [start]
 
     frontier: list[tuple[float, tuple[int, int, int]]] = [(0.0, start)]
     came_from: dict[tuple[int, int, int], tuple[int, int, int]] = {}
     cost_so_far: dict[tuple[int, int, int], float] = {start: 0.0}
+    visited: set[tuple[int, int, int]] = set()
 
     while frontier:
         _, current = heapq.heappop(frontier)
+        if current in visited:
+            continue
+        visited.add(current)
         if current == goal:
+            goal_cost = cost_so_far[current]
             path = [current]
             while current in came_from:
                 current = came_from[current]
                 path.append(current)
             path.reverse()
+            if evidence is not None:
+                evidence.update({
+                    "visitedStateCount": len(visited),
+                    "planningDurationMs": (time.perf_counter() - started) * 1000.0,
+                    "pathCost": goal_cost,
+                })
             return path
 
         row, col, layer = current
@@ -670,4 +709,6 @@ def _shortest_path_shuttle_uncached(
                 heapq.heappush(frontier, (priority, nxt))
                 came_from[nxt] = current
 
+    if evidence is not None:
+        evidence.update({"visitedStateCount": len(visited), "planningDurationMs": (time.perf_counter() - started) * 1000.0})
     return []

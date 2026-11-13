@@ -249,7 +249,13 @@ def build_transfer_runtime(
     return tasks, list(robots_by_id.values()), list(balances.values()), events
 
 
-def build_playback_route(plan: dict[str, Any], tick_seconds: float) -> tuple[list[str], list[float], list[str]]:
+def build_playback_route(
+    plan: dict[str, Any],
+    tick_seconds: float,
+    *,
+    lift_speed_meters_per_second: float | None = None,
+    shuttle_level_height_meters: float | None = None,
+) -> tuple[list[str], list[float], list[str]]:
     nodes = plan.get("path_nodes") or []
     edges = plan.get("path_edges") or []
     if not nodes:
@@ -275,7 +281,17 @@ def build_playback_route(plan: dict[str, Any], tick_seconds: float) -> tuple[lis
             paths.append(source_cell)
             layers.append(float(source["shuttle_level"]))
             stages.append("enter_lift")
-        motion_ticks = max(1, math.ceil(motion_seconds / tick_seconds))
+        if lift_speed_meters_per_second is not None and shuttle_level_height_meters is not None:
+            vertical_meters = (
+                abs(float(target["shuttle_level"]) - float(source["shuttle_level"]))
+                * shuttle_level_height_meters
+            )
+            motion_ticks = max(
+                1,
+                math.ceil(vertical_meters / (lift_speed_meters_per_second * tick_seconds)),
+            )
+        else:
+            motion_ticks = max(1, math.ceil(motion_seconds / tick_seconds))
         for step in range(1, motion_ticks + 1):
             progress = step / motion_ticks
             level = float(source["shuttle_level"]) + (

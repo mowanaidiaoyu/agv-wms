@@ -6,6 +6,8 @@ import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
 import type {
   AssignmentContentionMetrics,
+  AlgorithmComparisonResult,
+  AlgorithmExperimentRunSummary,
   ContractMetric,
   ConveyorCoordinationMetrics,
   DeadlockHotspot,
@@ -15,6 +17,7 @@ import type {
   MetricHistoryQuality,
   MotionDistanceMetricValue,
   MotionDistanceMetrics,
+  RunPerformanceMetrics,
   PathAggregateGroup,
   PathPlanningMetrics,
   PathQuantileGroup,
@@ -525,6 +528,57 @@ function SyntheticAnalyticsView() {
   )
 }
 
+function AlgorithmComparisonPanel() {
+  const [baselineRunId, setBaselineRunId] = useState('')
+  const [candidateRunId, setCandidateRunId] = useState('')
+  const runsQuery = useQuery({
+    queryKey: ['algorithm-experiment-runs'],
+    queryFn: api.getAlgorithmExperimentRuns,
+    retry: false,
+    staleTime: 15_000,
+  })
+  const comparisonQuery = useQuery({
+    queryKey: ['algorithm-experiment-comparison', baselineRunId, candidateRunId],
+    queryFn: () => api.compareAlgorithmExperimentRuns(baselineRunId, candidateRunId),
+    enabled: Boolean(baselineRunId && candidateRunId && baselineRunId !== candidateRunId),
+    retry: false,
+  })
+  const runs: AlgorithmExperimentRunSummary[] = runsQuery.data?.runs ?? []
+  const result: AlgorithmComparisonResult | undefined = comparisonQuery.data
+  const formatAlgorithm = (run: AlgorithmExperimentRunSummary) => (
+    `${run.runId} · ${run.pathPolicy.toUpperCase()} / ${run.assignmentPolicy}`
+  )
+  return <section className="analytics-module analytics-module-wide analytics-algorithm-comparison" id="algorithm-comparison">
+    <div className="analytics-module-top"><div><span className="analytics-module-no">P5</span><h3>算法对比实验</h3></div><span className="analytics-state analytics-state-partial">真实隔离 Run</span></div>
+    <p className="analytics-data-note">后端仅在场景签名、工作量、终态和里程证据一致时计算改善率；SYNTHETIC 波次距离不会进入本表。</p>
+    {runsQuery.isError ? <QueryError name="算法实验Run列表" error={runsQuery.error} retry={() => { void runsQuery.refetch() }} /> : null}
+    {runs.length ? <div className="analytics-comparison-selectors">
+      <label>基线 Run<select aria-label="基线实验Run" value={baselineRunId} onChange={(event) => setBaselineRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
+      <label>候选 Run<select aria-label="候选实验Run" value={candidateRunId} onChange={(event) => setCandidateRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
+    </div> : <p className="analytics-data-note">当前数据库没有带版本化实验合同的 Run，本模块不生成虚构结果。</p>}
+    {comparisonQuery.isError ? <QueryError name="算法实验对比" error={comparisonQuery.error} retry={() => { void comparisonQuery.refetch() }} /> : null}
+    {result ? <>
+      <div className="analytics-comparison-grid">
+        {[result.baseline, result.candidate].map((item, index) => <div key={item.runId} className="analytics-comparison-run">
+          <strong>{index === 0 ? '基线' : '候选'} · {item.pathPolicy.toUpperCase()} / {item.assignmentPolicy}</strong>
+          <span>水平里程 {item.totalActualHorizontalMeters === null ? '—' : `${formatNumber(item.totalActualHorizontalMeters, 3)} m`}</span>
+          <span>完成 {item.completedTaskCount}/{item.totalTaskCount} · {formatNumber(item.taskCompletionRatePercent, 2)}%</span>
+          <span>模拟耗时 {item.simulatedSeconds === null ? '—' : `${formatNumber(item.simulatedSeconds, 2)} s`}</span>
+          <span>规划 {formatNumber(item.planningDurationMs, 3)} ms / {item.planningCallCount} 次 / 重规划 {item.replanCount}</span>
+          <span>阻塞 {item.blockedRobotTicks} robot·Tick · 持续循环 {item.persistentCycleEpisodeCount ?? '—'}</span>
+        </div>)}
+      </div>
+      {result.comparable ? <div className="analytics-mini-grid">
+        <MiniValue label="节省水平里程" value={result.distanceSavedMeters} suffix="m" />
+        <MiniValue label="距离改善率" value={result.distanceImprovementPercent} suffix="%" />
+        <MiniValue label="模拟时间改善率" value={result.simulatedTimeImprovementPercent} suffix="%" />
+        <MiniValue label="规划耗时改善率" value={result.planningTimeImprovementPercent} suffix="%" />
+        <MiniValue label="阻塞变化" value={result.blockedRobotTicksChange} suffix="robot·Tick" />
+      </div> : <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。因此不显示任何优化率数字。</span></div>}
+    </> : null}
+  </section>
+}
+
 export function AnalyticsPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -550,6 +604,13 @@ export function AnalyticsPage() {
     retry: false,
     staleTime: 30_000,
   })
+  const performanceQuery = useQuery({
+    queryKey: ['analytics-run-performance', runId],
+    queryFn: () => api.getSimulationRunPerformanceMetrics(runId),
+    enabled,
+    retry: false,
+    staleTime: 30_000,
+  })
 
   const taskData: TaskMetricSummary | undefined = taskQuery.data?.runId === runId ? taskQuery.data : undefined
   const historyData: MetricHistoryQuality | undefined = historyQuery.data?.runId === runId ? historyQuery.data : undefined
@@ -558,6 +619,7 @@ export function AnalyticsPage() {
   const conveyorData: ConveyorCoordinationMetrics | undefined = conveyorQuery.data?.runId === runId ? conveyorQuery.data : undefined
   const deadlockData: DeadlockLifecycleMetrics | undefined = deadlockQuery.data?.runId === runId ? deadlockQuery.data : undefined
   const motionData: MotionDistanceMetrics | undefined = motionQuery.data?.runId === runId ? motionQuery.data : undefined
+  const performanceData: RunPerformanceMetrics | undefined = performanceQuery.data?.runId === runId ? performanceQuery.data : undefined
   const taskMetrics = toMap(taskData, runId)
   const contentionMetrics = toMap(contentionData, runId)
   const pathMetrics = toMap(pathData, runId)
@@ -660,7 +722,8 @@ export function AnalyticsPage() {
     ['计划路径长度（cell）', aggregateRows(pathDistance)],
     ['搜索访问状态数', aggregateRows(pathVisited)],
   ].filter((entry) => (entry[1] as PathAggregateGroup[]).length > 0) as Array<[string, PathAggregateGroup[]]>
-  const hasRealContent = showOverview || showHistory || showCtu || showContention || showLifecycle || showPathAndMotion || showConveyor
+  const showPerformance = Boolean(performanceData?.motionSpeedContract)
+  const hasRealContent = showOverview || showHistory || showCtu || showContention || showLifecycle || showPathAndMotion || showConveyor || showPerformance
   const backUrl = `/simulation?${new URLSearchParams(topologyId ? { topologyId } : {}).toString()}`
   const zeroCurrentConveyor = [nodeOccupancy, conveyorWait, bufferWait, stationQueue].some((item) => item?.value === 0)
 
@@ -671,6 +734,7 @@ export function AnalyticsPage() {
     ['路径规划指标', pathQuery],
     ['输送协同指标', conveyorQuery],
     ['死锁生命周期指标', deadlockQuery],
+    ['物理速度与仿真时间指标', performanceQuery],
   ] as const
 
   return (
@@ -720,6 +784,22 @@ export function AnalyticsPage() {
         <MetricCard label="当前站台阶段任务数（代理）" metric={stationQueue} source="M2-5A 当前阶段任务代理" />
       </div>
       </> : null}
+
+      {showPerformance && performanceData?.motionSpeedContract ? <section className="analytics-module analytics-module-wide analytics-speed-summary">
+        <div className="analytics-module-top"><div><span className="analytics-module-no">P4</span><h3>物理速度与仿真时间</h3></div><span className="analytics-state analytics-state-partial">用户定义 · UNVERIFIED</span></div>
+        <div className="analytics-mini-grid">
+          <MiniValue label="CTU配置速度" value={performanceData.motionSpeedContract.ctuSpeedMetersPerSecond} suffix="m/s" />
+          <MiniValue label="Shuttle配置速度" value={performanceData.motionSpeedContract.shuttleSpeedMetersPerSecond} suffix="m/s" />
+          <MiniValue label="Lift配置速度" value={performanceData.motionSpeedContract.liftSpeedMetersPerSecond} suffix="m/s" />
+          <MiniValue label="仿真时间步长" value={performanceData.motionSpeedContract.simTickSeconds} suffix="s/Tick" />
+          <MiniValue label="仿真总耗时" value={performanceData.simulatedSeconds} suffix="s" />
+          <MiniValue label="车辆运动时间" value={performanceData.movementRobotSeconds} suffix="robot·s" />
+          <MiniValue label="车辆等待时间" value={performanceData.waitingRobotSeconds} suffix="robot·s" />
+          <MiniValue label="平均有效水平速度" value={performanceData.averageEffectiveHorizontalSpeedMetersPerSecond} suffix="m/s" />
+          <MiniValue label="任务完成率" value={performanceData.taskCompletionRatePercent} suffix="%" />
+        </div>
+        <p className="analytics-data-note">模拟耗时由冻结 simTickSeconds × Tick 计算；有效速度不使用墙钟时间，播放倍率 {performanceData.playbackMultiplier}× 不进入物理统计。</p>
+      </section> : null}
 
       {showHistory ? <>
       <div className="analytics-section-head"><TimerReset size={18} /><h2>B. 历史运行趋势</h2><small>横轴为仿真 Tick；曲线最多输出 240 个去重抽样点</small></div>
@@ -880,6 +960,8 @@ export function AnalyticsPage() {
         </section> : null}
       </div>
       </> : null}
+
+      <AlgorithmComparisonPanel />
 
       {hasRealContent ? <details className="analytics-quality-details">
       <summary><Database size={17} /><span>数据质量与指标限制</span><small>数据来源与计算口径 · 默认折叠 · 仅说明当前已展示指标</small></summary>

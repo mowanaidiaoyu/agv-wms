@@ -905,6 +905,8 @@ describe('SimulationPage', () => {
       })]),
       [],
       undefined,
+      undefined,
+      undefined,
     )
     expect(within(screen.getByLabelText('仿真运行状态')).getByText('运行中')).toBeInTheDocument()
   })
@@ -943,10 +945,49 @@ describe('SimulationPage', () => {
       expect.any(Array),
       [],
       frozen,
+      undefined,
+      undefined,
     ))
     expect(await screen.findByText(/0.8 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
     expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
     expect(screen.getByText(/仅在新建 Run 时提交；不会改写当前或历史 Run/)).toBeInTheDocument()
+  })
+
+  it('freezes vehicle speed separately from playback and sends the experiment selection', async () => {
+    const speed = {
+      speedContractVersion: 'motion-speed-v1',
+      simTickSeconds: 0.6,
+      ctuSpeedMetersPerSecond: 1,
+      shuttleSpeedMetersPerSecond: 1.2,
+      liftSpeedMetersPerSecond: 0.5,
+      source: 'USER_DEFINED_SIMULATION' as const,
+      calibrationStatus: 'UNVERIFIED' as const,
+    }
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-speed', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...simulationStateFixture('run-speed'),
+      motionPhysicsContract: {
+        physicsContractVersion: 'motion-physics-v1',
+        coordinateContractVersion: 'topology-grid-v1',
+        metersPerCell: 0.8,
+        shuttleLevelHeightMeters: 3,
+        floorHeightMeters: 4,
+        source: 'USER_DEFINED_SIMULATION',
+        calibrationStatus: 'UNVERIFIED',
+      },
+      motionSpeedContract: speed,
+    })
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    const call = vi.mocked(api.startSimulation).mock.calls.at(-1)
+    expect(call?.[4]).toEqual(speed)
+    expect(call?.[5]).toBeUndefined()
+    expect(await screen.findByText(/速度合同：CTU 1 m\/s/)).toBeInTheDocument()
+    expect(screen.queryByText(/播放倍率不代表车辆 m\/s/)).not.toBeInTheDocument()
   })
 
   it.each(['0', '-0.1', ''])('blocks Run creation for invalid metersPerCell %s', async (value) => {

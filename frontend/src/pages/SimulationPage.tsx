@@ -35,7 +35,15 @@ import { restoreUtf8CjkLabel } from '../lib/displayText'
 import { createDemoOrders } from '../lib/orders'
 import { findLayoutPreviewItem } from '../lib/transportLayout'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { MotionPhysicsContractInput, ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput } from '../types'
+import type {
+  AlgorithmExperimentContractInput,
+  MotionPhysicsContractInput,
+  MotionSpeedContractInput,
+  ShuttleTransferInput,
+  SimulationAlert,
+  SimulationOrder,
+  SimulationOrderInput,
+} from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
@@ -58,6 +66,13 @@ const DEFAULT_MOTION_PHYSICS_DRAFT = {
   metersPerCell: '0.8',
   shuttleLevelHeightMeters: '3.0',
   floorHeightMeters: '4.0',
+}
+
+const DEFAULT_MOTION_SPEED_DRAFT = {
+  simTickSeconds: '0.6',
+  ctuSpeedMetersPerSecond: '1.0',
+  shuttleSpeedMetersPerSecond: '1.2',
+  liftSpeedMetersPerSecond: '0.5',
 }
 
 function positiveFiniteDraftValue(label: string, value: string): number {
@@ -113,6 +128,13 @@ export function SimulationPage() {
   const [starting, setStarting] = useState(false)
   const [motionPhysicsEnabled, setMotionPhysicsEnabled] = useState(false)
   const [motionPhysicsDraft, setMotionPhysicsDraft] = useState(DEFAULT_MOTION_PHYSICS_DRAFT)
+  const [motionSpeedEnabled, setMotionSpeedEnabled] = useState(false)
+  const [motionSpeedDraft, setMotionSpeedDraft] = useState(DEFAULT_MOTION_SPEED_DRAFT)
+  const [algorithmExperimentEnabled, setAlgorithmExperimentEnabled] = useState(false)
+  const [experimentScenarioId, setExperimentScenarioId] = useState('p5-comparison-01')
+  const [experimentPathPolicy, setExperimentPathPolicy] = useState<'astar' | 'dijkstra'>('astar')
+  const [experimentAssignmentPolicy, setExperimentAssignmentPolicy] = useState<'greedy' | 'hungarian'>('greedy')
+  const [experimentVariableDimension, setExperimentVariableDimension] = useState<'pathPolicy' | 'assignmentPolicy'>('pathPolicy')
   const [controlAction, setControlAction] = useState<RunControlAction | null>(null)
   const [controlNotice, setControlNotice] = useState('')
   const [completingPicking, setCompletingPicking] = useState(false)
@@ -363,10 +385,48 @@ export function SimulationPage() {
             calibrationStatus: 'UNVERIFIED',
           }
         : undefined
+      const motionSpeedContract: MotionSpeedContractInput | undefined = motionSpeedEnabled
+        ? {
+            speedContractVersion: 'motion-speed-v1',
+            simTickSeconds: positiveFiniteDraftValue('仿真时间步长', motionSpeedDraft.simTickSeconds),
+            ctuSpeedMetersPerSecond: positiveFiniteDraftValue('CTU速度', motionSpeedDraft.ctuSpeedMetersPerSecond),
+            shuttleSpeedMetersPerSecond: positiveFiniteDraftValue('Shuttle速度', motionSpeedDraft.shuttleSpeedMetersPerSecond),
+            liftSpeedMetersPerSecond: positiveFiniteDraftValue('Lift速度', motionSpeedDraft.liftSpeedMetersPerSecond),
+            source: 'USER_DEFINED_SIMULATION',
+            calibrationStatus: 'UNVERIFIED',
+          }
+        : undefined
+      if (motionSpeedContract && !motionPhysicsContract) {
+        throw new Error('车辆物理速度需要同时启用米制物理距离合同。')
+      }
+      const algorithmExperimentContract: AlgorithmExperimentContractInput | undefined = algorithmExperimentEnabled
+        ? {
+            experimentContractVersion: 'algorithm-experiment-v1',
+            scenarioId: experimentScenarioId.trim(),
+            scenarioVersion: '1',
+            seed: 42,
+            topologyRevision: transportLayoutQuery.data?.topologyRevision ?? '',
+            safetyLimitTicks: 2000,
+            pathPolicy: experimentPathPolicy,
+            assignmentPolicy: experimentAssignmentPolicy,
+            variableDimension: experimentVariableDimension,
+            algorithmVersion: 'agv-routing-assignment-v1',
+          }
+        : undefined
+      if (algorithmExperimentContract && (!motionPhysicsContract || !motionSpeedContract || !algorithmExperimentContract.topologyRevision)) {
+        throw new Error('算法实验需要米制、速度合同以及已加载的Topology Revision。')
+      }
       setShowPickingArmPreview(false)
       setPickingArmResetRequest((request) => request + 1)
       resetRun()
-      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers, motionPhysicsContract)
+      const result = await api.startSimulation(
+        resolvedTopologyId,
+        localOrders,
+        localTransfers,
+        motionPhysicsContract,
+        motionSpeedContract,
+        algorithmExperimentContract,
+      )
       if (!result.runId || result.status !== 'running') {
         throw new Error('后端未返回有效的运行实例。')
       }
@@ -375,6 +435,9 @@ export function SimulationPage() {
       setLiveState(nextState)
       if (motionPhysicsContract && !nextState.motionPhysicsContract) {
         setStartError('当前后端未冻结已提交的米制合同；此 Run 不采用米制参数。请保留该 Run，并在人工确认后端版本后再新建 Run。')
+      }
+      if (motionSpeedContract && !nextState.motionSpeedContract) {
+        setStartError('当前后端未冻结已提交的速度合同；此 Run 不采用物理速度参数。')
       }
       setLocalOrders([])
       setLocalTransfers([])
@@ -503,6 +566,7 @@ export function SimulationPage() {
   const isRunning = currentState?.status === 'running'
   const isRunActive = ['running', 'paused'].includes(currentState?.status ?? '')
   const frozenMotionPhysicsContract = currentState?.motionPhysicsContract
+  const frozenMotionSpeedContract = currentState?.motionSpeedContract
   const sceneTasks = useMemo(() => workspaceTab === 'orders'
     ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
     : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
@@ -692,6 +756,38 @@ export function SimulationPage() {
           />
           <small>m/层</small>
         </label>
+        <div className="simulation-physics-heading simulation-speed-heading">
+          <strong>车辆速度模拟参数</strong>
+          <span>物理速度决定车辆在逻辑 Tick 中的真实推进；1×/2×/4×仅改变墙钟播放快慢。</span>
+        </div>
+        <label className="simulation-physics-toggle">
+          <input type="checkbox" checked={motionSpeedEnabled} disabled={isRunActive} onChange={(event) => setMotionSpeedEnabled(event.target.checked)} />
+          下次新建 Run 启用物理速度模拟
+        </label>
+        {([
+          ['CTU速度', 'ctuSpeedMetersPerSecond', 'm/s'],
+          ['Shuttle速度', 'shuttleSpeedMetersPerSecond', 'm/s'],
+          ['Lift速度', 'liftSpeedMetersPerSecond', 'm/s'],
+          ['仿真时间步长', 'simTickSeconds', 's/Tick'],
+        ] as const).map(([label, key, unit]) => (
+          <label key={key}>
+            <span>{label}</span>
+            <input aria-label={label} type="number" min="0" step="0.1" value={motionSpeedDraft[key]} disabled={!motionSpeedEnabled || isRunActive} onChange={(event) => setMotionSpeedDraft((value) => ({ ...value, [key]: event.target.value }))} />
+            <small>{unit}</small>
+          </label>
+        ))}
+        <div className="simulation-physics-heading simulation-speed-heading">
+          <strong>算法实验合同</strong>
+          <span>固定场景、库存、订单、米制、速度与安全上限；每组仅改变声明的算法维度。</span>
+        </div>
+        <label className="simulation-physics-toggle">
+          <input type="checkbox" checked={algorithmExperimentEnabled} disabled={isRunActive} onChange={(event) => setAlgorithmExperimentEnabled(event.target.checked)} />
+          将下次 Run 标记为可复现实验
+        </label>
+        <label><span>scenarioId</span><input value={experimentScenarioId} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentScenarioId(event.target.value)} /></label>
+        <label><span>路径算法</span><select value={experimentPathPolicy} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentPathPolicy(event.target.value as 'astar' | 'dijkstra')}><option value="astar">A*</option><option value="dijkstra">Dijkstra</option></select></label>
+        <label><span>分配算法</span><select value={experimentAssignmentPolicy} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentAssignmentPolicy(event.target.value as 'greedy' | 'hungarian')}><option value="greedy">Greedy</option><option value="hungarian">Hungarian</option></select></label>
+        <label><span>本组唯一变量</span><select value={experimentVariableDimension} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
         {selectedRunId && currentState ? (
           <div className="simulation-physics-frozen" data-run-id={currentState.id}>
             <span>当前 Run 已冻结的物理配置</span>
@@ -700,6 +796,10 @@ export function SimulationPage() {
                 {frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle {frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 {frozenMotionPhysicsContract.floorHeightMeters} m/层
               </strong>
             ) : <strong>当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效</strong>}
+            {frozenMotionSpeedContract ? (
+              <strong>速度合同：CTU {frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s · Shuttle {frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s · Lift {frozenMotionSpeedContract.liftSpeedMetersPerSecond} m/s · {frozenMotionSpeedContract.simTickSeconds} s/Tick</strong>
+            ) : <strong>当前 Run 未启用物理速度合同；播放倍率不代表车辆 m/s。</strong>}
+            {currentState.algorithmExperimentContract ? <strong>实验：{currentState.algorithmExperimentContract.scenarioId} · {currentState.algorithmExperimentContract.pathPolicy.toUpperCase()} · {currentState.algorithmExperimentContract.assignmentPolicy}</strong> : null}
           </div>
         ) : null}
       </section>

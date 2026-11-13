@@ -204,11 +204,60 @@ class MotionPhysicsContractRequest(BaseModel):
         return result
 
 
+class MotionSpeedContractRequest(BaseModel):
+    """User-defined, unverified physical speed contract frozen into one Run."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    speedContractVersion: Literal["motion-speed-v1"]
+    simTickSeconds: float
+    ctuSpeedMetersPerSecond: float
+    shuttleSpeedMetersPerSecond: float
+    liftSpeedMetersPerSecond: float
+    source: Literal["USER_DEFINED_SIMULATION"] = "USER_DEFINED_SIMULATION"
+    calibrationStatus: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+    @field_validator(
+        "simTickSeconds",
+        "ctuSpeedMetersPerSecond",
+        "shuttleSpeedMetersPerSecond",
+        "liftSpeedMetersPerSecond",
+        mode="before",
+    )
+    @classmethod
+    def validate_positive_finite_number(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite positive number")
+        result = float(value)
+        if not isfinite(result) or result <= 0:
+            raise ValueError("must be a finite positive number")
+        return result
+
+
+class AlgorithmExperimentContractRequest(BaseModel):
+    """Versioned, reproducible Run experiment selection."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    experimentContractVersion: Literal["algorithm-experiment-v1"]
+    scenarioId: str = Field(min_length=1)
+    scenarioVersion: str = Field(min_length=1)
+    seed: int = Field(ge=0)
+    topologyRevision: str = Field(min_length=1)
+    safetyLimitTicks: int = Field(ge=1, le=100_000)
+    pathPolicy: Literal["astar", "dijkstra"] = "astar"
+    assignmentPolicy: Literal["greedy", "hungarian"] = "greedy"
+    variableDimension: Literal["pathPolicy", "assignmentPolicy"]
+    algorithmVersion: str = Field(min_length=1)
+
+
 class SimulationStartRequest(BaseModel):
     topologyId: str
     orders: list[SimulationOrderInput] = Field(default_factory=list)
     transfers: list[ShuttleTransferInput] = Field(default_factory=list)
     motionPhysicsContract: MotionPhysicsContractRequest | None = None
+    motionSpeedContract: MotionSpeedContractRequest | None = None
+    algorithmExperimentContract: AlgorithmExperimentContractRequest | None = None
 
 
 class ShuttleDockSettingsRequest(BaseModel):

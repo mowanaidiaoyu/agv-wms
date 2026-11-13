@@ -290,6 +290,24 @@ function responses(runId: string) {
     '/metrics/conveyor-coordination': conveyor,
     '/metrics/deadlock-lifecycle': deadlock,
     '/metrics/motion-distance': motion,
+    '/metrics/run-performance': {
+      contractVersion: 'run-performance-metrics-v1',
+      runId,
+      status: 'completed',
+      motionSpeedContract: null,
+      simulatedSeconds: null,
+      wallClockSeconds: null,
+      playbackMultiplier: 2,
+      movementRobotSeconds: null,
+      waitingRobotSeconds: null,
+      averageEffectiveHorizontalSpeedMetersPerSecond: null,
+      completedTaskCount: 9,
+      totalTaskCount: 9,
+      taskCompletionRatePercent: 100,
+      dataQuality: 'UNAVAILABLE',
+      reason: 'MOTION_SPEED_CONTRACT_UNAVAILABLE',
+    },
+    '/algorithm-experiments': { contractVersion: 'algorithm-experiment-list-v1', runs: [] },
   }
 }
 
@@ -466,10 +484,10 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(screen.queryByText(/正式指标缺失|尚不可计算|UNAVAILABLE/)).not.toBeInTheDocument()
   })
 
-  it('requests exactly the seven run-scoped read-only APIs and does not call state, writes, or simulation start', async () => {
+  it('requests the eight run-scoped metrics plus the read-only experiment list and performs no writes', async () => {
     const fetchMock = installFetch()
     renderPage()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9))
     const urls = fetchMock.mock.calls.map(([input]) => String(input))
     expect(urls).toEqual(expect.arrayContaining([
       expect.stringContaining('/simulations/run-a/metrics/tasks'),
@@ -479,10 +497,36 @@ describe('algorithm performance analytics M2-5B', () => {
       expect.stringContaining('/simulations/run-a/metrics/conveyor-coordination'),
       expect.stringContaining('/simulations/run-a/metrics/deadlock-lifecycle'),
       expect.stringContaining('/simulations/run-a/metrics/motion-distance'),
+      expect.stringContaining('/simulations/run-a/metrics/run-performance'),
+      expect.stringContaining('/algorithm-experiments'),
     ]))
     expect(urls.every((url) => !url.endsWith('/state') && !url.includes('/start') && !url.includes('/pause') && !url.includes('/reset'))).toBe(true)
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
     expect(fetchMock.mock.calls.some(([, init]) => ['POST', 'PUT', 'PATCH', 'DELETE'].includes((init?.method ?? 'GET').toUpperCase()))).toBe(false)
+  })
+
+  it('shows verified same-scenario algorithm comparison and never uses synthetic wave distance', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'completed', scenarioId: 's1', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+      { runId: 'exp-b', status: 'completed', scenarioId: 's1', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+    ]
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify({
+        contractVersion: 'algorithm-comparison-v1', comparable: true, comparisonReasons: [],
+        baseline: { runId: 'exp-a', status: 'completed', pathPolicy: 'astar', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 10, ctuHorizontalMeters: 10, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 10, planningDurationMs: 2, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true },
+        candidate: { runId: 'exp-b', status: 'completed', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 8, ctuHorizontalMeters: 8, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 10, planningDurationMs: 3, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true },
+        distanceSavedMeters: 2, distanceImprovementPercent: 20, simulatedSecondsSaved: 0, simulatedTimeImprovementPercent: 0, planningDurationSavedMs: -1, planningTimeImprovementPercent: -50, blockedRobotTicksChange: 0,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    renderPage()
+    const baseline = await screen.findByLabelText('基线实验Run')
+    fireEvent.change(baseline, { target: { value: 'exp-a' } })
+    fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
+    const improvementLabel = await screen.findByText('距离改善率')
+    expect(improvementLabel.parentElement).toHaveTextContent('20 %')
+    expect(screen.getByText(/SYNTHETIC 波次距离不会进入本表/)).toBeInTheDocument()
   })
 
   it('shows valid real metrics, preserves true zero, and does not multiply percentages', async () => {
@@ -823,7 +867,7 @@ describe('algorithm performance analytics M2-5B', () => {
   it('keeps real Run mode as default and lazy-loads no synthetic JSON', async () => {
     const fetchMock = installFetch()
     renderPage()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(9))
     expect(screen.getByRole('button', { name: '真实 Run 指标' })).toHaveAttribute('aria-pressed', 'true')
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/analytics-synthetic-v1/'))).toBe(false)
     expect(screen.queryByText('SYNTHETIC 模拟数据')).not.toBeInTheDocument()
@@ -981,7 +1025,7 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(await screen.findByText('SYNTHETIC 模拟数据')).toBeInTheDocument()
     expect(screen.queryByText('已完成父任务数量')).not.toBeInTheDocument()
     expect(screen.queryByText('原累计 completedTasks')).not.toBeInTheDocument()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(12))
     fireEvent.click(screen.getByRole('button', { name: '真实 Run 指标' }))
     expect(await screen.findByText('已完成父任务数量')).toBeInTheDocument()
     expect(screen.queryByText('SYNTHETIC 模拟数据')).not.toBeInTheDocument()

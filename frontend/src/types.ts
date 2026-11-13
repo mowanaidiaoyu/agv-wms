@@ -579,6 +579,105 @@ export interface MotionPhysicsContractInput {
   calibrationStatus?: 'UNVERIFIED'
 }
 
+export interface MotionSpeedContractInput {
+  speedContractVersion: string
+  simTickSeconds: number
+  ctuSpeedMetersPerSecond: number
+  shuttleSpeedMetersPerSecond: number
+  liftSpeedMetersPerSecond: number
+  source?: 'USER_DEFINED_SIMULATION'
+  calibrationStatus?: 'UNVERIFIED'
+  schedulerLimits?: {
+    maxHorizontalMetersPerSecond: number
+    maxLiftMetersPerSecond: number
+    maxCommittedEdgesPerRobotPerTick: number
+  }
+}
+
+export interface AlgorithmExperimentContractInput {
+  experimentContractVersion: string
+  scenarioId: string
+  scenarioVersion: string
+  seed: number
+  topologyRevision: string
+  safetyLimitTicks: number
+  pathPolicy: 'astar' | 'dijkstra'
+  assignmentPolicy: 'greedy' | 'hungarian'
+  variableDimension: 'pathPolicy' | 'assignmentPolicy'
+  algorithmVersion: string
+  scenarioSignature?: string
+  dataSource?: 'REAL_SIMULATION_EXPERIMENT'
+}
+
+export interface RunPerformanceMetrics {
+  contractVersion: string
+  runId: string
+  status: string
+  motionSpeedContract: MotionSpeedContractInput | null
+  simulatedSeconds: number | null
+  wallClockSeconds: number | null
+  playbackMultiplier: number | null
+  movementRobotSeconds: number | null
+  waitingRobotSeconds: number | null
+  averageEffectiveHorizontalSpeedMetersPerSecond: number | null
+  completedTaskCount: number
+  totalTaskCount: number
+  taskCompletionRatePercent: number
+  dataQuality: string
+  reason: string | null
+}
+
+export interface AlgorithmExperimentRunSummary {
+  runId: string
+  status: string
+  scenarioId: string
+  scenarioVersion: string
+  scenarioSignature: string
+  variableDimension: 'pathPolicy' | 'assignmentPolicy'
+  pathPolicy: 'astar' | 'dijkstra'
+  assignmentPolicy: 'greedy' | 'hungarian'
+  algorithmVersion: string
+  simulatedSeconds: number | null
+  tick: number
+}
+
+export interface AlgorithmRunMetrics {
+  runId: string
+  status: string
+  pathPolicy: string
+  assignmentPolicy: string
+  totalActualHorizontalMeters: number | null
+  ctuHorizontalMeters: number | null
+  shuttleHorizontalMeters: number | null
+  liftVerticalMeters: number | null
+  completedTaskCount: number
+  totalTaskCount: number
+  taskCompletionRatePercent: number
+  simulatedSeconds: number | null
+  planningDurationMs: number
+  planningCallCount: number
+  replanCount: number
+  blockedRobotTicks: number
+  persistentCycleEpisodeCount: number | null
+  confirmedResolvedEpisodeCount: number | null
+  dataComplete: boolean
+}
+
+export interface AlgorithmComparisonResult {
+  contractVersion: string
+  baseline: AlgorithmRunMetrics
+  candidate: AlgorithmRunMetrics
+  comparable: boolean
+  comparisonReasons: string[]
+  distanceSavedMeters: number | null
+  distanceImprovementPercent: number | null
+  simulatedSecondsSaved: number | null
+  simulatedTimeImprovementPercent: number | null
+  planningDurationSavedMs: number | null
+  planningTimeImprovementPercent: number | null
+  blockedRobotTicksChange: number | null
+}
+
 export interface MotionDistanceMetricValue {
   value: number | null
   unit: string
@@ -1358,10 +1457,16 @@ export interface SimulationState {
   orderDriven?: boolean
   tick: number
   speedMultiplier?: 1 | 2 | 4
+  playbackMultiplier?: 1 | 2 | 4
   tickIntervalSeconds?: number
+  playbackTickIntervalSeconds?: number
+  simulatedSeconds?: number
+  wallClockSeconds?: number
   eventCount?: number
   topologyId: string
   motionPhysicsContract?: MotionPhysicsContractInput | null
+  motionSpeedContract?: MotionSpeedContractInput | null
+  algorithmExperimentContract?: AlgorithmExperimentContractInput | null
   robots: SimulationRobot[]
   tasks: SimulationTask[]
   orders?: SimulationOrder[]

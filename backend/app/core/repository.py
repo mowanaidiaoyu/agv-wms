@@ -899,6 +899,44 @@ class Repository:
             row = conn.execute("SELECT * FROM simulation_runs WHERE id = ?", (run_id,)).fetchone()
         return self._decode_run(row_to_dict(row)) if row else None
 
+    def get_run_read_only(self, run_id: str) -> dict[str, Any] | None:
+        with get_read_conn() as conn:
+            row = conn.execute("SELECT * FROM simulation_runs WHERE id = ?", (run_id,)).fetchone()
+        return self._decode_run(row_to_dict(row)) if row else None
+
+    def list_algorithm_experiment_runs(self) -> list[dict[str, Any]]:
+        """Return bounded summaries; never seed or mutate persisted Run data."""
+
+        with get_read_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM simulation_runs ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            decoded = self._decode_run(row_to_dict(row))
+            payload = decoded.get("payload") or {}
+            contract = payload.get("algorithmExperimentContract")
+            if not isinstance(contract, dict):
+                continue
+            result.append(
+                {
+                    "runId": decoded["id"],
+                    "status": decoded["status"],
+                    "topologyId": decoded.get("topology_id"),
+                    "scenarioId": contract.get("scenarioId"),
+                    "scenarioVersion": contract.get("scenarioVersion"),
+                    "scenarioSignature": contract.get("scenarioSignature"),
+                    "variableDimension": contract.get("variableDimension"),
+                    "pathPolicy": contract.get("pathPolicy"),
+                    "assignmentPolicy": contract.get("assignmentPolicy"),
+                    "algorithmVersion": contract.get("algorithmVersion"),
+                    "simulatedSeconds": payload.get("simulatedSeconds"),
+                    "tick": payload.get("tick"),
+                    "createdAt": decoded.get("created_at"),
+                }
+            )
+        return result
+
     def get_deadlock_lifecycle_metrics(
         self,
         run_id: str,

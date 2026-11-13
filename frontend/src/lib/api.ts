@@ -14,6 +14,11 @@ import type {
   DeadlockLifecycleMetrics,
   MotionDistanceMetrics,
   MotionPhysicsContractInput,
+  MotionSpeedContractInput,
+  AlgorithmExperimentContractInput,
+  AlgorithmExperimentRunSummary,
+  AlgorithmComparisonResult,
+  RunPerformanceMetrics,
   SyntheticAbcHeatResult,
   SyntheticEtaPredictionResult,
   SyntheticWaveOptimizationResult,
@@ -151,6 +156,8 @@ export const api = {
     orders: SimulationOrderInput[] = [],
     transfers: ShuttleTransferInput[] = [],
     motionPhysicsContract?: MotionPhysicsContractInput,
+    motionSpeedContract?: MotionSpeedContractInput,
+    algorithmExperimentContract?: AlgorithmExperimentContractInput,
   ) {
     return request<{ runId: string; status: string }>('/simulations/start', {
       method: 'POST',
@@ -159,6 +166,8 @@ export const api = {
         orders,
         transfers,
         ...(motionPhysicsContract ? { motionPhysicsContract } : {}),
+        ...(motionSpeedContract ? { motionSpeedContract } : {}),
+        ...(algorithmExperimentContract ? { algorithmExperimentContract } : {}),
       }),
     })
   },
@@ -249,6 +258,16 @@ export const api = {
       ? ''
       : `?generation=${encodeURIComponent(String(generation))}`
     return request<MotionDistanceMetrics>(`/simulations/${encodedRunId}/metrics/motion-distance${query}`)
+  },
+  getSimulationRunPerformanceMetrics(runId: string) {
+    return request<RunPerformanceMetrics>(`/simulations/${encodeURIComponent(runId)}/metrics/run-performance`)
+  },
+  getAlgorithmExperimentRuns() {
+    return request<{ contractVersion: string; runs: AlgorithmExperimentRunSummary[] }>('/algorithm-experiments')
+  },
+  compareAlgorithmExperimentRuns(baselineRunId: string, candidateRunId: string) {
+    const query = new URLSearchParams({ baselineRunId, candidateRunId })
+    return request<AlgorithmComparisonResult>(`/algorithm-experiments/compare?${query.toString()}`)
   },
   getSyntheticAbcHeatResult() {
     return requestSynthetic<SyntheticAbcHeatResult>('/analytics-synthetic-v1/abc_heat_seed42.json', ['PASS'])

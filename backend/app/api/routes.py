@@ -27,6 +27,10 @@ from ..services.shuttle_topology import topology_revision
 from ..services.transport_layout import LayoutRevisionMismatch, load_transport_layout_plan
 from ..services.transport_network import audit_transport_network
 from ..services.unified_transfer import plan_transfer, shuttle_contract
+from ..analytics.algorithm_experiment_metrics import (
+    build_run_performance_metrics,
+    compare_algorithm_experiment_runs,
+)
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
@@ -186,6 +190,12 @@ async def start_simulation(payload: SimulationStartRequest):
             [order.model_dump() for order in payload.orders],
             [transfer.model_dump() for transfer in payload.transfers],
             payload.motionPhysicsContract.model_dump() if payload.motionPhysicsContract else None,
+            payload.motionSpeedContract.model_dump() if payload.motionSpeedContract else None,
+            (
+                payload.algorithmExperimentContract.model_dump()
+                if payload.algorithmExperimentContract
+                else None
+            ),
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -411,6 +421,32 @@ def get_simulation_motion_distance_metrics(
     if metrics is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/run-performance")
+def get_simulation_run_performance_metrics(run_id: str):
+    metrics = build_run_performance_metrics(repo, run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/algorithm-experiments")
+def list_algorithm_experiments():
+    return {
+        "contractVersion": "algorithm-experiment-list-v1",
+        "runs": repo.list_algorithm_experiment_runs(),
+    }
+
+
+@router.get("/algorithm-experiments/compare")
+def compare_algorithm_experiments(baselineRunId: str, candidateRunId: str):
+    if baselineRunId == candidateRunId:
+        raise HTTPException(status_code=422, detail="Select two different experiment Runs")
+    result = compare_algorithm_experiment_runs(repo, baselineRunId, candidateRunId)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Experiment Run not found")
+    return result
 
 
 @ws_router.websocket("/ws/simulation/{run_id}")

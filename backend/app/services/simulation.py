@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
+import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -38,6 +41,13 @@ from .motion_runtime_adapter import (
     RuntimePosition,
     physics_contract_from_config,
 )
+from .motion_speed import (
+    EPSILON_METERS,
+    edge_distance_meters,
+    freeze_motion_speed_contract,
+    sim_tick_seconds,
+    speed_for_edge,
+)
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -56,6 +66,7 @@ from .pathfinding import (
     shuttle_servable_slots,
 )
 from .simulation_config import build_simulation_config
+from .shuttle_topology import topology_revision
 from .text_encoding import restore_utf8_cjk_label
 from .transport_layout import _load_raw_plan
 from .unified_transfer import (
@@ -148,6 +159,7 @@ class RunRuntime:
     motion_observer: MotionRuntimeObserver | None = None
     motion_collection_enabled: bool = True
     resetting: bool = False
+    wall_clock_started_monotonic: float = field(default_factory=time.monotonic)
 
 
 class WebSocketHub:
@@ -199,6 +211,8 @@ class SimulationService:
         orders: list[dict[str, Any]] | None = None,
         transfers: list[dict[str, Any]] | None = None,
         motion_physics_contract: dict[str, Any] | None = None,
+        motion_speed_contract: dict[str, Any] | None = None,
+        algorithm_experiment_contract: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         config = build_simulation_config(topology)
         if motion_physics_contract is not None:
@@ -217,10 +231,65 @@ class SimulationService:
                 "source": source,
                 "calibrationStatus": calibration_status,
             }
+        config["motionSpeedContract"] = freeze_motion_speed_contract(
+            motion_speed_contract,
+            config.get("motionPhysicsContract"),
+        )
+        prepared_transfers = deepcopy(transfers or [])
+        if algorithm_experiment_contract is not None:
+            expected_revision = topology_revision(topology)
+            if algorithm_experiment_contract.get("topologyRevision") != expected_revision:
+                raise ValueError(
+                    "algorithmExperimentContract.topologyRevision does not match the selected topology"
+                )
+            if config.get("motionPhysicsContract") is None or config.get("motionSpeedContract") is None:
+                raise ValueError(
+                    "algorithmExperimentContract requires both motionPhysicsContract and motionSpeedContract"
+                )
+            experiment = deepcopy(algorithm_experiment_contract)
+            config["seed"] = int(experiment["seed"])
+            config["pathPolicy"] = str(experiment["pathPolicy"])
+            config["dispatchPolicy"] = str(experiment["assignmentPolicy"])
+            config["safetyLimitTicks"] = int(experiment["safetyLimitTicks"])
+            for transfer in prepared_transfers:
+                transfer["algorithm"] = config["pathPolicy"]
+            fixed_algorithm = {
+                "assignmentPolicy": config["dispatchPolicy"]
+            } if experiment["variableDimension"] == "pathPolicy" else {
+                "pathPolicy": config["pathPolicy"]
+            }
+            scenario_payload = {
+                "experimentContractVersion": experiment["experimentContractVersion"],
+                "scenarioId": experiment["scenarioId"],
+                "scenarioVersion": experiment["scenarioVersion"],
+                "seed": experiment["seed"],
+                "topologyId": topology["id"],
+                "topologyRevision": expected_revision,
+                "orders": orders or [],
+                "transfers": [
+                    {key: value for key, value in transfer.items() if key != "algorithm"}
+                    for transfer in prepared_transfers
+                ],
+                "motionPhysicsContract": config["motionPhysicsContract"],
+                "motionSpeedContract": config["motionSpeedContract"],
+                "safetyLimitTicks": experiment["safetyLimitTicks"],
+                "variableDimension": experiment["variableDimension"],
+                **fixed_algorithm,
+            }
+            encoded = json.dumps(
+                scenario_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            experiment["scenarioSignature"] = hashlib.sha256(encoded).hexdigest()
+            experiment["topologyId"] = topology["id"]
+            experiment["dataSource"] = "REAL_SIMULATION_EXPERIMENT"
+            config["algorithmExperimentContract"] = experiment
         if not config["robots"]:
             raise ValueError("当前拓扑没有 CTU 或四向车设备，无法启动仿真")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
-        runtime = self._create_runtime(run_id, topology, config, orders, transfers)
+        runtime = self._create_runtime(run_id, topology, config, orders, prepared_transfers)
         self.runtimes[run_id] = runtime
         self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
@@ -262,7 +331,9 @@ class SimulationService:
             raise ValueError("Stopped or completed Run speed cannot be changed; reset it first")
         runtime.speed_multiplier = multiplier
         runtime.state["speedMultiplier"] = multiplier
+        runtime.state["playbackMultiplier"] = multiplier
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["playbackTickIntervalSeconds"] = self._tick_delay(runtime)
         runtime.state["updatedAt"] = now_dt().isoformat()
         self._record_event(runtime, runtime.state["tick"], "simulation_speed_changed", {"multiplier": multiplier})
         self._persist(runtime)
@@ -545,7 +616,10 @@ class SimulationService:
         runtime.inventory_delta = []
         runtime.speed_multiplier = DEFAULT_SPEED_MULTIPLIER
         runtime.state["speedMultiplier"] = DEFAULT_SPEED_MULTIPLIER
+        runtime.state["playbackMultiplier"] = DEFAULT_SPEED_MULTIPLIER
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["playbackTickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.wall_clock_started_monotonic = time.monotonic()
         runtime.deadlock_observer = previous_observer.new_generation(runtime.topology)
         runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
         if previous_motion_observer is not None:
@@ -850,6 +924,10 @@ class SimulationService:
             return
         try:
             to_position = RuntimePosition.from_robot(robot)
+            if from_position != to_position:
+                robot["movementTicks"] = int(robot.get("movementTicks") or 0) + 1
+                counters = runtime.state.setdefault("performanceCounters", {})
+                counters["movementRobotTicks"] = int(counters.get("movementRobotTicks") or 0) + 1
             resolved_type = movement_type
             if resolved_type is None:
                 resolved_type = (
@@ -866,9 +944,8 @@ class SimulationService:
                 tick=int(runtime.state.get("tick") or 0),
                 movement_type=resolved_type,
                 source=source,
-                # Current runtime paths have no stable, persisted plan/replan identity.
-                planned_path_id=None,
-                replan_id=None,
+                planned_path_id=robot.get("activePlanId"),
+                replan_id=robot.get("activeReplanId"),
             )
         except Exception as error:
             observer.record_observation_failure(
@@ -985,6 +1062,12 @@ class SimulationService:
                     "returningToStandby": False,
                     "handlingAction": None,
                     "waitTicks": 0,
+                    "motionCreditMeters": 0.0,
+                    "motionEdgeKey": None,
+                    "motionCreditTick": -1,
+                    "movementTicks": 0,
+                    "physicalTravelWaitTicks": 0,
+                    "blockedWaitTicks": 0,
                     "failed": False,
                     "phaseLabel": "待命",
                     "load": 0,
@@ -998,6 +1081,13 @@ class SimulationService:
         )
         existing_robot_ids = {robot["id"] for robot in robots}
         robots.extend(robot for robot in transfer_robots if robot["id"] not in existing_robot_ids)
+        for robot in robots:
+            robot.setdefault("motionCreditMeters", 0.0)
+            robot.setdefault("motionEdgeKey", None)
+            robot.setdefault("motionCreditTick", -1)
+            robot.setdefault("movementTicks", 0)
+            robot.setdefault("physicalTravelWaitTicks", 0)
+            robot.setdefault("blockedWaitTicks", 0)
 
         inventory = build_inventory(topology)
         # 四向车出货位设置（订单任务沿用 dock-02/03 自动分配，不再单独驱动搬运）。
@@ -1025,10 +1115,24 @@ class SimulationService:
             "stopReason": None,
             "tick": 0,
             "speedMultiplier": DEFAULT_SPEED_MULTIPLIER,
+            "playbackMultiplier": DEFAULT_SPEED_MULTIPLIER,
             "tickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
+            "playbackTickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
+            "simulatedSeconds": 0.0,
+            "wallClockSeconds": 0.0,
             "eventCount": len(transfer_events),
             "topologyId": topology["id"],
             "motionPhysicsContract": deepcopy(config.get("motionPhysicsContract")),
+            "motionSpeedContract": deepcopy(config.get("motionSpeedContract")),
+            "algorithmExperimentContract": deepcopy(config.get("algorithmExperimentContract")),
+            "planningEvidence": [],
+            "planningEvidenceContractVersion": "planning-evidence-v1",
+            "planningSequence": 0,
+            "performanceCounters": {
+                "movementRobotTicks": 0,
+                "physicalTravelWaitRobotTicks": 0,
+                "blockedRobotTicks": 0,
+            },
             "orderDriven": bool(orders or transfers),
             "robots": robots,
             "tasks": tasks,
@@ -1065,6 +1169,49 @@ class SimulationService:
             "createdAt": now_dt().isoformat(),
             "updatedAt": now_dt().isoformat(),
         }
+        inventory_hash = hashlib.sha256(
+            json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if isinstance(state.get("algorithmExperimentContract"), dict):
+            state["algorithmExperimentContract"]["initialInventoryHash"] = inventory_hash
+            state["algorithmExperimentContract"]["orderSnapshotHash"] = hashlib.sha256(
+                json.dumps(orders or [], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            vehicle_snapshot = [
+                {
+                    "id": robot.get("id"),
+                    "type": robot.get("type"),
+                    "cellId": robot.get("currentCellId"),
+                    "layer": robot.get("currentLayer"),
+                    "capacity": robot.get("capacity"),
+                }
+                for robot in sorted(robots, key=lambda item: str(item.get("id")))
+            ]
+            state["algorithmExperimentContract"]["initialVehicleSnapshotHash"] = hashlib.sha256(
+                json.dumps(
+                    vehicle_snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            state["algorithmExperimentContract"]["scenarioSignature"] = hashlib.sha256(
+                json.dumps(
+                    {
+                        "baseScenarioSignature": state["algorithmExperimentContract"]["scenarioSignature"],
+                        "initialInventoryHash": inventory_hash,
+                        "initialVehicleSnapshotHash": state["algorithmExperimentContract"][
+                            "initialVehicleSnapshotHash"
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            config["algorithmExperimentContract"] = deepcopy(
+                state["algorithmExperimentContract"]
+            )
         metrics = {
             "throughput": 0,
             "completedTasks": 0,
@@ -2805,11 +2952,14 @@ class SimulationService:
 
     async def _loop(self, runtime: RunRuntime) -> None:
         nominal_duration = max(1, int(runtime.config.get("durationTicks", 90)))
-        safety_limit = max(
-            MIN_SAFETY_TICKS,
-            nominal_duration * 20,
-            int(runtime.config.get("maxDurationTicks") or 0),
-        )
+        if runtime.config.get("algorithmExperimentContract") is not None:
+            safety_limit = int(runtime.config["safetyLimitTicks"])
+        else:
+            safety_limit = max(
+                MIN_SAFETY_TICKS,
+                nominal_duration * 20,
+                int(runtime.config.get("maxDurationTicks") or 0),
+            )
         try:
             while runtime.state["tick"] < safety_limit:
                 if runtime.stopped:
@@ -2956,8 +3106,83 @@ class SimulationService:
         multiplier = runtime.speed_multiplier if runtime.speed_multiplier in SUPPORTED_SPEED_MULTIPLIERS else DEFAULT_SPEED_MULTIPLIER
         return TICK_INTERVAL_SECONDS / multiplier
 
+    def _sim_tick_seconds(self, runtime: RunRuntime) -> float:
+        return sim_tick_seconds(runtime.config, TICK_INTERVAL_SECONDS)
+
+    def _physical_movement_ready(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        next_cell_id: str,
+        next_layer: float,
+    ) -> bool:
+        """Accrue one logical tick of distance credit without claiming blockage.
+
+        Occupancy is still checked by the existing scheduler after this returns
+        true. Credit is consumed only after that check succeeds, so waiting at a
+        reserved cell cannot manufacture distance or repeated mileage.
+        """
+
+        speed_contract = runtime.config.get("motionSpeedContract")
+        physics_contract = runtime.config.get("motionPhysicsContract")
+        if not isinstance(speed_contract, dict) or not isinstance(physics_contract, dict):
+            return True
+        _floor, next_row, next_col = parse_cell_id(next_cell_id)
+        edge_key = f"{next_cell_id}@{float(next_layer):.9f}"
+        previous_key = robot.get("motionEdgeKey")
+        if previous_key is not None and previous_key != edge_key:
+            robot["motionCreditMeters"] = 0.0
+        robot["motionEdgeKey"] = edge_key
+        required = edge_distance_meters(
+            physics_contract,
+            int(robot.get("currentRow") or 0),
+            int(robot.get("currentCol") or 0),
+            float(robot.get("currentLayer") or 1),
+            int(next_row),
+            int(next_col),
+            float(next_layer),
+        )
+        robot["motionEdgeRequiredMeters"] = required
+        if required <= EPSILON_METERS:
+            return True
+        tick = int(runtime.state.get("tick") or 0)
+        current_credit = float(robot.get("motionCreditMeters") or 0.0)
+        if current_credit + EPSILON_METERS < required and int(robot.get("motionCreditTick", -1)) != tick:
+            speed = speed_for_edge(
+                speed_contract,
+                str(robot.get("type") or "ctu"),
+                float(robot.get("currentLayer") or 1),
+                float(next_layer),
+            )
+            robot["motionCreditMeters"] = current_credit + speed * self._sim_tick_seconds(runtime)
+            robot["motionCreditTick"] = tick
+        if float(robot.get("motionCreditMeters") or 0.0) + EPSILON_METERS < required:
+            robot["status"] = "moving"
+            robot["physicalTravelWaitTicks"] = int(robot.get("physicalTravelWaitTicks") or 0) + 1
+            counters = runtime.state.setdefault("performanceCounters", {})
+            counters["physicalTravelWaitRobotTicks"] = int(
+                counters.get("physicalTravelWaitRobotTicks") or 0
+            ) + 1
+            return False
+        return True
+
+    def _consume_motion_credit(self, robot: dict[str, Any]) -> None:
+        required = float(robot.get("motionEdgeRequiredMeters") or 0.0)
+        credit = float(robot.get("motionCreditMeters") or 0.0)
+        robot["motionCreditMeters"] = max(0.0, credit - required)
+        robot["motionEdgeKey"] = None
+        robot["motionEdgeRequiredMeters"] = 0.0
+
     def _step_runtime(self, runtime: RunRuntime, *, persist: bool) -> None:
         runtime.state["tick"] += 1
+        runtime.state["simulatedSeconds"] = round(
+            int(runtime.state["tick"]) * self._sim_tick_seconds(runtime),
+            9,
+        )
+        runtime.state["wallClockSeconds"] = round(
+            max(0.0, time.monotonic() - runtime.wall_clock_started_monotonic),
+            6,
+        )
         runtime.state["updatedAt"] = now_dt().isoformat()
         tick = runtime.state["tick"]
         self._begin_deadlock_observation(runtime, tick)
@@ -2966,6 +3191,14 @@ class SimulationService:
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
         self._move_robots(runtime)
+        counters = runtime.state.setdefault("performanceCounters", {})
+        blocked_count = sum(
+            1 for robot in runtime.state.get("robots", []) if robot.get("status") == "blocked"
+        )
+        counters["blockedRobotTicks"] = int(counters.get("blockedRobotTicks") or 0) + blocked_count
+        for robot in runtime.state.get("robots", []):
+            if robot.get("status") == "blocked":
+                robot["blockedWaitTicks"] = int(robot.get("blockedWaitTicks") or 0) + 1
         self._advance_picking_arm(runtime)
         self._advance_picking_arms(runtime)
         self._advance_detached_conveyor_tasks(runtime)
@@ -3161,6 +3394,7 @@ class SimulationService:
                 task["sourceLayer"],
                 extra_blocked=failed_cells,
                 stop_adjacent=True,
+                task_id=task.get("id"),
             ):
                 self._fail_pending_task(runtime, task, "source_unreachable")
                 continue
@@ -3284,6 +3518,9 @@ class SimulationService:
             next_cell_id = path[1]
             next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
             next_stage = path_stages[1] if len(path_stages) > 1 else task.get("phase", "moving")
+            if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
+                robot["phaseLabel"] = task["phaseLabel"]
+                continue
             occupied_cells.discard(current_cell_id)
 
             if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
@@ -3348,6 +3585,7 @@ class SimulationService:
                 continue
 
             motion_from = self._motion_position(runtime, robot)
+            self._consume_motion_credit(robot)
             robot["status"] = "moving"
             robot["lastCellId"] = current_cell_id
             robot["currentCellId"] = next_cell_id
@@ -3409,6 +3647,7 @@ class SimulationService:
         last_cell = robot.get("lastCellId")
         if last_cell and last_cell != target:
             others.add(parse_cell_id(last_cell))
+        diagnostic: dict[str, Any] = {}
         path_cells = shortest_path(
             runtime.topology,
             robot["currentCellId"],
@@ -3416,6 +3655,7 @@ class SimulationService:
             runtime.config["pathPolicy"],
             avoid_storage=True,
             extra_blocked=others,
+            evidence=diagnostic,
         )
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         if task and task.get("phase") == "pickup_from_ctu" and len(path_cells) > 1:
@@ -3425,6 +3665,15 @@ class SimulationService:
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
         robot["targetCellId"] = target
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot["pathLayers"]),
+            "replan",
+            diagnostic,
+        )
         return True
 
     def _reroute_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
@@ -3450,6 +3699,7 @@ class SimulationService:
                 _floor, nr, nc = parse_cell_id(blocker_path[1])
                 others.add((nr, nc, layer))
         others.discard((int(robot["currentRow"]), int(robot["currentCol"]), current_layer))
+        diagnostic: dict[str, Any] = {}
         path3d = shortest_path_shuttle(
             runtime.topology,
             robot["currentCellId"],
@@ -3458,6 +3708,7 @@ class SimulationService:
             goal_layer,
             runtime.config["pathPolicy"],
             extra_blocked=others,
+            evidence=diagnostic,
         )
         if not path3d or len(path3d) <= 1:
             return False
@@ -3468,6 +3719,15 @@ class SimulationService:
         robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
         robot["pathLayers"] = [layer for _, _, layer in path3d]
         robot["pathStages"] = [stage] * len(robot["path"])
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot["pathLayers"]),
+            "replan",
+            diagnostic,
+        )
         return True
 
     def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str], reserved_targets: set[str]) -> bool:
@@ -3477,7 +3737,15 @@ class SimulationService:
         last = robot.get("lastCellId")
         if not last or last == robot["currentCellId"] or last in occupied_cells or last in reserved_targets:
             return False
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            last,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return False
         motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         old_path = robot.get("path") or [robot["currentCellId"]]
         old_layers = robot.get("pathLayers") or [int(robot.get("currentLayer", 1))] * len(old_path)
         floor, row, col = parse_cell_id(last)
@@ -3567,7 +3835,15 @@ class SimulationService:
         )
         if not path_cells or len(path_cells) <= 1:
             return False
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            last,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return False
         motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         occupied_cells.discard(robot["currentCellId"])
         robot["lastCellId"] = robot["currentCellId"]
         robot["currentCellId"] = last
@@ -3652,6 +3928,11 @@ class SimulationService:
 
         current_cell_id = robot["currentCellId"]
         next_cell_id = path[1]
+        path_layers = robot.get("pathLayers") or [1] * len(path)
+        next_layer = path_layers[1] if len(path_layers) > 1 else 1
+        if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
+            robot["phaseLabel"] = "Returning to standby / physical travel"
+            return
         occupied_cells.discard(current_cell_id)
         if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
             occupied_cells.add(current_cell_id)
@@ -3704,8 +3985,7 @@ class SimulationService:
             return
 
         motion_from = self._motion_position(runtime, robot)
-        path_layers = robot.get("pathLayers") or [1] * len(path)
-        next_layer = path_layers[1] if len(path_layers) > 1 else 1
+        self._consume_motion_credit(robot)
         robot["currentCellId"] = next_cell_id
         robot["currentNode"] = next_cell_id
         floor, row, col = parse_cell_id(next_cell_id)
@@ -3774,7 +4054,10 @@ class SimulationService:
         _, yield_cell_id, (_, yield_row, yield_col) = max(candidates, key=lambda item: (item[0], item[1]))
         previous_cell = robot["currentCellId"]
         target_cell = robot.get("targetCellId")
+        if not self._physical_movement_ready(runtime, robot, yield_cell_id, 1.0):
+            return False
         motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         occupied_cells.discard(previous_cell)
         occupied_cells.add(yield_cell_id)
         reserved_targets.add(yield_cell_id)
@@ -5066,7 +5349,9 @@ class SimulationService:
             # 拣货分裂的 fwd/回库子任务与拣货链路同线同速（1 块/tick），
             # 不走机械臂带面的固定慢速；dock 机械臂线保持原带速。
             seconds_per_block = ARM_CONVEYOR_BLOCK_DISTANCE / ARM_CONVEYOR_VISUAL_SPEED
-            progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._tick_delay(runtime)
+            # Conveyor physics advances on logical simulation time. Playback
+            # multiplier only changes wall-clock pacing of the outer loop.
+            progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._sim_tick_seconds(runtime)
             if progress_seconds + 1e-9 < seconds_per_block:
                 transport["travelProgressSeconds"] = progress_seconds
                 return False
@@ -5822,7 +6107,15 @@ class SimulationService:
             return
         if parse_cell_id(back) in build_occupied_lookup(runtime.topology):
             return
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            back,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return
         motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         robot["lastCellId"] = current
         robot["currentCellId"] = back
         robot["currentNode"] = back
@@ -5855,7 +6148,22 @@ class SimulationService:
         robot: dict[str, Any],
         task: dict[str, Any],
     ) -> None:
-        paths, layers, stages = build_playback_route(task["plan"], TICK_INTERVAL_SECONDS)
+        speed_contract = runtime.config.get("motionSpeedContract")
+        physics_contract = runtime.config.get("motionPhysicsContract")
+        paths, layers, stages = build_playback_route(
+            task["plan"],
+            self._sim_tick_seconds(runtime),
+            lift_speed_meters_per_second=(
+                float(speed_contract["liftSpeedMetersPerSecond"])
+                if isinstance(speed_contract, dict)
+                else None
+            ),
+            shuttle_level_height_meters=(
+                float(physics_contract["shuttleLevelHeightMeters"])
+                if isinstance(physics_contract, dict)
+                else None
+            ),
+        )
         if not paths:
             raise ValueError("Transfer plan contains no playback route")
         robot["path"] = paths
@@ -5869,6 +6177,75 @@ class SimulationService:
         task["phase"] = "moving_to_dropoff"
         task["phaseLabel"] = robot["phaseLabel"]
         task["etaTicks"] = max(1, len(paths) - 1)
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            task.get("id"),
+            paths,
+            layers,
+            "plan",
+            {
+                "planningDurationMs": task["plan"].get("planning_time_ms"),
+                "visitedStateCount": task["plan"].get("visited_states"),
+            },
+        )
+
+    def _record_planning_evidence(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task_id: str | None,
+        path: list[str],
+        layers: list[float | int],
+        kind: str,
+        diagnostic: dict[str, Any],
+    ) -> None:
+        if not isinstance(runtime.config.get("algorithmExperimentContract"), dict):
+            return
+        physics = runtime.config.get("motionPhysicsContract") or {}
+        horizontal = 0.0
+        vertical = 0.0
+        for index in range(1, len(path)):
+            _from_floor, from_row, from_col = parse_cell_id(path[index - 1])
+            _to_floor, to_row, to_col = parse_cell_id(path[index])
+            horizontal += (
+                ((to_row - from_row) ** 2 + (to_col - from_col) ** 2) ** 0.5
+                * float(physics.get("metersPerCell") or 0.0)
+            )
+            vertical += abs(float(layers[index]) - float(layers[index - 1])) * float(
+                physics.get("shuttleLevelHeightMeters") or 0.0
+            )
+        sequence = int(runtime.state.get("planningSequence") or 0) + 1
+        runtime.state["planningSequence"] = sequence
+        generation = int(
+            (runtime.state.get(MOTION_DIAGNOSTICS_NAMESPACE) or {}).get("generation") or 1
+        )
+        plan_id = f"{runtime.run_id}:g{generation}:plan:{sequence}"
+        replan_id = f"{runtime.run_id}:g{generation}:replan:{sequence}" if kind == "replan" else None
+        experiment = runtime.config["algorithmExperimentContract"]
+        record = {
+            "planId": plan_id,
+            "replanId": replan_id,
+            "planKind": kind,
+            "algorithm": runtime.config.get("pathPolicy", "astar"),
+            "algorithmVersion": experiment.get("algorithmVersion"),
+            "plannedPath": [
+                {"cellId": cell, "layer": float(layers[index])}
+                for index, cell in enumerate(path)
+            ],
+            "plannedDistanceMeters": round(horizontal, 9),
+            "plannedVerticalMeters": round(vertical, 9),
+            "planningDurationMs": diagnostic.get("planningDurationMs"),
+            "visitedStateCount": diagnostic.get("visitedStateCount"),
+            "taskId": task_id,
+            "robotId": robot.get("id"),
+            "generation": generation,
+            "topologyRevision": experiment.get("topologyRevision"),
+            "tick": int(runtime.state.get("tick") or 0),
+        }
+        runtime.state.setdefault("planningEvidence", []).append(record)
+        robot["activePlanId"] = plan_id
+        robot["activeReplanId"] = replan_id
 
     def _robot_path_to(
         self,
@@ -5879,8 +6256,11 @@ class SimulationService:
         *,
         extra_blocked: set[tuple[str, int, int]] | None = None,
         stop_adjacent: bool = False,
+        task_id: str | None = None,
+        evidence_kind: str = "plan",
     ) -> bool:
         """计算并写入 robot 的 path/pathLayers/target；CTU 走自由网格寻路，四向车走巷道+电梯寻路。"""
+        diagnostic: dict[str, Any] = {}
         if robot["type"] == "shuttle":
             layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
             path3d = shortest_path_shuttle(
@@ -5890,6 +6270,7 @@ class SimulationService:
                 target_cell_id,
                 layer,
                 runtime.config["pathPolicy"],
+                evidence=diagnostic,
             )
             if not path3d:
                 return False
@@ -5909,6 +6290,7 @@ class SimulationService:
                 runtime.config["pathPolicy"],
                 avoid_storage=True,
                 extra_blocked=extra_blocked,
+                evidence=diagnostic,
             )
             if not path_cells:
                 return False
@@ -5918,6 +6300,15 @@ class SimulationService:
             robot["pathLayers"] = [1] * len(robot["path"])
             robot["targetLayer"] = max(1, min(CTU_RACK_LAYERS, int(target_layer or 1)))
         robot["targetCellId"] = target_cell_id
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            task_id or robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot.get("pathLayers") or [1] * len(robot["path"])),
+            evidence_kind,
+            diagnostic,
+        )
         return True
 
     def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> bool:
@@ -5930,6 +6321,7 @@ class SimulationService:
             target_cell_id,
             target_layer,
             stop_adjacent=phase in {"pickup_from_ctu", "return_to_storage"},
+            task_id=task.get("id"),
         ):
             self._fail_active_task(runtime, robot, task, f"{phase}_unreachable")
             return False
