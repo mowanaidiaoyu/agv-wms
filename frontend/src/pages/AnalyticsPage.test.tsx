@@ -457,21 +457,26 @@ afterEach(() => {
 })
 
 describe('algorithm performance analytics M2-5B', () => {
-  it('keeps the friendly no-run state and sends no API request', () => {
+  it('keeps the friendly no-run state and requests only the read-only experiment index', async () => {
     const fetchMock = installFetch()
     renderPage('/simulation/analytics')
     expect(screen.getByText(/尚无选中的 Run/)).toBeInTheDocument()
     expect(screen.queryByText('A. 运行概览')).not.toBeInTheDocument()
     expect(screen.queryByText('动态 ABC 与热度预测')).not.toBeInTheDocument()
     expect(screen.queryByText('动态参数自适应')).not.toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('当前数据库没有实验 Run')).toBeInTheDocument()
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/algorithm-experiments')
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/simulations/'))).toBe(false)
   })
 
-  it('treats a whitespace-only runId as invalid and sends no metrics request', () => {
+  it('treats a whitespace-only runId as invalid and sends no run-scoped metrics request', async () => {
     const fetchMock = installFetch()
     renderPage('/simulation/analytics?runId=%20%20')
     expect(screen.getByText(/尚无选中的 Run/)).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/algorithm-experiments')
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/simulations/'))).toBe(false)
   })
 
   it('does not create real-Run placeholders for unavailable 6.1, 6.2, or 6.8 metrics', async () => {
@@ -526,7 +531,43 @@ describe('algorithm performance analytics M2-5B', () => {
     fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
     const improvementLabel = await screen.findByText('距离改善率')
     expect(improvementLabel.parentElement).toHaveTextContent('20 %')
+    expect(screen.getByText('时间改善率').parentElement).toHaveTextContent('0 %')
     expect(screen.getByText(/SYNTHETIC 波次距离不会进入本表/)).toBeInTheDocument()
+  })
+
+  it('guides the user when only one algorithm experiment Run exists', async () => {
+    installFetch((url) => url.endsWith('/algorithm-experiments')
+      ? new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs: [
+        { runId: 'exp-only', status: 'completed', scenarioId: 's1', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+      ] }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : undefined)
+    renderPage()
+    expect(await screen.findByText('目前只有一个实验 Run')).toBeInTheDocument()
+    expect(screen.getByText(/至少需要两个使用相同场景、但算法不同/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('基线实验Run')).not.toBeInTheDocument()
+  })
+
+  it('preserves incomparable Run evidence but hides formal improvement rates', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'completed', scenarioId: 's1', scenarioVersion: '1', scenarioSignature: 'left', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+      { runId: 'exp-b', status: 'completed', scenarioId: 's2', scenarioVersion: '1', scenarioSignature: 'right', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 11, tick: 22 },
+    ]
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify({
+        contractVersion: 'algorithm-comparison-v1', comparable: false, comparisonReasons: ['SCENARIO_SIGNATURE_MISMATCH'],
+        baseline: { runId: 'exp-a', status: 'completed', pathPolicy: 'astar', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 10, ctuHorizontalMeters: 10, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 10, planningDurationMs: 2, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true, experimentContract: { scenarioSignature: 'left', topologyRevision: 'rev-a' } },
+        candidate: { runId: 'exp-b', status: 'completed', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 8, ctuHorizontalMeters: 8, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 11, planningDurationMs: 3, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true, experimentContract: { scenarioSignature: 'right', topologyRevision: 'rev-b' } },
+        distanceSavedMeters: null, distanceImprovementPercent: null, simulatedSecondsSaved: null, simulatedTimeImprovementPercent: null, planningDurationSavedMs: null, planningTimeImprovementPercent: null, blockedRobotTicksChange: null,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('基线实验Run'), { target: { value: 'exp-a' } })
+    fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
+    expect(await screen.findByText(/不可正式比较：SCENARIO_SIGNATURE_MISMATCH/)).toBeInTheDocument()
+    expect(screen.getByText('场景签名').parentElement).toHaveTextContent('不一致')
+    expect(screen.queryByText('距离改善率')).not.toBeInTheDocument()
   })
 
   it('shows valid real metrics, preserves true zero, and does not multiply percentages', async () => {
@@ -714,14 +755,31 @@ describe('algorithm performance analytics M2-5B', () => {
     const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
     expect(within(section).getByText('CTU 总水平行驶距离').parentElement).toHaveTextContent('4.000 m')
     expect(within(section).getByText('Shuttle 总水平行驶距离').parentElement).toHaveTextContent('4.800 m')
-    expect(within(section).getByText('Shuttle Lift 垂直位移').parentElement).toHaveTextContent('3.000 m')
+    expect(within(section).getByText('Lift 垂直位移').parentElement).toHaveTextContent('3.000 m')
+    expect(within(section).getByText('有效 Lift 运动段').parentElement).toHaveTextContent('1')
     const movementTypes = section.querySelector('.analytics-motion-types') as HTMLElement
     expect(within(movementTypes).getByText('主动让行').parentElement).toHaveTextContent('0.800 m')
     expect(within(movementTypes).getByText('回退').parentElement).toHaveTextContent('0.800 m')
     expect(within(movementTypes).getByText('返回待命').parentElement).toHaveTextContent('1.600 m')
     expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/0.800 m/)
     expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/用户定义模拟参数\s*是/)
-    expect(within(section).getByText(/Lift 数值是垂直运输位移/)).toBeInTheDocument()
+    expect(within(section).getByText(/Lift 位移是垂直运输证据/)).toBeInTheDocument()
+  })
+
+  it('does not invent zero vertical distance when no valid Lift segment exists', async () => {
+    installFetch((url, payload) => {
+      if (!url.includes('/metrics/motion-distance')) return undefined
+      const changed = structuredClone(payload) as ReturnType<typeof responses>['/metrics/motion-distance']
+      changed.totalMetrics.shuttleLiftVerticalMeters.value = 0
+      changed.totalMetrics.shuttleLiftVerticalMeters.sampleCount = 0
+      changed.movementTypeMetrics.LIFT = { ...changed.movementTypeMetrics.LIFT, movementCount: 0, verticalMeters: 0 }
+      return new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    renderPage()
+    const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
+    expect(within(section).getByText('当前Run未记录有效Lift垂直运输段。')).toBeInTheDocument()
+    expect(within(section).queryByText('Lift 垂直位移')).not.toBeInTheDocument()
+    expect(within(section).queryByText('0.000 m', { selector: '.analytics-vertical-transport *' })).not.toBeInTheDocument()
   })
 
   it('keeps 6.6 visible from mileage when planning has zero samples and renders backend-ranked vehicles', async () => {
@@ -735,7 +793,7 @@ describe('algorithm performance analytics M2-5B', () => {
     })
     renderPage()
     const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
-    expect(within(section).queryByText('D. 规划诊断')).not.toBeInTheDocument()
+    expect(within(section).queryByText('E. 规划诊断')).not.toBeInTheDocument()
     expect(within(section).getByText('ctu-01')).toBeInTheDocument()
     expect(within(section).getByText('shuttle-01')).toBeInTheDocument()
   })
@@ -761,7 +819,7 @@ describe('algorithm performance analytics M2-5B', () => {
     renderPage()
     const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
     expect(within(section).getByText(/车辆实际里程指标读取失败：motion metrics unavailable/)).toBeInTheDocument()
-    expect(within(section).getByText('D. 规划诊断')).toBeInTheDocument()
+    expect(within(section).getByText('E. 规划诊断')).toBeInTheDocument()
     expect(within(section).queryByText('CTU 总水平行驶距离')).not.toBeInTheDocument()
   })
 
@@ -884,24 +942,24 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(screen.queryByText(/正式指标缺口|尚不可计算|未实现的正式指标/)).not.toBeInTheDocument()
   })
 
-  it('opens synthetic experiments without a runId and loads exactly three static JSON files by GET', async () => {
+  it('opens synthetic experiments without a runId and loads three static JSON files plus the read-only experiment index', async () => {
     const fetchMock = installFetch()
     renderPage('/simulation/analytics')
-    expect(fetchMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('button', { name: '模拟算法实验' }))
     expect(await screen.findByText('SYNTHETIC 模拟数据')).toBeInTheDocument()
     expect(screen.getAllByText('analytics-synthetic-v1').length).toBeGreaterThan(0)
     expect(screen.getAllByText('seed=42').length).toBeGreaterThan(0)
     expect(screen.getByText(/不属于真实 Run/)).toBeInTheDocument()
     expect(screen.getByText(/不能用于正式验收/)).toBeInTheDocument()
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
     const calls = fetchMock.mock.calls
     expect(calls.map(([input]) => String(input))).toEqual(expect.arrayContaining([
       '/analytics-synthetic-v1/abc_heat_seed42.json',
       '/analytics-synthetic-v1/wave_optimization_seed42.json',
       '/analytics-synthetic-v1/eta_prediction_seed42.json',
     ]))
-    expect(calls.every(([, init]) => init?.method === 'GET')).toBe(true)
+    expect(calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
     expect(calls.some(([input]) => String(input).includes('/simulations/'))).toBe(false)
   })
 
@@ -1051,7 +1109,7 @@ describe('algorithm performance analytics M2-5B', () => {
     renderPage('/simulation/analytics')
     fireEvent.click(screen.getByRole('button', { name: '模拟算法实验' }))
     expect(await screen.findByText(/实验 JSON 元数据或质量状态不符合/)).toBeInTheDocument()
-    expect(fetchMock.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true)
+    expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
     const urls = fetchMock.mock.calls.map(([input]) => String(input))
     expect(urls.some((url) => /\/start|\/pause|\/reset|\/state/.test(url))).toBe(false)
   })

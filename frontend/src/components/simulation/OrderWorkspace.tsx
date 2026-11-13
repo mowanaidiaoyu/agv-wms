@@ -196,6 +196,8 @@ function nextOrderId() {
 
 export function OrderComposer({
   open,
+  runActive = false,
+  onOpenRunConfig,
   catalog,
   catalogError = '',
   onRetryCatalog,
@@ -203,6 +205,8 @@ export function OrderComposer({
   onSubmit,
 }: {
   open: boolean
+  runActive?: boolean
+  onOpenRunConfig?: () => void
   catalog: GoodsCatalogSku[]
   catalogError?: string
   onRetryCatalog?: () => void
@@ -366,11 +370,18 @@ export function OrderComposer({
       <div className="simulation-order-composer-header">
         <div>
           <strong>新建仿真订单</strong>
-          <span>订单提交后将直接进入当前仿真队列</span>
+          <span>{runActive ? '订单提交后将立即插入当前 Run' : '订单将暂存，待下一次 Run 启动时提交'}</span>
         </div>
         <button type="button" onClick={onClose} aria-label="关闭新建订单"><X size={18} /></button>
       </div>
       <div className="simulation-order-composer-body">
+        {onOpenRunConfig ? <details className="simulation-order-run-settings">
+          <summary>本次仿真运行设置</summary>
+          <div>
+            <span>{runActive ? '当前 Run 的米制、速度与算法合同已经冻结；添加订单不会修改这些配置。' : '米制、速度、路径算法和实验合同属于 Run 级配置，不会写入订单对象。'}</span>
+            <button type="button" onClick={onOpenRunConfig}>{runActive ? '查看冻结配置' : '打开运行配置'}</button>
+          </div>
+        </details> : null}
         <section>
           <h3>快速模板</h3>
           <div className="simulation-order-templates">
@@ -454,7 +465,7 @@ export function OrderComposer({
         预计拆单：四向车 {draftSplit.shuttle} 个整箱任务 · CTU {draftSplit.ctu} 个尾箱任务；没有四向车任务的订单不会启动四向车。
       </p>
       <div className="simulation-order-composer-footer">
-        <span>{lines.length} 种SKU · {draftPieces} 件 · {dispatchModeLabels[dispatchMode]}</span>
+        <span>{lines.length} 种SKU · {draftPieces} 件 · {dispatchModeLabels[dispatchMode]} · {runActive ? '立即插入当前Run' : '待下次Run启动'}</span>
         <button className="accent-button" type="button" onClick={() => void submit()} disabled={!lines.length || submitting}>
           {submitting ? '提交中…' : '提交订单'}
         </button>

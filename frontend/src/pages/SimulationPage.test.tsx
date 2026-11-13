@@ -921,6 +921,22 @@ describe('SimulationPage', () => {
     expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
   })
 
+  it('keeps the next-Run draft when the shared run configuration drawer closes', async () => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    const summary = screen.getByLabelText('当前Run冻结配置摘要')
+    expect(within(summary).getAllByText('未冻结')).toHaveLength(4)
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(document.querySelector('.simulation-run-config-drawer')).toHaveClass('open')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value: '1.1' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭运行配置' }))
+    expect(document.querySelector('.simulation-run-config-drawer')).not.toHaveClass('open')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(screen.getByLabelText('每格水平长度')).toHaveValue(1.1)
+    expect(within(summary).queryByText(/1.1 m\/格/)).not.toBeInTheDocument()
+  })
+
   it('sends the complete user-defined physics contract and displays the frozen Run values', async () => {
     const frozen = {
       physicsContractVersion: 'motion-physics-v1',
@@ -948,9 +964,9 @@ describe('SimulationPage', () => {
       undefined,
       undefined,
     ))
-    expect(await screen.findByText(/0.8 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
+    expect(await screen.findByText(/冻结值：0.8 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
     expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
-    expect(screen.getByText(/仅在新建 Run 时提交；不会改写当前或历史 Run/)).toBeInTheDocument()
+    expect(screen.getByText(/冻结合同不会被添加订单或播放倍率修改/)).toBeInTheDocument()
   })
 
   it('freezes vehicle speed separately from playback and sends the experiment selection', async () => {
@@ -986,8 +1002,31 @@ describe('SimulationPage', () => {
     const call = vi.mocked(api.startSimulation).mock.calls.at(-1)
     expect(call?.[4]).toEqual(speed)
     expect(call?.[5]).toBeUndefined()
-    expect(await screen.findByText(/速度合同：CTU 1 m\/s/)).toBeInTheDocument()
+    expect(await screen.findByText(/冻结速度：CTU 1 m\/s/)).toBeInTheDocument()
     expect(screen.queryByText(/播放倍率不代表车辆 m\/s/)).not.toBeInTheDocument()
+  })
+
+  it('uses the algorithm selection cards only for the next Run experiment contract', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-algorithm', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-algorithm'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByLabelText('将下次 Run 标记为可复现实验'))
+    fireEvent.click(within(screen.getByRole('group', { name: '路径算法' })).getByRole('button', { name: /Dijkstra/ }))
+    fireEvent.click(within(screen.getByRole('group', { name: '分配算法' })).getByRole('button', { name: /Hungarian/ }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).toMatchObject({
+      scenarioId: 'p5-comparison-01',
+      topologyRevision: '2.0.0:test',
+      pathPolicy: 'dijkstra',
+      assignmentPolicy: 'hungarian',
+      variableDimension: 'pathPolicy',
+    })
   })
 
   it.each(['0', '-0.1', ''])('blocks Run creation for invalid metersPerCell %s', async (value) => {
@@ -1008,8 +1047,9 @@ describe('SimulationPage', () => {
 
     renderSimulationPage()
 
-    expect(await screen.findByText('当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效')).toBeInTheDocument()
-    expect(screen.getByText('下一次启动配置（草稿）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(await screen.findByText('当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。')).toBeInTheDocument()
+    expect(screen.getAllByText('历史 Run：只能查看历史冻结配置')).toHaveLength(2)
   })
 
   it('reports a backend contract-loss error instead of claiming the new Run is metric-enabled', async () => {
@@ -1021,6 +1061,6 @@ describe('SimulationPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '启动' }))
 
     expect(await screen.findByText(/当前后端未冻结已提交的米制合同/)).toBeInTheDocument()
-    expect(screen.getByText('当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效')).toBeInTheDocument()
+    expect(screen.getByText('当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。')).toBeInTheDocument()
   })
 })

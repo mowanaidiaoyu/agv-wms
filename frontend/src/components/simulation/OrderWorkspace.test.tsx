@@ -9,6 +9,18 @@ const catalog: GoodsCatalogSku[] = [
 ]
 
 describe('OrderComposer', () => {
+  it('opens the shared Run settings without owning a second configuration state', () => {
+    const onOpenRunConfig = vi.fn()
+    const { rerender } = render(<OrderComposer open catalog={catalog} runActive={false} onOpenRunConfig={onOpenRunConfig} onClose={vi.fn()} onSubmit={vi.fn()} />)
+    expect(screen.getByText(/待下一次 Run 启动时提交/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('本次仿真运行设置'))
+    fireEvent.click(screen.getByRole('button', { name: '打开运行配置' }))
+    expect(onOpenRunConfig).toHaveBeenCalledOnce()
+    rerender(<OrderComposer open catalog={catalog} runActive onOpenRunConfig={onOpenRunConfig} onClose={vi.fn()} onSubmit={vi.fn()} />)
+    expect(screen.getByText(/立即插入当前 Run/)).toBeInTheDocument()
+    expect(screen.getByText(/添加订单不会修改这些配置/)).toBeInTheDocument()
+  })
+
   it('adds the selected SKU, updates totals, and submits it to the queue callback', () => {
     const onSubmit = vi.fn()
     render(<OrderComposer open catalog={catalog} onClose={vi.fn()} onSubmit={onSubmit} />)

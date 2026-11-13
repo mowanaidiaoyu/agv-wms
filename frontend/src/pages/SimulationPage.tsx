@@ -14,6 +14,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Settings2,
   Square,
   X,
   Zap,
@@ -141,6 +142,7 @@ export function SimulationPage() {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
+  const [runConfigOpen, setRunConfigOpen] = useState(false)
   const [ordersCollapsed, setOrdersCollapsed] = useState(false)
   const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
   const [removingOrderId, setRemovingOrderId] = useState('')
@@ -567,6 +569,16 @@ export function SimulationPage() {
   const isRunActive = ['running', 'paused'].includes(currentState?.status ?? '')
   const frozenMotionPhysicsContract = currentState?.motionPhysicsContract
   const frozenMotionSpeedContract = currentState?.motionSpeedContract
+  const frozenAlgorithmContract = currentState?.algorithmExperimentContract
+  const runConfigReadOnly = Boolean(selectedRunId && currentState)
+  const configScopeLabel = !runConfigReadOnly
+    ? '下次新 Run：可编辑草稿'
+    : isRunActive
+      ? '当前运行中 Run：只能查看冻结配置'
+      : '历史 Run：只能查看历史冻结配置'
+  const displayedPhysicsEnabled = runConfigReadOnly ? Boolean(frozenMotionPhysicsContract) : motionPhysicsEnabled
+  const displayedSpeedEnabled = runConfigReadOnly ? Boolean(frozenMotionSpeedContract) : motionSpeedEnabled
+  const displayedExperimentEnabled = runConfigReadOnly ? Boolean(frozenAlgorithmContract) : algorithmExperimentEnabled
   const sceneTasks = useMemo(() => workspaceTab === 'orders'
     ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
     : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
@@ -703,106 +715,53 @@ export function SimulationPage() {
         </div>
       </header>
 
-      <section className="simulation-physics-panel" aria-labelledby="motion-physics-title">
-        <div className="simulation-physics-heading">
-          <strong id="motion-physics-title">下一次启动配置（草稿）</strong>
-          <span>仅在新建 Run 时提交；不会改写当前或历史 Run。用户自定义值不代表正式 CAD 标定。</span>
-        </div>
-        <label className="simulation-physics-toggle">
-          <input
-            type="checkbox"
-            checked={motionPhysicsEnabled}
-            disabled={isRunActive}
-            onChange={(event) => setMotionPhysicsEnabled(event.target.checked)}
-          />
-          下次新建 Run 启用米制模拟
-        </label>
-        <label>
-          <span>每格水平长度</span>
-          <input
-            aria-label="每格水平长度"
-            type="number"
-            min="0"
-            step="0.1"
-            value={motionPhysicsDraft.metersPerCell}
-            disabled={!motionPhysicsEnabled || isRunActive}
-            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, metersPerCell: event.target.value }))}
-          />
-          <small>m/格</small>
-        </label>
-        <label>
-          <span>Shuttle 层高</span>
-          <input
-            aria-label="Shuttle层高"
-            type="number"
-            min="0"
-            step="0.1"
-            value={motionPhysicsDraft.shuttleLevelHeightMeters}
-            disabled={!motionPhysicsEnabled || isRunActive}
-            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, shuttleLevelHeightMeters: event.target.value }))}
-          />
-          <small>m/层</small>
-        </label>
-        <label>
-          <span>仓库楼层高度</span>
-          <input
-            aria-label="仓库楼层高度"
-            type="number"
-            min="0"
-            step="0.1"
-            value={motionPhysicsDraft.floorHeightMeters}
-            disabled={!motionPhysicsEnabled || isRunActive}
-            onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, floorHeightMeters: event.target.value }))}
-          />
-          <small>m/层</small>
-        </label>
-        <div className="simulation-physics-heading simulation-speed-heading">
-          <strong>车辆速度模拟参数</strong>
-          <span>物理速度决定车辆在逻辑 Tick 中的真实推进；1×/2×/4×仅改变墙钟播放快慢。</span>
-        </div>
-        <label className="simulation-physics-toggle">
-          <input type="checkbox" checked={motionSpeedEnabled} disabled={isRunActive} onChange={(event) => setMotionSpeedEnabled(event.target.checked)} />
-          下次新建 Run 启用物理速度模拟
-        </label>
-        {([
-          ['CTU速度', 'ctuSpeedMetersPerSecond', 'm/s'],
-          ['Shuttle速度', 'shuttleSpeedMetersPerSecond', 'm/s'],
-          ['Lift速度', 'liftSpeedMetersPerSecond', 'm/s'],
-          ['仿真时间步长', 'simTickSeconds', 's/Tick'],
-        ] as const).map(([label, key, unit]) => (
-          <label key={key}>
-            <span>{label}</span>
-            <input aria-label={label} type="number" min="0" step="0.1" value={motionSpeedDraft[key]} disabled={!motionSpeedEnabled || isRunActive} onChange={(event) => setMotionSpeedDraft((value) => ({ ...value, [key]: event.target.value }))} />
-            <small>{unit}</small>
-          </label>
-        ))}
-        <div className="simulation-physics-heading simulation-speed-heading">
-          <strong>算法实验合同</strong>
-          <span>固定场景、库存、订单、米制、速度与安全上限；每组仅改变声明的算法维度。</span>
-        </div>
-        <label className="simulation-physics-toggle">
-          <input type="checkbox" checked={algorithmExperimentEnabled} disabled={isRunActive} onChange={(event) => setAlgorithmExperimentEnabled(event.target.checked)} />
-          将下次 Run 标记为可复现实验
-        </label>
-        <label><span>scenarioId</span><input value={experimentScenarioId} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentScenarioId(event.target.value)} /></label>
-        <label><span>路径算法</span><select value={experimentPathPolicy} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentPathPolicy(event.target.value as 'astar' | 'dijkstra')}><option value="astar">A*</option><option value="dijkstra">Dijkstra</option></select></label>
-        <label><span>分配算法</span><select value={experimentAssignmentPolicy} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentAssignmentPolicy(event.target.value as 'greedy' | 'hungarian')}><option value="greedy">Greedy</option><option value="hungarian">Hungarian</option></select></label>
-        <label><span>本组唯一变量</span><select value={experimentVariableDimension} disabled={!algorithmExperimentEnabled || isRunActive} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
-        {selectedRunId && currentState ? (
-          <div className="simulation-physics-frozen" data-run-id={currentState.id}>
-            <span>当前 Run 已冻结的物理配置</span>
-            {frozenMotionPhysicsContract ? (
-              <strong>
-                {frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle {frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 {frozenMotionPhysicsContract.floorHeightMeters} m/层
-              </strong>
-            ) : <strong>当前 Run 未采用米制合同；左侧草稿仅对下一次新建 Run 生效</strong>}
-            {frozenMotionSpeedContract ? (
-              <strong>速度合同：CTU {frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s · Shuttle {frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s · Lift {frozenMotionSpeedContract.liftSpeedMetersPerSecond} m/s · {frozenMotionSpeedContract.simTickSeconds} s/Tick</strong>
-            ) : <strong>当前 Run 未启用物理速度合同；播放倍率不代表车辆 m/s。</strong>}
-            {currentState.algorithmExperimentContract ? <strong>实验：{currentState.algorithmExperimentContract.scenarioId} · {currentState.algorithmExperimentContract.pathPolicy.toUpperCase()} · {currentState.algorithmExperimentContract.assignmentPolicy}</strong> : null}
-          </div>
-        ) : null}
+      <section className="simulation-config-summary" aria-label="当前Run冻结配置摘要">
+        <div><span>米制比例</span><strong>{frozenMotionPhysicsContract ? `${frozenMotionPhysicsContract.metersPerCell} m/格` : '未冻结'}</strong></div>
+        <div><span>CTU 速度</span><strong>{frozenMotionSpeedContract ? `${frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s` : '未冻结'}</strong></div>
+        <div><span>Shuttle 速度</span><strong>{frozenMotionSpeedContract ? `${frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s` : '未冻结'}</strong></div>
+        <div><span>路径算法</span><strong>{frozenAlgorithmContract ? frozenAlgorithmContract.pathPolicy.toUpperCase() : '未冻结'}</strong></div>
+        <small>{selectedRunId ? '以上为当前所选 Run 的真实冻结值' : '尚无当前 Run；草稿请在运行配置中查看'}</small>
+        <button className="ghost-button" type="button" onClick={() => setRunConfigOpen(true)} aria-expanded={runConfigOpen}><Settings2 size={16} />运行配置</button>
       </section>
+
+      <aside className={`simulation-run-config-drawer ${runConfigOpen ? 'open' : ''}`} aria-hidden={!runConfigOpen} aria-label="运行配置">
+        <div className="simulation-run-config-header">
+          <div><strong>运行配置</strong><span>{configScopeLabel}</span></div>
+          <button type="button" onClick={() => setRunConfigOpen(false)} aria-label="关闭运行配置"><X size={18} /></button>
+        </div>
+        <div className="simulation-run-config-body">
+          <div className={`simulation-config-scope ${runConfigReadOnly ? 'is-frozen' : ''}`}><b>{configScopeLabel}</b><span>{runConfigReadOnly ? '冻结合同不会被添加订单或播放倍率修改。' : '关闭抽屉不会丢失草稿；仅在启动新 Run 时提交。'}</span></div>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>A</span><div><strong>物理尺寸设置</strong><small>用户定义模拟参数，不代表正式 CAD 标定</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="下次新建 Run 启用米制模拟" type="checkbox" checked={displayedPhysicsEnabled} disabled={runConfigReadOnly} onChange={(event) => setMotionPhysicsEnabled(event.target.checked)} />启用米制模拟</label>
+            <div className="simulation-config-fields">
+              {([['每格水平长度', 'metersPerCell', 'm/格'], ['Shuttle层高', 'shuttleLevelHeightMeters', 'm/层'], ['仓库楼层高度', 'floorHeightMeters', 'm/层']] as const).map(([label, key, unit]) => <label key={key}><span>{label}</span><div><input aria-label={label} type="number" min="0" step="0.1" value={runConfigReadOnly ? frozenMotionPhysicsContract?.[key] ?? '' : motionPhysicsDraft[key]} disabled={!displayedPhysicsEnabled || runConfigReadOnly} onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, [key]: event.target.value }))} /><small>{unit}</small></div></label>)}
+            </div>
+            {runConfigReadOnly ? <p className="simulation-config-contract-note">{frozenMotionPhysicsContract ? `冻结值：${frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle ${frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 ${frozenMotionPhysicsContract.floorHeightMeters} m/层` : '当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。'}</p> : null}
+          </section>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>B</span><div><strong>车辆速度设置</strong><small>物理推进独立于 1× / 2× / 4× 播放倍率</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="下次新建 Run 启用物理速度模拟" type="checkbox" checked={displayedSpeedEnabled} disabled={runConfigReadOnly} onChange={(event) => setMotionSpeedEnabled(event.target.checked)} />启用物理速度模拟</label>
+            <div className="simulation-config-fields simulation-speed-fields">
+              {([['CTU速度', 'ctuSpeedMetersPerSecond', 'm/s'], ['Shuttle速度', 'shuttleSpeedMetersPerSecond', 'm/s'], ['Lift速度', 'liftSpeedMetersPerSecond', 'm/s'], ['仿真时间步长', 'simTickSeconds', 's/Tick']] as const).map(([label, key, unit]) => <label key={key}><span>{label}</span><div><input aria-label={label} type="number" min="0" step="0.1" value={runConfigReadOnly ? frozenMotionSpeedContract?.[key] ?? '' : motionSpeedDraft[key]} disabled={!displayedSpeedEnabled || runConfigReadOnly} onChange={(event) => setMotionSpeedDraft((value) => ({ ...value, [key]: event.target.value }))} /><small>{unit}</small></div></label>)}
+            </div>
+            {runConfigReadOnly ? <p className="simulation-config-contract-note">{frozenMotionSpeedContract ? `冻结速度：CTU ${frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s · Shuttle ${frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s · Lift ${frozenMotionSpeedContract.liftSpeedMetersPerSecond} m/s · ${frozenMotionSpeedContract.simTickSeconds} s/Tick` : '当前 Run 未启用物理速度合同；播放倍率不代表车辆 m/s。'}</p> : null}
+          </section>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>C</span><div><strong>算法实验设置</strong><small>这里选择的是下一次 Run 使用的算法，不是算法效果对比结果。</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="将下次 Run 标记为可复现实验" type="checkbox" checked={displayedExperimentEnabled} disabled={runConfigReadOnly} onChange={(event) => setAlgorithmExperimentEnabled(event.target.checked)} />标记为可复现实验</label>
+            <label className="simulation-config-text-field"><span>scenarioId</span><input value={runConfigReadOnly ? frozenAlgorithmContract?.scenarioId ?? '' : experimentScenarioId} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentScenarioId(event.target.value)} /></label>
+            <fieldset className="simulation-algorithm-fieldset" disabled={!displayedExperimentEnabled || runConfigReadOnly}><legend>路径算法</legend><div className="simulation-algorithm-cards">
+              {([['astar', 'A*', '启发式搜索，通常访问更少状态'], ['dijkstra', 'Dijkstra', '无启发式的最短路径基线']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.pathPolicy : experimentPathPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentPathPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
+            </div></fieldset>
+            <fieldset className="simulation-algorithm-fieldset" disabled={!displayedExperimentEnabled || runConfigReadOnly}><legend>分配算法</legend><div className="simulation-algorithm-cards">
+              {([['greedy', 'Greedy', '逐任务选择当前最优车辆'], ['hungarian', 'Hungarian', '批量求解全局匹配成本']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.assignmentPolicy : experimentAssignmentPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentAssignmentPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
+            </div></fieldset>
+            <label className="simulation-config-text-field"><span>本组唯一变量</span><select value={runConfigReadOnly ? frozenAlgorithmContract?.variableDimension ?? experimentVariableDimension : experimentVariableDimension} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
+          </section>
+        </div>
+        <div className="simulation-run-config-footer"><span>{runConfigReadOnly ? '只读冻结配置' : '草稿已保留在当前页面'}</span><button type="button" className="accent-button" onClick={() => setRunConfigOpen(false)}>完成</button></div>
+      </aside>
 
       <main className={`simulation-scene-stage ${workspaceTab === 'orders' && ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
         <div className="simulation-workspace-tabs" role="navigation" aria-label="工作台功能">
@@ -1255,6 +1214,11 @@ export function SimulationPage() {
         ) : null}
         <OrderComposer
           open={orderComposerOpen}
+          runActive={isRunActive}
+          onOpenRunConfig={() => {
+            setOrderComposerOpen(false)
+            setRunConfigOpen(true)
+          }}
           catalog={catalogQuery.data?.skus ?? []}
           catalogError={catalogQuery.isError
             ? (catalogQuery.error instanceof Error ? catalogQuery.error.message : '未知错误')

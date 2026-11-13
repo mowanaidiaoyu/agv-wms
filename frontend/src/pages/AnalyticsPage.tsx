@@ -528,7 +528,31 @@ function SyntheticAnalyticsView() {
   )
 }
 
-function AlgorithmComparisonPanel() {
+function ComparisonBars({
+  title,
+  baselineLabel,
+  candidateLabel,
+  baseline,
+  candidate,
+  unit,
+}: {
+  title: string
+  baselineLabel: string
+  candidateLabel: string
+  baseline: number | null
+  candidate: number | null
+  unit: string
+}) {
+  const maximum = Math.max(baseline ?? 0, candidate ?? 0)
+  const row = (label: string, value: number | null, tone: string) => <div className="analytics-compare-bar-row">
+    <span>{label}</span>
+    <div><i className={tone} style={{ width: value === null || maximum <= 0 ? '0%' : `${Math.max(1, value / maximum * 100)}%` }} /></div>
+    <b>{value === null ? '—' : `${formatNumber(value, 3)} ${unit}`}</b>
+  </div>
+  return <div className="analytics-compare-chart"><h4>{title}</h4>{row(baselineLabel, baseline, 'baseline')}{row(candidateLabel, candidate, 'candidate')}</div>
+}
+
+function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: () => void }) {
   const [baselineRunId, setBaselineRunId] = useState('')
   const [candidateRunId, setCandidateRunId] = useState('')
   const runsQuery = useQuery({
@@ -548,16 +572,38 @@ function AlgorithmComparisonPanel() {
   const formatAlgorithm = (run: AlgorithmExperimentRunSummary) => (
     `${run.runId} · ${run.pathPolicy.toUpperCase()} / ${run.assignmentPolicy}`
   )
+  const visitedStates = (item: AlgorithmComparisonResult['baseline']) => (
+    item.planningEvidence?.reduce((total, evidence) => total + (hasNumericValue(evidence.visitedStateCount) ? evidence.visitedStateCount : 0), 0) ?? 0
+  )
+  const baselineContract = result?.baseline.experimentContract
+  const candidateContract = result?.candidate.experimentContract
+  const signatureState = !baselineContract?.scenarioSignature || !candidateContract?.scenarioSignature
+    ? '未提供'
+    : baselineContract.scenarioSignature === candidateContract.scenarioSignature ? '一致' : '不一致'
+  const topologyState = !baselineContract?.topologyRevision || !candidateContract?.topologyRevision
+    ? '未提供'
+    : baselineContract.topologyRevision === candidateContract.topologyRevision ? '一致' : '不一致'
   return <section className="analytics-module analytics-module-wide analytics-algorithm-comparison" id="algorithm-comparison">
-    <div className="analytics-module-top"><div><span className="analytics-module-no">P5</span><h3>算法对比实验</h3></div><span className="analytics-state analytics-state-partial">真实隔离 Run</span></div>
-    <p className="analytics-data-note">后端仅在场景签名、工作量、终态和里程证据一致时计算改善率；SYNTHETIC 波次距离不会进入本表。</p>
+    <div className="analytics-module-top"><div><span className="analytics-module-no">P5</span><h3>算法对比</h3></div><span className="analytics-state analytics-state-partial">真实隔离 Run</span></div>
+    <div className="analytics-experiment-guide" aria-label="A/B实验步骤"><span><b>1</b>运行 A*</span><i /><span><b>2</b>运行 Dijkstra</span><i /><span><b>3</b>查看真实结果</span></div>
+    <p className="analytics-data-note">后端仅在场景签名、工作量、终态和里程证据一致时计算改善率；SYNTHETIC 波次距离不会进入本表，不同数据库中的 Run 也不会被自动拼接。</p>
     {runsQuery.isError ? <QueryError name="算法实验Run列表" error={runsQuery.error} retry={() => { void runsQuery.refetch() }} /> : null}
-    {runs.length ? <div className="analytics-comparison-selectors">
+    {!runsQuery.isPending && runs.length === 0 ? <div className="analytics-comparison-empty"><Info size={18} /><div><strong>当前数据库没有实验 Run</strong><span>请在运行配置中标记可复现实验，使用相同场景分别运行 A* 与 Dijkstra。</span></div><button type="button" onClick={onCreateExperiment}>新建实验</button></div> : null}
+    {runs.length === 1 ? <div className="analytics-comparison-empty"><Info size={18} /><div><strong>目前只有一个实验 Run</strong><span>至少需要两个使用相同场景、但算法不同的终态 Run。已有：{formatAlgorithm(runs[0])}</span></div><button type="button" onClick={onCreateExperiment}>创建第二个实验</button></div> : null}
+    {runs.length >= 2 ? <><h4 className="analytics-subhead">1. 实验选择</h4><div className="analytics-comparison-selectors">
       <label>基线 Run<select aria-label="基线实验Run" value={baselineRunId} onChange={(event) => setBaselineRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
       <label>候选 Run<select aria-label="候选实验Run" value={candidateRunId} onChange={(event) => setCandidateRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
-    </div> : <p className="analytics-data-note">当前数据库没有带版本化实验合同的 Run，本模块不生成虚构结果。</p>}
+    </div></> : null}
     {comparisonQuery.isError ? <QueryError name="算法实验对比" error={comparisonQuery.error} retry={() => { void comparisonQuery.refetch() }} /> : null}
     {result ? <>
+      <h4 className="analytics-subhead">2. 场景可比性</h4>
+      <div className="analytics-comparability-grid">
+        <span>场景签名<b>{signatureState}</b><small>{baselineContract?.scenarioSignature?.slice(0, 12) ?? '未提供'}</small></span>
+        <span>拓扑 Revision<b>{topologyState}</b><small>{baselineContract?.topologyRevision ?? '未提供'}</small></span>
+        <span>任务完成范围<b>{result.baseline.completedTaskCount}/{result.baseline.totalTaskCount} · {result.candidate.completedTaskCount}/{result.candidate.totalTaskCount}</b><small>基线 · 候选</small></span>
+        <span>米制与速度合同<b>{result.comparable ? '签名校验通过' : '需核对'}</b><small>由后端场景签名约束</small></span>
+        <span>数据质量<b>{result.baseline.dataComplete && result.candidate.dataComplete ? '完整' : '不完整'}</b><small>{result.baseline.motionDataQuality ?? '—'} · {result.candidate.motionDataQuality ?? '—'}</small></span>
+      </div>
       <div className="analytics-comparison-grid">
         {[result.baseline, result.candidate].map((item, index) => <div key={item.runId} className="analytics-comparison-run">
           <strong>{index === 0 ? '基线' : '候选'} · {item.pathPolicy.toUpperCase()} / {item.assignmentPolicy}</strong>
@@ -568,13 +614,36 @@ function AlgorithmComparisonPanel() {
           <span>阻塞 {item.blockedRobotTicks} robot·Tick · 持续循环 {item.persistentCycleEpisodeCount ?? '—'}</span>
         </div>)}
       </div>
-      {result.comparable ? <div className="analytics-mini-grid">
-        <MiniValue label="节省水平里程" value={result.distanceSavedMeters} suffix="m" />
-        <MiniValue label="距离改善率" value={result.distanceImprovementPercent} suffix="%" />
-        <MiniValue label="模拟时间改善率" value={result.simulatedTimeImprovementPercent} suffix="%" />
-        <MiniValue label="规划耗时改善率" value={result.planningTimeImprovementPercent} suffix="%" />
-        <MiniValue label="阻塞变化" value={result.blockedRobotTicksChange} suffix="robot·Tick" />
-      </div> : <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。因此不显示任何优化率数字。</span></div>}
+      {result.comparable ? <>
+        <div className="analytics-compare-visuals">
+          <ComparisonBars title="3. 实际水平距离比较" baselineLabel={result.baseline.pathPolicy.toUpperCase()} candidateLabel={result.candidate.pathPolicy.toUpperCase()} baseline={result.baseline.totalActualHorizontalMeters} candidate={result.candidate.totalActualHorizontalMeters} unit="m" />
+          <ComparisonBars title="4. 完成时间比较" baselineLabel={result.baseline.pathPolicy.toUpperCase()} candidateLabel={result.candidate.pathPolicy.toUpperCase()} baseline={result.baseline.simulatedSeconds} candidate={result.candidate.simulatedSeconds} unit="s" />
+        </div>
+        <div className="analytics-mini-grid analytics-improvement-grid">
+          <MiniValue label="节省水平里程" value={result.distanceSavedMeters} suffix="m" />
+          <MiniValue label="距离改善率" value={result.distanceImprovementPercent} suffix="%" />
+          <MiniValue label="节省模拟秒数" value={result.simulatedSecondsSaved} suffix="s" />
+          <MiniValue label="时间改善率" value={result.simulatedTimeImprovementPercent} suffix="%" />
+        </div>
+        <h4 className="analytics-subhead">5. 搜索效率比较</h4>
+        <div className="analytics-comparison-matrix">
+          <span>指标</span><b>基线</b><b>候选</b>
+          <span>访问状态</span><b>{visitedStates(result.baseline)}</b><b>{visitedStates(result.candidate)}</b>
+          <span>规划调用</span><b>{result.baseline.planningCallCount}</b><b>{result.candidate.planningCallCount}</b>
+          <span>规划耗时</span><b>{formatNumber(result.baseline.planningDurationMs, 3)} ms</b><b>{formatNumber(result.candidate.planningDurationMs, 3)} ms</b>
+          <span>重规划</span><b>{result.baseline.replanCount}</b><b>{result.candidate.replanCount}</b>
+        </div>
+        <h4 className="analytics-subhead">6. 运行质量</h4>
+        <div className="analytics-mini-grid">
+          <MiniValue label="基线阻塞" value={result.baseline.blockedRobotTicks} suffix="robot·Tick" />
+          <MiniValue label="候选阻塞" value={result.candidate.blockedRobotTicks} suffix="robot·Tick" />
+          <MiniValue label="阻塞变化" value={result.blockedRobotTicksChange} suffix="robot·Tick" />
+          <MiniValue label="基线循环等待" value={result.baseline.persistentCycleEpisodeCount} suffix="Episode" />
+          <MiniValue label="候选循环等待" value={result.candidate.persistentCycleEpisodeCount} suffix="Episode" />
+          <MiniValue label="基线任务完成率" value={result.baseline.taskCompletionRatePercent} suffix="%" />
+          <MiniValue label="候选任务完成率" value={result.candidate.taskCompletionRatePercent} suffix="%" />
+        </div>
+      </> : <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。保留原始 Run 数据，但隐藏正式改善率。</span></div>}
     </> : null}
   </section>
 }
@@ -707,12 +776,14 @@ export function AnalyticsPage() {
   const showMotion = [ctuDistance, shuttleDistance, totalHorizontalDistance, liftVerticalDistance]
     .some((metric) => hasNumericValue(metric?.value))
   const showPathAndMotion = showPath || showMotion || motionQuery.isError
+  const liftMovementMetric = motionData?.movementTypeMetrics.LIFT
+  const hasValidLiftMovement = Boolean(
+    liftMovementMetric
+    && liftMovementMetric.movementCount > 0
+    && hasNumericValue(liftMovementMetric.verticalMeters),
+  )
   const movementRows = Object.entries(motionData?.movementTypeMetrics ?? {})
-    .filter(([movementType, metric]) => (
-      movementType === 'LIFT'
-        ? hasNumericValue(metric.verticalMeters)
-        : movementType !== 'UNKNOWN' && hasNumericValue(metric.horizontalMeters)
-    ))
+    .filter(([movementType, metric]) => movementType !== 'LIFT' && movementType !== 'UNKNOWN' && hasNumericValue(metric.horizontalMeters))
   const robotDistanceRows = (motionData?.perRobotMetrics ?? []).filter((row) => (
     hasNumericValue(row.horizontalMeters) || hasNumericValue(row.verticalMeters)
   )).slice(0, 20)
@@ -764,6 +835,7 @@ export function AnalyticsPage() {
         <button type="button" className={viewMode === 'run' ? 'is-active' : ''} aria-pressed={viewMode === 'run'} onClick={() => setViewMode('run')}>真实 Run 指标</button>
         <button type="button" className={viewMode === 'synthetic' ? 'is-active' : ''} aria-pressed={viewMode === 'synthetic'} onClick={() => setViewMode('synthetic')}>模拟算法实验</button>
       </div>
+      {viewMode === 'run' ? <a className="analytics-algorithm-shortcut" href="#algorithm-comparison"><GitCompareArrows size={16} />直接查看算法对比</a> : null}
 
       {viewMode === 'synthetic' ? <SyntheticAnalyticsView /> : !hasRunId ? (
         <div className="analytics-notice analytics-empty-state"><Info size={18} /><div><strong>尚无选中的 Run</strong><span>请选择已有 Run 查看真实指标，或切换到“模拟算法实验”。当前不会发出真实指标请求。</span></div></div>
@@ -898,14 +970,13 @@ export function AnalyticsPage() {
           <div className="analytics-module-top"><div><span className="analytics-module-no">6.6</span><h3>路径规划与车辆实际里程</h3></div><span className="analytics-state analytics-state-partial">仿真实际运动段</span></div>
           {motionQuery.isError ? <QueryError name="车辆实际里程指标" error={motionQuery.error} retry={() => { void motionQuery.refetch() }} /> : null}
           {showMotion ? <>
-            <h4 className="analytics-subhead">A. 总体里程</h4>
+            <h4 className="analytics-subhead">A. 水平行驶</h4>
             <div className="analytics-kpi-grid analytics-distance-grid">
               <DistanceCard label="CTU 总水平行驶距离" metric={ctuDistance} />
               <DistanceCard label="Shuttle 总水平行驶距离" metric={shuttleDistance} />
               <DistanceCard label="总水平行驶距离" metric={totalHorizontalDistance} />
-              <DistanceCard label="Shuttle Lift 垂直位移" metric={liftVerticalDistance} />
             </div>
-            <p className="analytics-data-note">Lift 数值是垂直运输位移，不是车辆自主水平行驶里程；水平里程与垂直位移不合并为一个未说明的总数。</p>
+            <p className="analytics-data-note">水平里程来自 CTU 与 Shuttle 已提交的实际运动段，不包含 Lift 垂直运输。</p>
             {motionData && hasNumericValue(motionData.metersPerCell) ? <div className="analytics-motion-contract" aria-label="物理距离合同">
               <span>每格 <b>{formatNumber(motionData.metersPerCell, 3)} m</b></span>
               <span>合同 <b>{motionData.physicsContractVersion}</b></span>
@@ -914,18 +985,25 @@ export function AnalyticsPage() {
               <span>用户定义模拟参数 <b>{motionData.physicsContractSource === 'USER_DEFINED_SIMULATION' ? '是' : '来源未声明'}</b></span>
               <span>标定 <b>{motionData.calibrationStatus ?? '未声明'}</b></span>
             </div> : null}
+            <h4 className="analytics-subhead">B. 垂直运输</h4>
+            {hasValidLiftMovement ? <div className="analytics-vertical-transport">
+              <DistanceCard label="Lift 垂直位移" metric={liftVerticalDistance} />
+              <div><span>有效 Lift 运动段</span><b>{liftMovementMetric?.movementCount}</b><small>垂直位移与车辆自主水平里程分别统计</small></div>
+              <div><span>相关数据质量</span><b>{liftMovementMetric?.dataQuality}</b><small>{motionData?.observationCompleteness}</small></div>
+            </div> : <div className="analytics-no-lift"><Info size={16} /><span>当前Run未记录有效Lift垂直运输段。</span></div>}
+            <p className="analytics-data-note">Lift 位移是垂直运输证据，不与 CTU / Shuttle 水平里程简单相加为“AGV 行驶里程”。</p>
             {movementRows.length ? <>
-              <h4 className="analytics-subhead">B. 运动类型里程</h4>
+              <h4 className="analytics-subhead">C. 运动行为</h4>
               <div className="analytics-mini-grid analytics-motion-types">
                 {movementRows.map(([movementType, metric]) => <div key={movementType}>
                   <span>{{ NORMAL: '正常行驶', YIELD: '主动让行', BACKOFF: '回退', RETURN_TO_STANDBY: '返回待命', LIFT: 'Lift 垂直位移' }[movementType] ?? movementType}</span>
-                  <b>{formatNumber((movementType === 'LIFT' ? metric.verticalMeters : metric.horizontalMeters) as number, 3)} m</b>
+                  <b>{formatNumber(metric.horizontalMeters as number, 3)} m</b>
                   <small>{metric.movementCount} 个运动段 · {metric.dataQuality}</small>
                 </div>)}
               </div>
             </> : null}
             {robotDistanceRows.length ? <>
-              <h4 className="analytics-subhead">C. 各车辆里程 Top20</h4>
+              <h4 className="analytics-subhead">D. 各车辆里程 Top20</h4>
               <div className="analytics-table-wrap analytics-motion-table"><table><thead><tr><th>排名</th><th>车辆ID</th><th>类型</th><th>水平里程</th><th>垂直位移</th><th>主动让行</th><th>回退</th><th>返回待命</th><th>数据质量</th></tr></thead><tbody>
                 {robotDistanceRows.map((row, index) => <tr key={row.robotId}><td>{index + 1}</td><td>{row.robotId}</td><td>{row.robotType.toUpperCase()}</td><td>{hasNumericValue(row.horizontalMeters) ? `${formatNumber(row.horizontalMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.verticalMeters) ? `${formatNumber(row.verticalMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.yieldMeters) ? `${formatNumber(row.yieldMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.backoffMeters) ? `${formatNumber(row.backoffMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.returnToStandbyMeters) ? `${formatNumber(row.returnToStandbyMeters, 3)} m` : '—'}</td><td>{row.dataQuality}</td></tr>)}
               </tbody></table></div>
@@ -933,7 +1011,7 @@ export function AnalyticsPage() {
             </> : null}
           </> : null}
           {showPath ? <>
-          <h4 className="analytics-subhead">D. 规划诊断</h4>
+          <h4 className="analytics-subhead">E. 规划诊断</h4>
           <div className="analytics-mini-grid">
             <MiniMetric label="成功初始规划样本数" metric={pathSuccess} />
             {Array.isArray(pathAlgorithm?.value) && pathAlgorithm.value.length ? <div><span>算法名称</span><b>{pathAlgorithm.value.map((item) => `${item.algorithm.toUpperCase()} · n=${item.sampleCount}`).join(' / ')}</b></div> : null}
@@ -961,8 +1039,6 @@ export function AnalyticsPage() {
       </div>
       </> : null}
 
-      <AlgorithmComparisonPanel />
-
       {hasRealContent ? <details className="analytics-quality-details">
       <summary><Database size={17} /><span>数据质量与指标限制</span><small>数据来源与计算口径 · 默认折叠 · 仅说明当前已展示指标</small></summary>
       <div className="analytics-quality-grid">
@@ -976,6 +1052,7 @@ export function AnalyticsPage() {
       </div>
       </details> : null}
       </>}
+      {viewMode === 'run' ? <AlgorithmComparisonPanel onCreateExperiment={() => navigate(backUrl)} /> : null}
     </div>
   )
 }

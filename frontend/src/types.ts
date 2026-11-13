@@ -630,6 +630,7 @@ export interface RunPerformanceMetrics {
 export interface AlgorithmExperimentRunSummary {
   runId: string
   status: string
+  topologyId?: string
   scenarioId: string
   scenarioVersion: string
   scenarioSignature: string
@@ -661,6 +662,15 @@ export interface AlgorithmRunMetrics {
   persistentCycleEpisodeCount: number | null
   confirmedResolvedEpisodeCount: number | null
   dataComplete: boolean
+  terminalTaskCount?: number
+  experimentContract?: AlgorithmExperimentContractInput | null
+  planningEvidence?: Array<{
+    visitedStateCount?: number | null
+    planningDurationMs?: number | null
+    replanId?: string | null
+  }>
+  motionDataQuality?: string | null
+  deadlockDataQuality?: string | null
 }
 
 export interface AlgorithmComparisonResult {
