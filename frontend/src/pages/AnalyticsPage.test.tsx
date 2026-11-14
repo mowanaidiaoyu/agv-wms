@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePlatformStore } from '../store/usePlatformStore'
 import { api } from '../lib/api'
-import type { ContractMetric, DeadlockLifecycleMetric, DeadlockLifecycleMetrics } from '../types'
+import type { ContractMetric, DeadlockLifecycleMetric, DeadlockLifecycleMetrics, ThroughputComparisonResult, ThroughputRunMetrics } from '../types'
 import { AnalyticsPage } from './AnalyticsPage'
 
 function metric(metricId: string, value: unknown, overrides: Partial<ContractMetric> = {}): ContractMetric {
@@ -408,6 +408,45 @@ function syntheticResponses() {
   }
 }
 
+function throughputComparison(overrides: Partial<ThroughputComparisonResult> = {}): ThroughputComparisonResult {
+  const run = (runId: string, policy: string, deliveredPieces: number): ThroughputRunMetrics => ({
+    contractVersion: 'throughput-metrics-v1', runId, generation: 1, status: 'stopped', stopReason: 'observation_window_complete',
+    algorithm: { pathPolicy: policy, assignmentPolicy: 'greedy', variableDimension: 'pathPolicy' }, scenarioSignature: 'same',
+    observationTick: 300, configuredObservationTicks: 300, observationSeconds: 180,
+    deliveredPieces, deliveredBoxes: null, completedOrderCount: 1, totalOrderCount: 2, orderCompletionRatePercent: 50,
+    throughputPiecesPerSimulatedHour: deliveredPieces * 20,
+    deliveryTrend: [{ tick: 0, simulatedSeconds: 0, cumulativeDeliveredPieces: 0 }, { tick: 300, simulatedSeconds: 180, cumulativeDeliveredPieces: deliveredPieces }],
+    blockedRobotTicks: 4, physicalTravelWaitRobotTicks: 10, persistentCycleEpisodeCount: 0, averageTaskLifecycleSeconds: 45,
+    dataQuality: 'COMPLETE', reason: null, acceptanceEligible: true,
+    evidenceSummary: { uniqueDeliveryCount: 1, duplicateDeliveryCount: 0, conflictingDeliveryCount: 0, invalidDeliveryCount: 0, windowReached: true },
+  })
+  return {
+    contractVersion: 'throughput-comparison-v1', comparisonType: 'THROUGHPUT_COMPARISON',
+    baseline: run('exp-a', 'astar', 100), candidate: run('exp-b', 'dijkstra', 150),
+    comparable: true, comparisonReasons: [], deliveredPiecesIncrease: 50, throughputImprovementPercent: 50,
+    throughputImprovementReason: null, blockedRobotTicksChange: 0, physicalTravelWaitRobotTicksChange: 0,
+    ...overrides,
+  }
+}
+
+function algorithmComparison() {
+  const run = (runId: string, pathPolicy: string) => ({
+    runId, status: 'stopped', pathPolicy, assignmentPolicy: 'greedy', totalActualHorizontalMeters: 10,
+    ctuHorizontalMeters: 10, shuttleHorizontalMeters: 0, liftVerticalMeters: 0,
+    completedTaskCount: 1, totalTaskCount: 2, taskCompletionRatePercent: 50, simulatedSeconds: 180,
+    planningDurationMs: 2, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0,
+    persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: false,
+    experimentContract: { scenarioSignature: 'same', topologyRevision: 'revision' },
+  })
+  return {
+    contractVersion: 'algorithm-comparison-v1', comparable: false, comparisonReasons: ['RUN_DATA_INCOMPLETE'],
+    baseline: run('exp-a', 'astar'), candidate: run('exp-b', 'dijkstra'),
+    distanceSavedMeters: null, distanceImprovementPercent: null, simulatedSecondsSaved: null,
+    simulatedTimeImprovementPercent: null, planningDurationSavedMs: null,
+    planningTimeImprovementPercent: null, blockedRobotTicksChange: null,
+  }
+}
+
 function installFetch(overrides?: (url: string, payload: unknown) => Response | undefined) {
   const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
@@ -516,6 +555,7 @@ describe('algorithm performance analytics M2-5B', () => {
       { runId: 'exp-b', status: 'completed', scenarioId: 's1', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
     ]
     installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(throughputComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
       if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify({
         contractVersion: 'algorithm-comparison-v1', comparable: true, comparisonReasons: [],
         baseline: { runId: 'exp-a', status: 'completed', pathPolicy: 'astar', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 10, ctuHorizontalMeters: 10, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 10, planningDurationMs: 2, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true },
@@ -553,6 +593,7 @@ describe('algorithm performance analytics M2-5B', () => {
       { runId: 'exp-b', status: 'completed', scenarioId: 's2', scenarioVersion: '1', scenarioSignature: 'right', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 11, tick: 22 },
     ]
     installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(throughputComparison({ comparable: false, comparisonReasons: ['SCENARIO_SIGNATURE_MISMATCH'], deliveredPiecesIncrease: null, throughputImprovementPercent: null })), { status: 200, headers: { 'Content-Type': 'application/json' } })
       if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify({
         contractVersion: 'algorithm-comparison-v1', comparable: false, comparisonReasons: ['SCENARIO_SIGNATURE_MISMATCH'],
         baseline: { runId: 'exp-a', status: 'completed', pathPolicy: 'astar', assignmentPolicy: 'greedy', totalActualHorizontalMeters: 10, ctuHorizontalMeters: 10, shuttleHorizontalMeters: 0, liftVerticalMeters: 0, completedTaskCount: 1, totalTaskCount: 1, taskCompletionRatePercent: 100, simulatedSeconds: 10, planningDurationMs: 2, planningCallCount: 1, replanCount: 0, blockedRobotTicks: 0, persistentCycleEpisodeCount: 0, confirmedResolvedEpisodeCount: 0, dataComplete: true, experimentContract: { scenarioSignature: 'left', topologyRevision: 'rev-a' } },
@@ -1112,6 +1153,79 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(fetchMock.mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
     const urls = fetchMock.mock.calls.map(([input]) => String(input))
     expect(urls.some((url) => /\/start|\/pause|\/reset|\/state/.test(url))).toBe(false)
+  })
+
+  it('shows authoritative fixed-window throughput KPIs and cumulative trends', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'stopped', scenarioId: 'throughput', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', observationTicks: 300, simulatedSeconds: 180, tick: 300 },
+      { runId: 'exp-b', status: 'stopped', scenarioId: 'throughput', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', observationTicks: 300, simulatedSeconds: 180, tick: 300 },
+    ]
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(throughputComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify(algorithmComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('基线实验Run'), { target: { value: 'exp-a' } })
+    fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
+
+    expect(await screen.findByText('运输吞吐量对比')).toBeInTheDocument()
+    expect(screen.getByText('基线运输件数').parentElement).toHaveTextContent('100')
+    expect(screen.getByText('候选运输件数').parentElement).toHaveTextContent('150')
+    expect(screen.getByText('增加运输件数').parentElement).toHaveTextContent('50')
+    expect(screen.getByText('吞吐量提升率').parentElement).toHaveTextContent('50.00%')
+    expect(screen.getByRole('img', { name: '累计有效交付件数随仿真Tick变化' })).toBeInTheDocument()
+    expect(screen.getByText(/真实放入合同指定 drop_zone 后，按SKU实际件数累计/)).toBeInTheDocument()
+  })
+
+  it('preserves a legal zero throughput improvement', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'stopped', scenarioId: 'throughput', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 180, tick: 300 },
+      { runId: 'exp-b', status: 'stopped', scenarioId: 'throughput', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 180, tick: 300 },
+    ]
+    const equal = throughputComparison()
+    equal.candidate = { ...equal.candidate, deliveredPieces: 100, throughputPiecesPerSimulatedHour: 2000 }
+    equal.deliveredPiecesIncrease = 0
+    equal.throughputImprovementPercent = 0
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(equal), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify(algorithmComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('基线实验Run'), { target: { value: 'exp-a' } })
+    fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
+    expect((await screen.findByText('吞吐量提升率')).parentElement).toHaveTextContent('0.00%')
+    expect(screen.getByText('增加运输件数').parentElement).toHaveTextContent('0')
+  })
+
+  it('keeps incomparable throughput evidence but hides formal rates and null values', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'stopped', scenarioId: 'throughput-a', scenarioVersion: '1', scenarioSignature: 'left', variableDimension: 'pathPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 180, tick: 300 },
+      { runId: 'exp-b', status: 'stopped', scenarioId: 'throughput-b', scenarioVersion: '1', scenarioSignature: 'right', variableDimension: 'pathPolicy', pathPolicy: 'dijkstra', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 180, tick: 300 },
+    ]
+    const incomparable = throughputComparison({
+      comparable: false,
+      comparisonReasons: ['SCENARIO_SIGNATURE_MISMATCH'],
+      deliveredPiecesIncrease: null,
+      throughputImprovementPercent: null,
+    })
+    incomparable.baseline = { ...incomparable.baseline, deliveredPieces: null, throughputPiecesPerSimulatedHour: null, dataQuality: 'UNAVAILABLE' }
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(incomparable), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify(algorithmComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('基线实验Run'), { target: { value: 'exp-a' } })
+    fireEvent.change(screen.getByLabelText('候选实验Run'), { target: { value: 'exp-b' } })
+    expect(await screen.findByText(/不可正式比较：SCENARIO_SIGNATURE_MISMATCH/)).toBeInTheDocument()
+    expect(screen.getByText('基线运输件数').parentElement).toHaveTextContent('—')
+    expect(screen.getByText('吞吐量提升率').parentElement).toHaveTextContent('—')
+    expect(screen.getByText('基线运输件数').parentElement).not.toHaveTextContent('0')
   })
 })
 

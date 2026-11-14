@@ -84,6 +84,14 @@ function positiveFiniteDraftValue(label: string, value: string): number {
   return parsed
 }
 
+function positiveIntegerDraftValue(label: string, value: string): number {
+  const parsed = Number(value)
+  if (!value.trim() || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label}必须是正整数。`)
+  }
+  return parsed
+}
+
 const runControlProgressLabels: Record<RunControlAction, string> = {
   pause: '暂停中…',
   resume: '继续中…',
@@ -136,6 +144,8 @@ export function SimulationPage() {
   const [experimentPathPolicy, setExperimentPathPolicy] = useState<'astar' | 'dijkstra'>('astar')
   const [experimentAssignmentPolicy, setExperimentAssignmentPolicy] = useState<'greedy' | 'hungarian'>('greedy')
   const [experimentVariableDimension, setExperimentVariableDimension] = useState<'pathPolicy' | 'assignmentPolicy'>('pathPolicy')
+  const [throughputObservationEnabled, setThroughputObservationEnabled] = useState(false)
+  const [throughputObservationTicks, setThroughputObservationTicks] = useState('600')
   const [controlAction, setControlAction] = useState<RunControlAction | null>(null)
   const [controlNotice, setControlNotice] = useState('')
   const [completingPicking, setCompletingPicking] = useState(false)
@@ -409,6 +419,9 @@ export function SimulationPage() {
             seed: 42,
             topologyRevision: transportLayoutQuery.data?.topologyRevision ?? '',
             safetyLimitTicks: 2000,
+            ...(throughputObservationEnabled
+              ? { observationTicks: positiveIntegerDraftValue('吞吐观察窗口', throughputObservationTicks) }
+              : {}),
             pathPolicy: experimentPathPolicy,
             assignmentPolicy: experimentAssignmentPolicy,
             variableDimension: experimentVariableDimension,
@@ -758,6 +771,9 @@ export function SimulationPage() {
               {([['greedy', 'Greedy', '逐任务选择当前最优车辆'], ['hungarian', 'Hungarian', '批量求解全局匹配成本']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.assignmentPolicy : experimentAssignmentPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentAssignmentPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
             </div></fieldset>
             <label className="simulation-config-text-field"><span>本组唯一变量</span><select value={runConfigReadOnly ? frozenAlgorithmContract?.variableDimension ?? experimentVariableDimension : experimentVariableDimension} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
+            <label className="simulation-config-toggle"><input aria-label="启用固定吞吐观察窗口" type="checkbox" checked={runConfigReadOnly ? frozenAlgorithmContract?.observationTicks !== undefined && frozenAlgorithmContract?.observationTicks !== null : throughputObservationEnabled} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setThroughputObservationEnabled(event.target.checked)} />启用固定吞吐观察窗口</label>
+            <label className="simulation-config-text-field"><span>吞吐观察窗口</span><div><input aria-label="吞吐观察窗口Tick" type="number" min="1" step="1" value={runConfigReadOnly ? frozenAlgorithmContract?.observationTicks ?? '' : throughputObservationTicks} disabled={!displayedExperimentEnabled || runConfigReadOnly || !throughputObservationEnabled} onChange={(event) => setThroughputObservationTicks(event.target.value)} /><small>Tick</small></div></label>
+            <p className="simulation-config-contract-note">开启后，Run 在指定 Tick 以 observation_window_complete 正常截止；用于比较相同仿真时间内的真实交付件数。</p>
           </section>
         </div>
         <div className="simulation-run-config-footer"><span>{runConfigReadOnly ? '只读冻结配置' : '草稿已保留在当前页面'}</span><button type="button" className="accent-button" onClick={() => setRunConfigOpen(false)}>完成</button></div>

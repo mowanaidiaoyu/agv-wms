@@ -169,7 +169,7 @@ def test_two_manual_neighbors_with_mismatched_sides_are_rejected():
     topology["cells"][1]["conveyorDecks"]["lower"] = _deck("north", "south", "outbound")
 
     assert any(
-        "出口方向" in issue["message"]
+        issue.get("code") == "CONVEYOR_MANUAL_NEIGHBOR_DIRECTION_MISMATCH"
         for issue in compile_conveyor_graph(topology)["issues"]
     )
 

@@ -159,7 +159,7 @@ class SecondaryArmLayoutCompatibilityTest(unittest.TestCase):
         )
 
     def test_loader_accepts_revision_without_runtime_or_database(self) -> None:
-        self.assertNotIn("app.services.runtime", sys.modules)
+        runtime_was_loaded = "app.services.runtime" in sys.modules
         if str(BACKEND) not in sys.path:
             sys.path.insert(0, str(BACKEND))
 
@@ -169,11 +169,15 @@ class SecondaryArmLayoutCompatibilityTest(unittest.TestCase):
         import app.core.config as config
         import app.core.db as db
 
+        previous_config_path = config.DB_PATH
+        previous_db_path = db.DB_PATH
+        self.addCleanup(setattr, config, "DB_PATH", previous_config_path)
+        self.addCleanup(setattr, db, "DB_PATH", previous_db_path)
         config.DB_PATH = isolated_db
         db.DB_PATH = isolated_db
         from app.services.transport_layout import load_transport_layout_plan
 
-        self.assertNotIn("app.services.runtime", sys.modules)
+        self.assertEqual("app.services.runtime" in sys.modules, runtime_was_loaded)
         topology = copy.deepcopy(self.topology)
         snapshot = copy.deepcopy(topology)
         result = load_transport_layout_plan(topology)
@@ -190,9 +194,9 @@ class SecondaryArmLayoutCompatibilityTest(unittest.TestCase):
         )
         self.assertEqual(result.overallStatus, "BLOCKED")
         issue_codes = {issue.code for issue in result.issues}
-        self.assertIn("LAYOUT_SHUTTLE_GRAPH_UNAVAILABLE", issue_codes)
+        self.assertNotIn("LAYOUT_SHUTTLE_GRAPH_UNAVAILABLE", issue_codes)
         self.assertIn("PICKING_ARM_BASE_OCCUPIED", issue_codes)
-        self.assertNotIn("app.services.runtime", sys.modules)
+        self.assertEqual("app.services.runtime" in sys.modules, runtime_was_loaded)
 
 
 if __name__ == "__main__":

@@ -152,6 +152,43 @@ def test_run_advances_multiple_ticks_for_unified_task_mix(monkeypatch, with_orde
         assert transfer["inTransitQuantity"] == 2
 
 
+def test_throughput_observation_window_stops_normally_without_safety_limit(monkeypatch) -> None:
+    service = SimulationService(MemoryRepository())
+    runtime = _controlled_runtime()
+    runtime.config.update({
+        "algorithmExperimentContract": {"observationTicks": 3},
+        "safetyLimitTicks": 10,
+        "motionSpeedContract": {"simTickSeconds": 0.6},
+    })
+
+    def step(current: RunRuntime, *, persist: bool) -> None:
+        current.state["tick"] += 1
+        current.state["simulatedSeconds"] = current.state["tick"] * 0.6
+
+    async def broadcast(_current: RunRuntime) -> None:
+        return None
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_step_runtime", step)
+    monkeypatch.setattr(service, "_broadcast_tick", broadcast)
+    monkeypatch.setattr(service, "_all_tasks_completed", lambda _current: False)
+    monkeypatch.setattr("app.services.simulation.asyncio.sleep", no_wait)
+    asyncio.run(service._loop(runtime))
+
+    assert runtime.state["tick"] == 3
+    assert runtime.state["status"] == "stopped"
+    assert runtime.state["stopReason"] == "observation_window_complete"
+    assert runtime.state["throughputObservation"] == {
+        "contractVersion": "throughput-metrics-v1",
+        "observationTick": 3,
+        "observationSeconds": 1.8,
+        "completedNaturally": False,
+    }
+    assert not any(event[2] == "alert" for event in service.repo.events)
+
+
 def _controlled_runtime() -> RunRuntime:
     state = {
         "id": "run-controlled",

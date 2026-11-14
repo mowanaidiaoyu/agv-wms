@@ -14,6 +14,8 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from ..analytics.throughput_metrics import CONTRACT_VERSION as THROUGHPUT_CONTRACT_VERSION
+from ..analytics.throughput_metrics import DELIVERY_EVENT_TYPE, DELIVERY_EVENT_VERSION
 from ..core.repository import Repository
 from .assignment import assign_tasks
 from .conveyor import (
@@ -273,6 +275,7 @@ class SimulationService:
                 "motionPhysicsContract": config["motionPhysicsContract"],
                 "motionSpeedContract": config["motionSpeedContract"],
                 "safetyLimitTicks": experiment["safetyLimitTicks"],
+                "observationTicks": experiment.get("observationTicks"),
                 "variableDimension": experiment["variableDimension"],
                 **fixed_algorithm,
             }
@@ -603,6 +606,7 @@ class SimulationService:
         previous_observer = self._ensure_deadlock_observer(runtime)
         self._finalize_motion_observation(runtime, "reset")
         previous_motion_observer = runtime.motion_observer
+        previous_throughput_generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
         runtime.state = deepcopy(runtime.initial_state)
         runtime.metrics = deepcopy(runtime.initial_metrics)
         runtime.state["status"] = "paused"
@@ -619,6 +623,10 @@ class SimulationService:
         runtime.state["playbackMultiplier"] = DEFAULT_SPEED_MULTIPLIER
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
         runtime.state["playbackTickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["throughputGeneration"] = previous_throughput_generation + 1
+        runtime.state["throughputDeliveryIds"] = []
+        runtime.state["throughputDeliverySignatures"] = {}
+        runtime.state["throughputCargoSequence"] = 0
         runtime.wall_clock_started_monotonic = time.monotonic()
         runtime.deadlock_observer = previous_observer.new_generation(runtime.topology)
         runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
@@ -1133,6 +1141,11 @@ class SimulationService:
                 "physicalTravelWaitRobotTicks": 0,
                 "blockedRobotTicks": 0,
             },
+            "throughputContractVersion": THROUGHPUT_CONTRACT_VERSION,
+            "throughputGeneration": 1,
+            "throughputDeliveryIds": [],
+            "throughputDeliverySignatures": {},
+            "throughputCargoSequence": 0,
             "orderDriven": bool(orders or transfers),
             "robots": robots,
             "tasks": tasks,
@@ -1417,7 +1430,12 @@ class SimulationService:
                     )
                     if slot is not None:
                         used_slots.add((slot["nodeId"], int(slot.get("layer", 1))))
-                        allocated_lines.append({**dict(slot), "qty": case_cnt, "pickPieces": need_pieces})
+                        allocated_lines.append({
+                            **dict(slot),
+                            "qty": case_cnt,
+                            "pickPieces": need_pieces,
+                            "orderLineId": line_id,
+                        })
                         line_ctu_boxes += 1
                         continue
                     # CTU 无可用整箱：缺口转四向车（整箱出库，只按需求件数记账）。
@@ -1899,6 +1917,15 @@ class SimulationService:
                         "cellId": arm.get("dropCellId"),
                     },
                 )
+                delivery_task = find_task(runtime.state.get("tasks", []), arm.get("taskId"))
+                if delivery_task is not None:
+                    self._record_outbound_delivery(
+                        runtime,
+                        delivery_task,
+                        tick,
+                        str(arm.get("dropCellId") or ""),
+                        cargo=cargo,
+                    )
                 arm.update({
                     "status": "idle",
                     "stage": None,
@@ -1966,14 +1993,18 @@ class SimulationService:
         if not route:
             # 路径异常时保留货箱而不是让它消失，并明确把任务标为异常。
             box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
-            runtime.state.setdefault("armBeltBoxes", []).append({
-                **box,
-                "taskId": task.get("id"),
-                "cellId": target.get("dropoffCellId"),
-                "level": target.get("dropoffLevel", 2),
-                "beltHeight": target.get("dropoffBeltHeight", 3.0),
-                "placedTick": tick,
-            })
+            runtime.state.setdefault("armBeltBoxes", []).append(
+                self._outbound_cargo_snapshot(
+                    runtime,
+                    task,
+                    box,
+                    taskId=task.get("id"),
+                    cellId=target.get("dropoffCellId"),
+                    level=target.get("dropoffLevel", 2),
+                    beltHeight=target.get("dropoffBeltHeight", 3.0),
+                    placedTick=tick,
+                )
+            )
             task["status"] = "exception"
             task["phase"] = "arm_conveyor_blocked"
             task["phaseLabel"] = "机械臂放箱后输送路径不可用"
@@ -2137,6 +2168,135 @@ class SimulationService:
             if self._advance_conveyor_transport(runtime, None, task):
                 self._complete_detached_conveyor_task(runtime, task)
 
+    def _record_outbound_delivery(
+        self,
+        runtime: RunRuntime,
+        task: dict[str, Any],
+        tick: int,
+        endpoint_cell_id: str,
+        *,
+        cargo: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist SKU-piece evidence only after the side arm places cargo in drop_zone."""
+
+        if task.get("taskKind") not in {"shuttle_order_pick", "placed_goods_delivery"}:
+            return
+        order_id = task.get("orderId")
+        if not order_id:
+            return
+        goods = (
+            [cargo]
+            if isinstance(cargo, dict) and cargo.get("skuId")
+            else task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or []
+        )
+        pieces_by_line_and_sku: dict[tuple[str, str], dict[str, Any]] = {}
+        for good in goods:
+            if not isinstance(good, dict):
+                continue
+            sku_id = str(good.get("skuId") or "")
+            if not sku_id:
+                continue
+            order_line_id = str(good.get("orderLineId") or task.get("orderLineId") or "unknown-line")
+            quantity = max(0, int(good.get("qty") or 0))
+            if task.get("taskKind") == "shuttle_order_pick":
+                quantity = max(0, int(task.get("demandPieces") or quantity))
+            if quantity <= 0:
+                continue
+            item = pieces_by_line_and_sku.setdefault((order_line_id, sku_id), {
+                "skuId": sku_id,
+                "skuName": good.get("skuName"),
+                "orderLineId": order_line_id,
+                "quantityPieces": 0,
+            })
+            item["quantityPieces"] += quantity
+
+        parent = find_task(runtime.state.get("tasks", []), task.get("parentId"))
+        root = parent
+        while root and root.get("parentId"):
+            root = find_task(runtime.state.get("tasks", []), root.get("parentId"))
+        authoritative_box_count = 1 if (
+            task.get("taskKind") == "shuttle_order_pick"
+            or (parent or {}).get("taskKind") == "picking_box"
+        ) else None
+        generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
+        recorded_ids = runtime.state.setdefault("throughputDeliveryIds", [])
+        recorded_signatures = runtime.state.setdefault("throughputDeliverySignatures", {})
+        physical_cargo_id = str((cargo or {}).get("physicalCargoId") or "")
+        delivery_sequence = (cargo or {}).get("deliverySequence")
+        legacy_delivery_key = f"task:{task.get('id')}"
+        delivery_key = physical_cargo_id or legacy_delivery_key
+        for item_index, item in enumerate(pieces_by_line_and_sku.values()):
+            order_line_id = str(item.get("orderLineId") or "unknown-line")
+            delivery_id = (
+                f"{runtime.run_id}:g{generation}:{delivery_key}:{order_id}:"
+                f"{order_line_id}:{item['skuId']}"
+            )
+            payload = {
+                "contractVersion": DELIVERY_EVENT_VERSION,
+                "deliveryId": delivery_id,
+                "runId": runtime.run_id,
+                "generation": generation,
+                "orderId": order_id,
+                "orderLineId": None if order_line_id == "unknown-line" else order_line_id,
+                "taskId": task.get("id"),
+                "parentTaskId": task.get("parentId"),
+                "rootTaskId": (root or task).get("id"),
+                "taskKind": task.get("taskKind"),
+                "originRobotType": (root or task).get("robotType"),
+                "skuId": item["skuId"],
+                "skuName": item.get("skuName"),
+                "quantityPieces": int(item["quantityPieces"]),
+                # One physical cargo can theoretically contain more than one SKU.
+                # Count that box once, while every SKU line keeps its piece evidence.
+                "quantityBoxes": authoritative_box_count if item_index == 0 else 0,
+                "physicalCargoId": physical_cargo_id or None,
+                "deliverySequence": delivery_sequence,
+                "tick": tick,
+                "deliveryStage": "drop_zone_received",
+                "endpointCellId": endpoint_cell_id,
+                "outputPortBlockId": task.get("outputPortBlockId"),
+                "flowKind": "outbound_order",
+                "evidenceSource": "secondary_arm_dropzone_placed",
+            }
+            signature = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if delivery_id in recorded_ids:
+                previous_signature = recorded_signatures.get(delivery_id)
+                if previous_signature is None or previous_signature == signature:
+                    continue
+                # Persist contradictory evidence with the same deliveryId so
+                # the read-only aggregator can mark the metric INVALID.
+                self._record_event(runtime, tick, DELIVERY_EVENT_TYPE, payload)
+                continue
+            self._record_event(runtime, tick, DELIVERY_EVENT_TYPE, payload)
+            recorded_ids.append(delivery_id)
+            recorded_signatures[delivery_id] = signature
+
+    def _outbound_cargo_snapshot(
+        self,
+        runtime: RunRuntime,
+        task: dict[str, Any],
+        box: dict[str, Any],
+        **position: Any,
+    ) -> dict[str, Any]:
+        """Attach a stable, per-generation physical identity before a box reaches a side arm."""
+
+        sequence = max(0, int(runtime.state.get("throughputCargoSequence") or 0)) + 1
+        runtime.state["throughputCargoSequence"] = sequence
+        generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
+        return {
+            **box,
+            **position,
+            "physicalCargoId": f"{runtime.run_id}:g{generation}:cargo-{sequence}",
+            "deliverySequence": sequence,
+        }
+
     def _complete_detached_conveyor_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
         """货箱到达机械臂输送路线终点后处理：回库子任务转等待 CTU 取回，其余完成任务。"""
         tick = int(runtime.state["tick"])
@@ -2168,14 +2328,18 @@ class SimulationService:
             str(final_node.get("floor") or "1F"),
         )
         box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
-        runtime.state.setdefault("armBeltBoxes", []).append({
-            **box,
-            "taskId": task.get("id"),
-            "cellId": final_cell,
-            "level": 2,
-            "beltHeight": 3.0,
-            "placedTick": tick,
-        })
+        runtime.state.setdefault("armBeltBoxes", []).append(
+            self._outbound_cargo_snapshot(
+                runtime,
+                task,
+                box,
+                taskId=task.get("id"),
+                cellId=final_cell,
+                level=2,
+                beltHeight=3.0,
+                placedTick=tick,
+            )
+        )
         task["armConveyorCompleted"] = True
         task["armConveyorEndCellId"] = final_cell
         task["conveyorTransport"] = None
@@ -2905,6 +3069,8 @@ class SimulationService:
             # 箱内件数：CTU 尾箱需要按整箱件数携带，拣货时再按需求件数扣减。
             if line.get("qty") is not None:
                 entry["qty"] = int(line["qty"])
+            if line.get("orderLineId") not in (None, ""):
+                entry["orderLineId"] = str(line["orderLineId"])
             for field in SKU_FIELDS:
                 if line.get(field) not in (None, ""):
                     entry[field] = line[field]
@@ -2952,7 +3118,13 @@ class SimulationService:
 
     async def _loop(self, runtime: RunRuntime) -> None:
         nominal_duration = max(1, int(runtime.config.get("durationTicks", 90)))
-        if runtime.config.get("algorithmExperimentContract") is not None:
+        experiment = runtime.config.get("algorithmExperimentContract")
+        observation_ticks = (
+            int(experiment["observationTicks"])
+            if isinstance(experiment, dict) and experiment.get("observationTicks") is not None
+            else None
+        )
+        if experiment is not None:
             safety_limit = int(runtime.config["safetyLimitTicks"])
         else:
             safety_limit = max(
@@ -2961,7 +3133,10 @@ class SimulationService:
                 int(runtime.config.get("maxDurationTicks") or 0),
             )
         try:
-            while runtime.state["tick"] < safety_limit:
+            while (
+                runtime.state["tick"] < safety_limit
+                and (observation_ticks is None or runtime.state["tick"] < observation_ticks)
+            ):
                 if runtime.stopped:
                     break
                 if runtime.paused:
@@ -3018,6 +3193,18 @@ class SimulationService:
                 )
             else:
                 runtime.state["stopReason"] = None
+        elif observation_ticks is not None and runtime.state["tick"] >= observation_ticks:
+            runtime.state["status"] = "stopped"
+            runtime.state["stopReason"] = "observation_window_complete"
+            runtime.state["throughputObservation"] = {
+                "contractVersion": THROUGHPUT_CONTRACT_VERSION,
+                "observationTick": observation_ticks,
+                "observationSeconds": round(
+                    observation_ticks * self._sim_tick_seconds(runtime),
+                    9,
+                ),
+                "completedNaturally": False,
+            }
         else:
             runtime.state["status"] = "stopped"
             runtime.state["stopReason"] = "safety_limit"
@@ -4114,6 +4301,8 @@ class SimulationService:
                 carried = dict(slot)
                 if line.get("qty") is not None:
                     carried["qty"] = int(line["qty"])
+                if line.get("orderLineId") not in (None, ""):
+                    carried["orderLineId"] = str(line["orderLineId"])
                 robot.setdefault("carrying", []).append(carried)
                 del inventory[index]
                 runtime.inventory_delta.append({"op": "remove", "nodeId": node_id, "layer": layer})
@@ -4782,6 +4971,7 @@ class SimulationService:
             "completedTick": None,
             "urgent": bool(parent_task.get("urgent")),
             "orderId": parent_task.get("orderId"),
+            "orderLineId": parent_task.get("orderLineId"),
         }
         child_task["pendingTransport"] = {
             "phase": "arm_conveyor_delivery",
@@ -4858,6 +5048,7 @@ class SimulationService:
                 "completedTick": None,
                 "urgent": bool(task.get("urgent")),
                 "orderId": task.get("orderId"),
+                "orderLineId": slot.get("orderLineId") or task.get("orderLineId"),
             }
             self._prepare_conveyor_transport(runtime, child, "conveyor_to_lift")
             transport = child.get("conveyorTransport")
@@ -5126,8 +5317,53 @@ class SimulationService:
     def _spawn_picking_return(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
         """创建回库子任务：沿拣货台北侧回库支线滑回回库口，等待 CTU 取回并送回原库位。"""
         station_block = task.get("stationBlockId")
+        child_id = f"{task['id']}-return"
+        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
+            return
+        slot = (task.get("transitGoods") or [{}])[0]
         if not station_block:
-            return  # 旧拓扑没有回库支线：跳过回库子任务（任务链仍可完成）
+            # Legacy/non-explicit fixtures have no compiled branch identity.
+            # Preserve inventory conservation by exposing the box directly at
+            # the configured port for CTU pickup instead of silently dropping it.
+            tick = int(runtime.state["tick"])
+            child = {
+                "id": child_id,
+                "parentId": task["id"],
+                "taskKind": "picking_return",
+                "robotType": "none",
+                "status": "assigned",
+                "phase": "pickup_from_port",
+                "phaseLabel": self._phase_label("pickup_from_port"),
+                "lines": [dict(slot)],
+                "transitGoods": [dict(slot)],
+                "placedGoods": [],
+                "deliveredGoods": [],
+                "picked": 0,
+                "history": [{"tick": tick, "phase": "pickup_from_port", "status": "assigned"}],
+                "pickStationCellId": task.get("pickStationCellId"),
+                "assignedPortId": task.get("assignedPortId"),
+                "deliveryCellId": task.get("deliveryCellId"),
+                "createdTick": tick,
+                "startedTick": tick,
+                "completedTick": None,
+                "urgent": bool(task.get("urgent")),
+                "orderId": task.get("orderId"),
+                "orderLineId": slot.get("orderLineId") or task.get("orderLineId"),
+                "legacyReturnFallback": True,
+            }
+            runtime.state.setdefault("tasks", []).append(child)
+            self._record_event(
+                runtime,
+                tick,
+                "task_spawned",
+                {
+                    "taskId": child_id,
+                    "parentId": task["id"],
+                    "taskKind": "picking_return",
+                    "legacyReturnFallback": True,
+                },
+            )
+            return
         branch = route_from_block_branch(
             runtime.conveyor_graph,
             str(station_block),
@@ -5148,10 +5384,6 @@ class SimulationService:
             or int(last_parts[1]) >= int(parts[1])
         ):
             return
-        child_id = f"{task['id']}-return"
-        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
-            return
-        slot = (task.get("transitGoods") or [{}])[0]
         child: dict[str, Any] = {
             "id": child_id,
             "parentId": task["id"],

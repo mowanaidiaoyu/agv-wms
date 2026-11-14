@@ -22,8 +22,8 @@ def plan(topology: dict):
 
 def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:1ec8cf4490635105"
-    assert plan.overallStatus == "PARTIAL"
+    assert plan.topologyRevision == "2.0.0:16e70cca04bee0ef"
+    assert plan.overallStatus == "BLOCKED"
     assert plan.summary["formalTopologyMutated"] is False
 
 
@@ -170,10 +170,8 @@ def test_picking_arm_uses_user_confirmed_installation_and_row84_dropoff(
         int(cell["row"]) == 91 and int(cell["col"]) == 54
         for cell in topology["cells"]
     )
-    assert not any(
-        int(node["row"]) == 91 and int(node["col"]) == 54
-        for node in topology["nodes"]
-    )
+    formal_arm = next(node for node in topology["nodes"] if node["id"] == "picking-arm-01")
+    assert (int(formal_arm["row"]), int(formal_arm["col"])) == (91, 54)
     drop_cell = next(cell for cell in topology["cells"] if cell["id"] == arm.dropoff.topologyCellId)
     pickup_cell = next(cell for cell in topology["cells"] if cell["id"] == arm.pickup.topologyCellId)
     assert pickup_cell["id"] == "cell-r92-c48"
@@ -223,7 +221,10 @@ def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(p
         assert planar_reach <= arm.workRadius
     assert arm.kinematics.upperArmLength + arm.kinematics.forearmLength >= arm.workRadius
     issue_codes = {issue.code for issue in plan.issues}
-    assert "PICKING_ARM_BASE_OCCUPIED" not in issue_codes
+    # ARM-R1 made the preview installation a formal picking_arm node.  The
+    # generic occupancy validator still reports that co-location; retain it as
+    # a truthful pre-existing layout issue instead of pretending the base is empty.
+    assert "PICKING_ARM_BASE_OCCUPIED" in issue_codes
     assert "PICKING_ARM_BASE_CLEARANCE_INSUFFICIENT" not in issue_codes
     assert "PICKING_ARM_ENDPOINT_OUT_OF_REACH" not in issue_codes
     assert "PICKING_ARM_KINEMATICS_UNDERSIZED" not in issue_codes

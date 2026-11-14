@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from ..analytics.motion_distance_metrics import aggregate_motion_distance_metrics
+from ..analytics.throughput_metrics import DELIVERY_EVENT_TYPE, build_throughput_metrics
 from .db import decode_json, encode_json, get_conn, get_read_conn, row_to_dict, utc_now
 
 
@@ -930,6 +931,7 @@ class Repository:
                     "pathPolicy": contract.get("pathPolicy"),
                     "assignmentPolicy": contract.get("assignmentPolicy"),
                     "algorithmVersion": contract.get("algorithmVersion"),
+                    "observationTicks": contract.get("observationTicks"),
                     "simulatedSeconds": payload.get("simulatedSeconds"),
                     "tick": payload.get("tick"),
                     "createdAt": decoded.get("created_at"),
@@ -1264,6 +1266,7 @@ class Repository:
         tasks, invalid_task_count, conflicting_task_id_count = (
             _deduplicate_metric_tasks(tasks_source) if tasks_available else ([], 0, 0)
         )
+
         ctu_tasks = {
             task["id"]: task
             for task in tasks
@@ -2650,6 +2653,53 @@ class Repository:
                 )
 
         return {"runId": run_id, "metrics": metrics}
+
+    def get_throughput_metrics(
+        self,
+        run_id: str,
+        generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Aggregate outbound-delivery evidence through read-only SQLite connections."""
+
+        if generation is not None and (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 1
+        ):
+            raise ValueError("generation must be a positive integer")
+        with get_read_conn() as conn:
+            run_row = conn.execute(
+                "SELECT status, payload FROM simulation_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                return None
+            event_rows = conn.execute(
+                """SELECT id, tick, event_type, payload
+                   FROM simulation_events
+                   WHERE run_id = ? AND event_type = ?
+                   ORDER BY id ASC""",
+                (run_id, DELIVERY_EVENT_TYPE),
+            ).fetchall()
+        state = decode_json(run_row["payload"])
+        decoded_events = [
+            {
+                "id": int(row["id"]),
+                "tick": int(row["tick"]),
+                "event_type": row["event_type"],
+                "payload": decode_json(row["payload"]),
+            }
+            for row in event_rows
+        ]
+        deadlock = self.get_deadlock_lifecycle_metrics(run_id, generation=generation)
+        return build_throughput_metrics(
+            run_id,
+            str(run_row["status"]),
+            state,
+            decoded_events,
+            generation=generation,
+            deadlock_metrics=deadlock,
+        )
 
     def add_event(self, run_id: str, tick: int, event_type: str, payload: dict[str, Any]) -> None:
         with get_conn() as conn:

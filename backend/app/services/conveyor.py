@@ -278,6 +278,19 @@ def compile_conveyor_graph(topology: dict[str, Any]) -> dict[str, Any]:
                         and opposite_side(out_side) in conveyor_input_sides(out_config)
                     ):
                         out_key = f"{floor}:{row + out_dr}:{col + out_dc}:{deck}"
+                    elif (
+                        cell.get("conveyorDecks")
+                        and out_block.get("conveyorDecks")
+                        and same_line(cell, out_block)
+                        and out_config
+                        and out_config.get("enabled", True)
+                    ):
+                        issues.append({
+                            "code": "CONVEYOR_MANUAL_NEIGHBOR_DIRECTION_MISMATCH",
+                            "blockId": key,
+                            "deck": deck,
+                            "message": "相邻手动配置模块的出口方向与下游入口方向不匹配。",
+                        })
                 nexts[out_side] = out_key
             next_key: str | None = next((nk for nk in nexts.values() if nk), None)
             for accepted_input in input_sides:

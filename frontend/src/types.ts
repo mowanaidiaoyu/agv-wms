@@ -601,6 +601,7 @@ export interface AlgorithmExperimentContractInput {
   seed: number
   topologyRevision: string
   safetyLimitTicks: number
+  observationTicks?: number
   pathPolicy: 'astar' | 'dijkstra'
   assignmentPolicy: 'greedy' | 'hungarian'
   variableDimension: 'pathPolicy' | 'assignmentPolicy'
@@ -638,6 +639,7 @@ export interface AlgorithmExperimentRunSummary {
   pathPolicy: 'astar' | 'dijkstra'
   assignmentPolicy: 'greedy' | 'hungarian'
   algorithmVersion: string
+  observationTicks?: number | null
   simulatedSeconds: number | null
   tick: number
 }
@@ -686,6 +688,65 @@ export interface AlgorithmComparisonResult {
   planningDurationSavedMs: number | null
   planningTimeImprovementPercent: number | null
   blockedRobotTicksChange: number | null
+}
+
+export interface ThroughputTrendPoint {
+  tick: number
+  simulatedSeconds: number | null
+  cumulativeDeliveredPieces: number
+}
+
+export interface ThroughputRunMetrics {
+  contractVersion: 'throughput-metrics-v1'
+  runId: string
+  generation: number
+  status: string
+  stopReason: string | null
+  algorithm: {
+    pathPolicy: string | null
+    assignmentPolicy: string | null
+    variableDimension: string | null
+  }
+  scenarioSignature: string | null
+  experimentContract?: AlgorithmExperimentContractInput | null
+  observationTick: number
+  configuredObservationTicks: number | null
+  observationSeconds: number | null
+  deliveredPieces: number | null
+  deliveredBoxes: number | null
+  completedOrderCount: number
+  totalOrderCount: number
+  orderCompletionRatePercent: number | null
+  throughputPiecesPerSimulatedHour: number | null
+  deliveryTrend: ThroughputTrendPoint[]
+  blockedRobotTicks: number | null
+  physicalTravelWaitRobotTicks: number | null
+  persistentCycleEpisodeCount: number | null
+  averageTaskLifecycleSeconds: number | null
+  dataQuality: string
+  reason: string | null
+  acceptanceEligible: boolean
+  evidenceSummary: {
+    uniqueDeliveryCount: number
+    duplicateDeliveryCount: number
+    conflictingDeliveryCount: number
+    invalidDeliveryCount: number
+    windowReached: boolean
+  }
+}
+
+export interface ThroughputComparisonResult {
+  contractVersion: 'throughput-comparison-v1'
+  comparisonType: 'THROUGHPUT_COMPARISON'
+  baseline: ThroughputRunMetrics
+  candidate: ThroughputRunMetrics
+  comparable: boolean
+  comparisonReasons: string[]
+  deliveredPiecesIncrease: number | null
+  throughputImprovementPercent: number | null
+  throughputImprovementReason: string | null
+  blockedRobotTicksChange: number | null
+  physicalTravelWaitRobotTicksChange: number | null
 }
 
 export interface MotionDistanceMetricValue {
@@ -1458,7 +1519,7 @@ export interface GoodsInventory {
 export interface SimulationState {
   id: string
   status: 'idle' | 'running' | 'paused' | 'stopped' | 'completed'
-  stopReason?: 'user' | 'safety_limit' | 'transfer_failed' | 'task_failed' | 'runtime_error' | null
+  stopReason?: 'user' | 'safety_limit' | 'observation_window_complete' | 'transfer_failed' | 'task_failed' | 'runtime_error' | null
   runtimeError?: {
     type: string
     message: string

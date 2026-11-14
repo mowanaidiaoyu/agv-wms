@@ -245,10 +245,17 @@ class AlgorithmExperimentContractRequest(BaseModel):
     seed: int = Field(ge=0)
     topologyRevision: str = Field(min_length=1)
     safetyLimitTicks: int = Field(ge=1, le=100_000)
+    observationTicks: int | None = Field(default=None, ge=1, le=100_000)
     pathPolicy: Literal["astar", "dijkstra"] = "astar"
     assignmentPolicy: Literal["greedy", "hungarian"] = "greedy"
     variableDimension: Literal["pathPolicy", "assignmentPolicy"]
     algorithmVersion: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_observation_window(self):
+        if self.observationTicks is not None and self.observationTicks > self.safetyLimitTicks:
+            raise ValueError("observationTicks must not exceed safetyLimitTicks")
+        return self
 
 
 class SimulationStartRequest(BaseModel):

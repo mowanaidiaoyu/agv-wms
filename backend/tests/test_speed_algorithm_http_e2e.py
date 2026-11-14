@@ -161,8 +161,23 @@ def _run_isolated_speed_and_algorithm_http_chain(app: object) -> None:
         assert hashlib.sha256(DEFAULT_DB.read_bytes()).hexdigest() == DEFAULT_DB_SHA
 
 
-def test_isolated_speed_and_algorithm_http_chain() -> None:
+def test_isolated_speed_and_algorithm_http_chain(monkeypatch) -> None:
     with isolated_seeded_database(ISOLATED_DB):
+        # The contract under test is simulated-time/algorithm behavior, not a
+        # 35-second wall-clock race.  Keep every logical tick and event-loop
+        # yield, but remove the playback delay so loaded CI hosts are deterministic.
+        from app.services import simulation as simulation_module
+
+        original_sleep = simulation_module.asyncio.sleep
+
+        async def yield_without_playback_delay(_seconds: float) -> None:
+            await original_sleep(0)
+
+        monkeypatch.setattr(
+            simulation_module.asyncio,
+            "sleep",
+            yield_without_playback_delay,
+        )
         from app.main import app
 
         _run_isolated_speed_and_algorithm_http_chain(app)

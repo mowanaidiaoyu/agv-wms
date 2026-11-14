@@ -25,6 +25,8 @@ import type {
   SyntheticEtaPredictionResult,
   SyntheticWaveOptimizationResult,
   TaskMetricSummary,
+  ThroughputComparisonResult,
+  ThroughputTrendPoint,
 } from '../types'
 import './AnalyticsPage.css'
 
@@ -552,6 +554,93 @@ function ComparisonBars({
   return <div className="analytics-compare-chart"><h4>{title}</h4>{row(baselineLabel, baseline, 'baseline')}{row(candidateLabel, candidate, 'candidate')}</div>
 }
 
+function ThroughputTrendChart({
+  baseline,
+  candidate,
+  baselineLabel,
+  candidateLabel,
+}: {
+  baseline: ThroughputTrendPoint[]
+  candidate: ThroughputTrendPoint[]
+  baselineLabel: string
+  candidateLabel: string
+}) {
+  const width = 720
+  const height = 230
+  const padding = 34
+  const maxTick = Math.max(1, ...baseline.map((point) => point.tick), ...candidate.map((point) => point.tick))
+  const maxPieces = Math.max(1, ...baseline.map((point) => point.cumulativeDeliveredPieces), ...candidate.map((point) => point.cumulativeDeliveredPieces))
+  const points = (rows: ThroughputTrendPoint[]) => rows.map((point) => {
+    const x = padding + point.tick / maxTick * (width - padding * 2)
+    const y = height - padding - point.cumulativeDeliveredPieces / maxPieces * (height - padding * 2)
+    return `${x},${y}`
+  }).join(' ')
+  return <div className="analytics-throughput-trend">
+    <div className="analytics-throughput-legend"><span className="baseline">{baselineLabel}</span><span className="candidate">{candidateLabel}</span></div>
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="累计有效交付件数随仿真Tick变化">
+      <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
+      <line x1={padding} y1={padding} x2={padding} y2={height - padding} />
+      <polyline className="baseline" points={points(baseline)} />
+      <polyline className="candidate" points={points(candidate)} />
+      <text x={padding} y={height - 8}>Tick 0</text>
+      <text x={width - padding} y={height - 8} textAnchor="end">Tick {maxTick}</text>
+      <text x={padding + 4} y={padding - 8}>{maxPieces} 件</text>
+    </svg>
+  </div>
+}
+
+function ThroughputComparisonPanel({ baselineRunId, candidateRunId }: { baselineRunId: string; candidateRunId: string }) {
+  const enabled = Boolean(baselineRunId && candidateRunId && baselineRunId !== candidateRunId)
+  const query = useQuery({
+    queryKey: ['algorithm-throughput-comparison', baselineRunId, candidateRunId],
+    queryFn: () => api.compareAlgorithmThroughput(baselineRunId, candidateRunId),
+    enabled,
+    retry: false,
+  })
+  const result: ThroughputComparisonResult | undefined = query.data
+  if (!enabled) {
+    return <div className="analytics-throughput-panel" id="throughput-comparison">
+      <h4>运输吞吐量对比</h4>
+      <p className="analytics-data-note">选择两个固定观察窗口实验Run后，显示侧向理货臂真实放入 drop_zone 的累计交付件数。已拣件数、库存预留量和跨层移库数量不会计入。</p>
+    </div>
+  }
+  if (query.isError) {
+    return <div className="analytics-throughput-panel" id="throughput-comparison"><QueryError name="运输吞吐量对比" error={query.error} retry={() => { void query.refetch() }} /></div>
+  }
+  if (!result) {
+    return <div className="analytics-throughput-panel" id="throughput-comparison" role="status">正在读取固定窗口交付证据…</div>
+  }
+  const baselineLabel = `${result.baseline.algorithm.pathPolicy?.toUpperCase() ?? '—'} / ${result.baseline.algorithm.assignmentPolicy ?? '—'}`
+  const candidateLabel = `${result.candidate.algorithm.pathPolicy?.toUpperCase() ?? '—'} / ${result.candidate.algorithm.assignmentPolicy ?? '—'}`
+  return <div className="analytics-throughput-panel" id="throughput-comparison">
+    <div className="analytics-throughput-title"><div><span>P6</span><h4>运输吞吐量对比</h4></div><b>{result.comparable ? '固定窗口可比' : '保留证据 · 不输出正式提升率'}</b></div>
+    <p className="analytics-data-note">口径：侧向理货臂把货物真实放入合同指定 drop_zone 后，按SKU实际件数累计。观察窗口不同、场景签名不同或证据不完整时，不计算正式改善率。</p>
+    <div className="analytics-throughput-kpis">
+      <div><span>基线运输件数</span><b>{result.baseline.deliveredPieces ?? '—'}</b><small>{baselineLabel}</small></div>
+      <div><span>候选运输件数</span><b>{result.candidate.deliveredPieces ?? '—'}</b><small>{candidateLabel}</small></div>
+      <div><span>增加运输件数</span><b>{result.comparable ? result.deliveredPiecesIncrease ?? '—' : '—'}</b><small>候选 - 基线</small></div>
+      <div><span>吞吐量提升率</span><b>{result.comparable && result.throughputImprovementPercent !== null ? `${formatNumber(result.throughputImprovementPercent, 2)}%` : '—'}</b><small>{result.throughputImprovementReason ?? '件/仿真小时'}</small></div>
+    </div>
+    {!result.comparable ? <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。原始交付量和趋势继续保留。</span></div> : null}
+    <div className="analytics-throughput-visuals">
+      <ComparisonBars title="相同观察时间内有效交付件数" baselineLabel={baselineLabel} candidateLabel={candidateLabel} baseline={result.baseline.deliveredPieces} candidate={result.candidate.deliveredPieces} unit="件" />
+      <div className="analytics-throughput-rate"><span>基线吞吐率<b>{result.baseline.throughputPiecesPerSimulatedHour === null ? '—' : `${formatNumber(result.baseline.throughputPiecesPerSimulatedHour, 2)} 件/仿真小时`}</b></span><span>候选吞吐率<b>{result.candidate.throughputPiecesPerSimulatedHour === null ? '—' : `${formatNumber(result.candidate.throughputPiecesPerSimulatedHour, 2)} 件/仿真小时`}</b></span><small>窗口：{result.baseline.observationTick} Tick / {result.baseline.observationSeconds ?? '—'} 秒</small></div>
+    </div>
+    <h4 className="analytics-subhead">累计有效交付趋势</h4>
+    <ThroughputTrendChart baseline={result.baseline.deliveryTrend} candidate={result.candidate.deliveryTrend} baselineLabel={baselineLabel} candidateLabel={candidateLabel} />
+    <h4 className="analytics-subhead">效率与运行质量</h4>
+    <div className="analytics-comparison-matrix analytics-throughput-matrix">
+      <span>指标</span><b>基线</b><b>候选</b>
+      <span>订单完成率</span><b>{result.baseline.orderCompletionRatePercent === null ? '—' : `${formatNumber(result.baseline.orderCompletionRatePercent, 2)}%`}</b><b>{result.candidate.orderCompletionRatePercent === null ? '—' : `${formatNumber(result.candidate.orderCompletionRatePercent, 2)}%`}</b>
+      <span>物理行驶等待</span><b>{result.baseline.physicalTravelWaitRobotTicks === null ? '—' : `${result.baseline.physicalTravelWaitRobotTicks} robot·Tick`}</b><b>{result.candidate.physicalTravelWaitRobotTicks === null ? '—' : `${result.candidate.physicalTravelWaitRobotTicks} robot·Tick`}</b>
+      <span>阻塞</span><b>{result.baseline.blockedRobotTicks === null ? '—' : `${result.baseline.blockedRobotTicks} robot·Tick`}</b><b>{result.candidate.blockedRobotTicks === null ? '—' : `${result.candidate.blockedRobotTicks} robot·Tick`}</b>
+      <span>持续循环等待</span><b>{result.baseline.persistentCycleEpisodeCount ?? '—'}</b><b>{result.candidate.persistentCycleEpisodeCount ?? '—'}</b>
+      <span>平均任务耗时</span><b>{result.baseline.averageTaskLifecycleSeconds === null ? '—' : `${formatNumber(result.baseline.averageTaskLifecycleSeconds, 2)} s`}</b><b>{result.candidate.averageTaskLifecycleSeconds === null ? '—' : `${formatNumber(result.candidate.averageTaskLifecycleSeconds, 2)} s`}</b>
+      <span>数据质量</span><b>{result.baseline.dataQuality}</b><b>{result.candidate.dataQuality}</b>
+    </div>
+  </div>
+}
+
 function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: () => void }) {
   const [baselineRunId, setBaselineRunId] = useState('')
   const [candidateRunId, setCandidateRunId] = useState('')
@@ -645,6 +734,7 @@ function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: 
         </div>
       </> : <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。保留原始 Run 数据，但隐藏正式改善率。</span></div>}
     </> : null}
+    <ThroughputComparisonPanel baselineRunId={baselineRunId} candidateRunId={candidateRunId} />
   </section>
 }
 

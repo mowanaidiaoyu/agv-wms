@@ -18,6 +18,8 @@ import type {
   AlgorithmExperimentContractInput,
   AlgorithmExperimentRunSummary,
   AlgorithmComparisonResult,
+  ThroughputComparisonResult,
+  ThroughputRunMetrics,
   RunPerformanceMetrics,
   SyntheticAbcHeatResult,
   SyntheticEtaPredictionResult,
@@ -268,6 +270,15 @@ export const api = {
   compareAlgorithmExperimentRuns(baselineRunId: string, candidateRunId: string) {
     const query = new URLSearchParams({ baselineRunId, candidateRunId })
     return request<AlgorithmComparisonResult>(`/algorithm-experiments/compare?${query.toString()}`)
+  },
+  getSimulationThroughputMetrics(runId: string, generation?: number) {
+    const encodedRunId = encodeURIComponent(runId)
+    const query = generation === undefined ? '' : `?generation=${encodeURIComponent(String(generation))}`
+    return request<ThroughputRunMetrics>(`/simulations/${encodedRunId}/metrics/throughput${query}`)
+  },
+  compareAlgorithmThroughput(baselineRunId: string, candidateRunId: string) {
+    const query = new URLSearchParams({ baselineRunId, candidateRunId })
+    return request<ThroughputComparisonResult>(`/algorithm-experiments/throughput-compare?${query.toString()}`)
   },
   getSyntheticAbcHeatResult() {
     return requestSynthetic<SyntheticAbcHeatResult>('/analytics-synthetic-v1/abc_heat_seed42.json', ['PASS'])

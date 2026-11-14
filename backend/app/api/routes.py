@@ -31,6 +31,7 @@ from ..analytics.algorithm_experiment_metrics import (
     build_run_performance_metrics,
     compare_algorithm_experiment_runs,
 )
+from ..analytics.throughput_metrics import compare_throughput_metrics
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
@@ -431,6 +432,16 @@ def get_simulation_run_performance_metrics(run_id: str):
     return metrics
 
 
+@router.get("/simulations/{run_id}/metrics/throughput")
+def get_simulation_throughput_metrics(run_id: str, generation: int | None = None):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_throughput_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
 @router.get("/algorithm-experiments")
 def list_algorithm_experiments():
     return {
@@ -447,6 +458,17 @@ def compare_algorithm_experiments(baselineRunId: str, candidateRunId: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Experiment Run not found")
     return result
+
+
+@router.get("/algorithm-experiments/throughput-compare")
+def compare_algorithm_throughput(baselineRunId: str, candidateRunId: str):
+    if baselineRunId == candidateRunId:
+        raise HTTPException(status_code=422, detail="Select two different experiment Runs")
+    baseline = repo.get_throughput_metrics(baselineRunId)
+    candidate = repo.get_throughput_metrics(candidateRunId)
+    if baseline is None or candidate is None:
+        raise HTTPException(status_code=404, detail="Experiment Run not found")
+    return compare_throughput_metrics(baseline, candidate)
 
 
 @ws_router.websocket("/ws/simulation/{run_id}")

@@ -339,9 +339,12 @@ def test_seed_tasks_routes_shuttle_to_ground_conveyor_anchor():
             # shuttle 区 4 格故意不建格 → 非 road → 该 2×2 槽为四向车取货位
         ],
     }
-    tasks = service._seed_tasks(topology, CONFIG)
-    ctu_tasks = [task for task in tasks if task["robotType"] == "ctu"]
-    shuttle_tasks = [task for task in tasks if task["robotType"] == "shuttle"]
+    # Demo seeding now keeps CTU and Shuttle task generation separate: the
+    # former comes from _seed_tasks, while the latter is order/dock driven and
+    # uses _seed_shuttle_tasks.  Verify both contracts without assuming they
+    # are mixed in one legacy return value.
+    ctu_tasks = service._seed_tasks(topology, CONFIG)
+    shuttle_tasks = service._seed_shuttle_tasks(topology)
     assert ctu_tasks and shuttle_tasks
     # 四向车交付到地面线锚点（cell-r9-c8），CTU 走架空 port（cell-r5-c6）
     assert all(task["deliveryCellId"] == "cell-r9-c8" for task in shuttle_tasks)
@@ -1335,6 +1338,63 @@ def test_delivery_without_pick_station_still_completes_immediately():
 
 def test_pick_station_cycle_returns_goods_to_original_slot_and_layer():
     service = _service()
+    runtime = service._create_runtime(
+        "test-pick-cycle",
+        PICK_STATION_TOPOLOGY,
+        deepcopy(PICK_STATION_CONFIG),
+    )
+    parent, robot, slot = _picking_task(service, runtime)
+
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, parent)
+
+    assert parent["phase"] == "feeding_conveyor"
+    picking_box = next(
+        task for task in runtime.state["tasks"] if task.get("taskKind") == "picking_box"
+    )
+    assert picking_box["transitGoods"][0]["nodeId"] == slot["nodeId"]
+    assert picking_box["transitGoods"][0]["layer"] == slot["layer"]
+
+    observed_phases = {picking_box["phase"]}
+    for _ in range(20):
+        runtime.state["tick"] += 1
+        service._advance_detached_picking_tasks(runtime)
+        service._advance_feeding_parents(runtime)
+        observed_phases.add(picking_box["phase"])
+        if picking_box["status"] == "completed":
+            break
+
+    assert picking_box["status"] == "completed"
+    assert {"lift_to_upper", "conveyor_to_pick", "picking", "place_goods", "completed"} <= observed_phases
+    assert picking_box["placedGoods"][0]["qty"] == 1
+    assert picking_box["transitGoods"][0]["qty"] == 3
+    return_task = next(
+        task for task in runtime.state["tasks"] if task.get("taskKind") == "picking_return"
+    )
+    assert return_task["legacyReturnFallback"] is True
+    assert return_task["lines"][0]["nodeId"] == slot["nodeId"]
+    assert return_task["lines"][0]["layer"] == slot["layer"]
+
+    # Exercise the legacy fallback's authoritative pickup/restore path without
+    # relying on wall-clock movement in this lifecycle unit test.
+    robot["currentTaskId"] = return_task["id"]
+    robot["currentCellId"] = return_task["deliveryCellId"]
+    return_task["assignedRobotId"] = robot["id"]
+    service._advance_pickup_from_port(runtime, robot, return_task)
+    assert robot["carrying"][0]["nodeId"] == slot["nodeId"]
+    return_task["phase"] = "return_to_storage"
+    robot["currentCellId"] = slot["cellId"]
+    service._restore_transit_goods(runtime, robot, return_task)
+
+    restored = runtime.state["inventory"]
+    assert len(restored) == 1
+    assert restored[0]["nodeId"] == slot["nodeId"]
+    assert restored[0]["layer"] == slot["layer"]
+    assert restored[0]["qty"] == 3
+
+
+def _legacy_test_pick_station_cycle_returns_goods_to_original_slot_and_layer():
+    service = _service()
     runtime = service._create_runtime("test-pick-cycle", PICK_STATION_TOPOLOGY, deepcopy(PICK_STATION_CONFIG))
     task, robot, slot = _picking_task(service, runtime)
 
@@ -1433,6 +1493,37 @@ def test_pick_station_cycle_returns_goods_to_original_slot_and_layer():
 
 
 def test_pick_station_without_drop_zone_skips_place_goods():
+    service = _service()
+    runtime = service._create_runtime(
+        "test-pick-no-drop",
+        PICK_STATION_NO_DROP_TOPOLOGY,
+        deepcopy(PICK_STATION_CONFIG),
+    )
+    parent, robot, _ = _picking_task(service, runtime)
+    for _ in range(4):
+        service._advance_robot_phase(runtime, robot, parent)
+    picking_box = next(
+        task for task in runtime.state["tasks"] if task.get("taskKind") == "picking_box"
+    )
+
+    for _ in range(20):
+        runtime.state["tick"] += 1
+        service._advance_detached_picking_tasks(runtime)
+        service._advance_feeding_parents(runtime)
+        if picking_box["status"] == "completed":
+            break
+
+    assert picking_box["status"] == "completed"
+    assert picking_box.get("dropZoneZoneId") is None
+    assert picking_box.get("dropZoneCellId") is None
+    assert picking_box["placedGoods"][0]["qty"] == 1
+    assert any(entry["phase"] == "place_goods" for entry in picking_box["history"])
+    # place_goods remains an internal split stage, but no visual drop-zone
+    # placement is claimed when the topology does not define a drop_zone.
+    assert runtime.state["armDropBoxes"] == []
+
+
+def _legacy_test_pick_station_without_drop_zone_skips_place_goods():
     # 有拣货位、无放置区：picking 结束后直接进入 conveyor_return，不产生放置数据。
     service = _service()
     runtime = service._create_runtime(

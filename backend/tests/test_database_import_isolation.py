@@ -55,3 +55,20 @@ def test_cached_runtime_seed_is_rebound_for_each_isolated_database(
         app_db.DB_PATH = previous_db_path
 
     assert hashlib.sha256(DEFAULT_DB.read_bytes()).hexdigest() == default_sha
+
+
+def test_cached_runtime_never_restores_default_database_pointer(tmp_path: Path) -> None:
+    from app.services import runtime
+
+    before_config_path = app_config.DB_PATH
+    before_db_path = app_db.DB_PATH
+    assert before_config_path.resolve() != DEFAULT_DB.resolve()
+    assert before_db_path.resolve() != DEFAULT_DB.resolve()
+
+    with isolated_seeded_database(tmp_path / "cached-runtime.db") as rebound_runtime:
+        assert rebound_runtime is runtime
+        assert app_config.DB_PATH.resolve() != DEFAULT_DB.resolve()
+        assert app_db.DB_PATH.resolve() != DEFAULT_DB.resolve()
+
+    assert app_config.DB_PATH == before_config_path
+    assert app_db.DB_PATH == before_db_path
