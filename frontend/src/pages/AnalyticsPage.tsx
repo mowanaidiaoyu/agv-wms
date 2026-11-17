@@ -863,6 +863,9 @@ export function AnalyticsPage() {
   const shuttleDistance = motionData?.totalMetrics.shuttleHorizontalMeters
   const totalHorizontalDistance = motionData?.totalMetrics.totalHorizontalMeters
   const liftVerticalDistance = motionData?.totalMetrics.shuttleLiftVerticalMeters
+  const fixedWindowEvidence = motionData?.windowMotionEvidence?.scope === 'FIXED_OBSERVATION_WINDOW'
+    ? motionData.windowMotionEvidence
+    : undefined
   const showMotion = [ctuDistance, shuttleDistance, totalHorizontalDistance, liftVerticalDistance]
     .some((metric) => hasNumericValue(metric?.value))
   const showPathAndMotion = showPath || showMotion || motionQuery.isError
@@ -1060,11 +1063,16 @@ export function AnalyticsPage() {
           <div className="analytics-module-top"><div><span className="analytics-module-no">6.6</span><h3>路径规划与车辆实际里程</h3></div><span className="analytics-state analytics-state-partial">仿真实际运动段</span></div>
           {motionQuery.isError ? <QueryError name="车辆实际里程指标" error={motionQuery.error} retry={() => { void motionQuery.refetch() }} /> : null}
           {showMotion ? <>
+            {fixedWindowEvidence ? <div className={`analytics-window-evidence ${fixedWindowEvidence.evidenceComplete ? 'is-complete' : 'is-incomplete'}`} aria-label="固定观察窗口运动证据">
+              <strong>{fixedWindowEvidence.evidenceComplete ? '固定观察窗口运动证据完整。' : '固定观察窗口运动证据不完整。'}</strong>
+              <span>本Run按 {fixedWindowEvidence.configuredObservationTicks ?? '未声明'} Tick观察窗口结束，窗口内里程不代表完成全部订单所需里程。</span>
+              <small>实际结束 Tick：{fixedWindowEvidence.actualEndTick ?? '未知'} · 停止原因：{fixedWindowEvidence.stopReason ?? '未知'} · 证据质量：{fixedWindowEvidence.evidenceQuality}</small>
+            </div> : null}
             <h4 className="analytics-subhead">A. 水平行驶</h4>
             <div className="analytics-kpi-grid analytics-distance-grid">
-              <DistanceCard label="CTU 总水平行驶距离" metric={ctuDistance} />
-              <DistanceCard label="Shuttle 总水平行驶距离" metric={shuttleDistance} />
-              <DistanceCard label="总水平行驶距离" metric={totalHorizontalDistance} />
+              <DistanceCard label={fixedWindowEvidence ? '窗口内 CTU 水平距离' : 'CTU 总水平行驶距离'} metric={ctuDistance} />
+              <DistanceCard label={fixedWindowEvidence ? '窗口内 Shuttle 水平距离' : 'Shuttle 总水平行驶距离'} metric={shuttleDistance} />
+              <DistanceCard label={fixedWindowEvidence ? '窗口内总水平距离' : '总水平行驶距离'} metric={totalHorizontalDistance} />
             </div>
             <p className="analytics-data-note">水平里程来自 CTU 与 Shuttle 已提交的实际运动段，不包含 Lift 垂直运输。</p>
             {motionData && hasNumericValue(motionData.metersPerCell) ? <div className="analytics-motion-contract" aria-label="物理距离合同">
@@ -1077,7 +1085,7 @@ export function AnalyticsPage() {
             </div> : null}
             <h4 className="analytics-subhead">B. 垂直运输</h4>
             {hasValidLiftMovement ? <div className="analytics-vertical-transport">
-              <DistanceCard label="Lift 垂直位移" metric={liftVerticalDistance} />
+              <DistanceCard label={fixedWindowEvidence ? '窗口内 Lift 垂直位移' : 'Lift 垂直位移'} metric={liftVerticalDistance} />
               <div><span>有效 Lift 运动段</span><b>{liftMovementMetric?.movementCount}</b><small>垂直位移与车辆自主水平里程分别统计</small></div>
               <div><span>相关数据质量</span><b>{liftMovementMetric?.dataQuality}</b><small>{motionData?.observationCompleteness}</small></div>
             </div> : <div className="analytics-no-lift"><Info size={16} /><span>当前Run未记录有效Lift垂直运输段。</span></div>}

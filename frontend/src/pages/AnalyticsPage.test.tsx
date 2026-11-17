@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePlatformStore } from '../store/usePlatformStore'
 import { api } from '../lib/api'
-import type { ContractMetric, DeadlockLifecycleMetric, DeadlockLifecycleMetrics, ThroughputComparisonResult, ThroughputRunMetrics } from '../types'
+import type { ContractMetric, DeadlockLifecycleMetric, DeadlockLifecycleMetrics, MotionDistanceMetrics, ThroughputComparisonResult, ThroughputRunMetrics } from '../types'
 import { AnalyticsPage } from './AnalyticsPage'
 
 function metric(metricId: string, value: unknown, overrides: Partial<ContractMetric> = {}): ContractMetric {
@@ -272,6 +272,25 @@ function responses(runId: string) {
     totalRobotCount: 2,
     perRobotMetricsTruncated: false,
     evidenceSummary: {},
+    windowMotionEvidence: {
+      contractVersion: 'fixed-window-motion-evidence-v1',
+      scope: 'FULL_RUN',
+      configuredObservationTicks: null,
+      actualEndTick: 635,
+      stopReason: null,
+      observerEndReason: 'completed',
+      evidenceQuality: 'NOT_APPLICABLE',
+      windowComplete: false,
+      evidenceComplete: false,
+      comparisonEligible: false,
+      eligibilityReason: 'FIXED_OBSERVATION_WINDOW_NOT_CONFIGURED',
+      consistencyIssues: [],
+      scenarioSignature: null,
+      topologyRevision: null,
+      physicsContractHash: null,
+      speedContractHash: null,
+      completedNaturally: true,
+    },
     plannedHorizontalMeters: null,
     extraDistanceMeters: null,
     attributableReplanExtraMeters: null,
@@ -805,6 +824,67 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/0.800 m/)
     expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/用户定义模拟参数\s*是/)
     expect(within(section).getByText(/Lift 位移是垂直运输证据/)).toBeInTheDocument()
+  })
+
+  it('labels complete fixed-window mileage without claiming natural completion', async () => {
+    installFetch((url, payload) => {
+      if (!url.includes('/metrics/motion-distance')) return undefined
+      const changed = structuredClone(payload) as unknown as MotionDistanceMetrics
+      changed.dataQuality = 'DEGRADED'
+      changed.reason = 'FIXED_OBSERVATION_WINDOW_COMPLETE'
+      changed.windowMotionEvidence = {
+        ...changed.windowMotionEvidence,
+        scope: 'FIXED_OBSERVATION_WINDOW',
+        configuredObservationTicks: 600,
+        actualEndTick: 600,
+        stopReason: 'observation_window_complete',
+        observerEndReason: 'observation_window_complete',
+        evidenceQuality: 'COMPLETE',
+        windowComplete: true,
+        evidenceComplete: true,
+        comparisonEligible: true,
+        eligibilityReason: 'FIXED_OBSERVATION_WINDOW_MOTION_EVIDENCE_COMPLETE',
+        completedNaturally: false,
+      }
+      return new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    renderPage()
+    const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
+    const evidence = within(section).getByLabelText('固定观察窗口运动证据')
+    expect(evidence).toHaveTextContent('固定观察窗口运动证据完整。')
+    expect(evidence).toHaveTextContent('本Run按 600 Tick观察窗口结束')
+    expect(evidence).toHaveTextContent('不代表完成全部订单所需里程')
+    expect(within(section).getByText('窗口内 CTU 水平距离')).toBeInTheDocument()
+    expect(within(section).getByText('窗口内 Lift 垂直位移')).toBeInTheDocument()
+  })
+
+  it('reports incomplete fixed-window evidence without converting null mileage to zero', async () => {
+    installFetch((url, payload) => {
+      if (!url.includes('/metrics/motion-distance')) return undefined
+      const changed = structuredClone(payload) as unknown as MotionDistanceMetrics
+      changed.totalMetrics.ctuHorizontalMeters.value = null
+      changed.windowMotionEvidence = {
+        ...changed.windowMotionEvidence,
+        scope: 'FIXED_OBSERVATION_WINDOW',
+        configuredObservationTicks: 600,
+        actualEndTick: 599,
+        stopReason: 'user',
+        observerEndReason: 'user',
+        evidenceQuality: 'INCOMPLETE',
+        windowComplete: false,
+        evidenceComplete: false,
+        comparisonEligible: false,
+        eligibilityReason: 'OBSERVATION_STOP_REASON_MISMATCH',
+        consistencyIssues: ['OBSERVATION_STOP_REASON_MISMATCH'],
+        completedNaturally: false,
+      }
+      return new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    renderPage()
+    const section = (await screen.findByText('路径规划与车辆实际里程')).closest('.analytics-module') as HTMLElement
+    expect(within(section).getByText('固定观察窗口运动证据不完整。')).toBeInTheDocument()
+    expect(within(section).queryByText('窗口内 CTU 水平距离')).not.toBeInTheDocument()
+    expect(within(section).queryByText('0.000 m', { selector: '.analytics-distance-kpi *' })).not.toBeInTheDocument()
   })
 
   it('does not invent zero vertical distance when no valid Lift segment exists', async () => {

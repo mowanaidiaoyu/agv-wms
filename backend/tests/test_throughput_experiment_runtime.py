@@ -209,6 +209,14 @@ def test_real_multi_ctu_fixed_window_throughput_pairs_are_fair_and_complete(
         allocated = sum(int(order["decomposition"]["allocatedPieces"]) for order in state["orders"])
         picked = sum(int(order["decomposition"]["pickedPieces"]) for order in state["orders"])
         delivered = repo.get_throughput_metrics(run_id)["deliveredPieces"]
+        motion = repo.get_motion_distance_metrics(run_id)
+        assert motion is not None
+        assert motion["dataQuality"] == "DEGRADED"
+        assert motion["reason"] == "FIXED_OBSERVATION_WINDOW_COMPLETE"
+        assert motion["acceptanceEligible"] is False
+        assert motion["windowMotionEvidence"]["scope"] == "FIXED_OBSERVATION_WINDOW"
+        assert motion["windowMotionEvidence"]["evidenceQuality"] == "COMPLETE"
+        assert motion["windowMotionEvidence"]["comparisonEligible"] is True
         assert 0 <= delivered <= picked <= allocated == 28
         delivery_ids = state["throughputDeliveryIds"]
         assert len(delivery_ids) == delivered

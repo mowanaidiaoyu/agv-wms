@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import hashlib
 import json
 from math import isfinite
 from typing import Any, Iterable, Mapping
@@ -27,6 +28,8 @@ MOVEMENT_TYPES = (
 )
 TOP_ROBOT_LIMIT = 20
 SOURCE = "simulation_events.robot_movement_batch_v1"
+WINDOW_EVIDENCE_CONTRACT_VERSION = "fixed-window-motion-evidence-v1"
+WINDOW_COMPARISON_CONTRACT_VERSION = "fixed-window-motion-comparison-v1"
 
 
 def _integer(value: object, *, minimum: int = 0) -> int | None:
@@ -203,7 +206,11 @@ def _snapshot_contract(snapshot: Mapping[str, Any] | None, target_generation: in
     return contract, version
 
 
-def _quality_for_run(status: str, snapshot: Mapping[str, Any] | None) -> tuple[str, str | None]:
+def _quality_for_run(
+    status: str,
+    snapshot: Mapping[str, Any] | None,
+    stop_reason: object,
+) -> tuple[str, str | None]:
     if snapshot is None:
         return "INCOMPLETE", "MOTION_DIAGNOSTIC_SNAPSHOT_MISSING"
     if snapshot.get("historicalRecoveryIncomplete") is True:
@@ -220,8 +227,135 @@ def _quality_for_run(status: str, snapshot: Mapping[str, Any] | None) -> tuple[s
     if end_reason in {"safety_limit", "runtime_error"}:
         return "INCOMPLETE", end_reason.upper()
     if status in {"stopped", "cancelled"}:
+        if (
+            status == "stopped"
+            and stop_reason == "observation_window_complete"
+            and end_reason == "observation_window_complete"
+        ):
+            return "DEGRADED", "FIXED_OBSERVATION_WINDOW_COMPLETE"
         return "DEGRADED", "RUN_STOPPED_BEFORE_NORMAL_COMPLETION"
     return "COMPLETE", None
+
+
+def _contract_hash(value: object) -> str | None:
+    contract = _payload(value)
+    if contract is None:
+        return None
+    return hashlib.sha256(_canonical(contract).encode("utf-8")).hexdigest()
+
+
+def _fixed_window_evidence(
+    state: Mapping[str, Any],
+    run_status: str,
+    target_generation: int,
+    target_snapshot: Mapping[str, Any] | None,
+    physics_available: bool,
+    completeness_issues: list[str],
+) -> dict[str, Any]:
+    experiment = _payload(state.get("algorithmExperimentContract"))
+    configured_ticks = _integer((experiment or {}).get("observationTicks"), minimum=1)
+    actual_end_tick = _integer(state.get("tick"))
+    stop_reason = state.get("stopReason") if isinstance(state.get("stopReason"), str) else None
+    scenario_signature = _identifier((experiment or {}).get("scenarioSignature"))
+    topology_revision = _identifier((experiment or {}).get("topologyRevision"))
+    physics_hash = _contract_hash(state.get("motionPhysicsContract"))
+    speed_contract = _payload(state.get("motionSpeedContract"))
+    speed_valid = bool(
+        speed_contract
+        and _identifier(speed_contract.get("speedContractVersion"))
+        and _number(speed_contract.get("simTickSeconds"), positive=True) is not None
+    )
+    speed_hash = _contract_hash(speed_contract) if speed_valid else None
+
+    if configured_ticks is None:
+        return {
+            "contractVersion": WINDOW_EVIDENCE_CONTRACT_VERSION,
+            "scope": "FULL_RUN",
+            "configuredObservationTicks": None,
+            "actualEndTick": actual_end_tick,
+            "stopReason": stop_reason,
+            "observerEndReason": target_snapshot.get("endReason") if target_snapshot else None,
+            "evidenceQuality": "NOT_APPLICABLE",
+            "windowComplete": False,
+            "evidenceComplete": False,
+            "comparisonEligible": False,
+            "eligibilityReason": "FIXED_OBSERVATION_WINDOW_NOT_CONFIGURED",
+            "consistencyIssues": [],
+            "scenarioSignature": scenario_signature,
+            "topologyRevision": topology_revision,
+            "physicsContractHash": physics_hash,
+            "speedContractHash": speed_hash,
+            "completedNaturally": run_status == "completed" and stop_reason is None,
+        }
+
+    issues: list[str] = []
+    if (experiment or {}).get("experimentContractVersion") != "algorithm-experiment-v1":
+        issues.append("FIXED_OBSERVATION_CONTRACT_INVALID")
+    if scenario_signature is None:
+        issues.append("SCENARIO_SIGNATURE_MISSING")
+    if run_status != "stopped":
+        issues.append("RUN_STATUS_NOT_STOPPED")
+    if stop_reason != "observation_window_complete":
+        issues.append("OBSERVATION_STOP_REASON_MISMATCH")
+    if actual_end_tick != configured_ticks:
+        issues.append("OBSERVATION_END_TICK_MISMATCH")
+    if target_snapshot is None:
+        issues.append("MOTION_DIAGNOSTIC_SNAPSHOT_MISSING")
+    else:
+        if target_snapshot.get("generation") != target_generation:
+            issues.append("MOTION_GENERATION_MISMATCH")
+        if target_snapshot.get("ended") is not True:
+            issues.append("MOTION_OBSERVER_NOT_ENDED")
+        if target_snapshot.get("endReason") != "observation_window_complete":
+            issues.append("MOTION_END_REASON_MISMATCH")
+        if _integer(target_snapshot.get("lastProcessedTick")) != configured_ticks:
+            issues.append("MOTION_SNAPSHOT_TICK_MISMATCH")
+        if target_snapshot.get("observationCompleteness") != "COMPLETE":
+            issues.append("MOTION_OBSERVATION_INCOMPLETE")
+        if (_integer(target_snapshot.get("pendingPersistenceCount")) or 0) > 0:
+            issues.append("EVENT_PERSISTENCE_PENDING")
+        if (_integer(target_snapshot.get("persistenceFailureCount")) or 0) > 0:
+            issues.append("EVENT_PERSISTENCE_FAILED")
+        if target_snapshot.get("historicalRecoveryIncomplete") is True:
+            issues.append("HISTORICAL_RECOVERY_INCOMPLETE")
+    issues.extend(issue for issue in completeness_issues if issue not in issues)
+    if not physics_available or physics_hash is None:
+        issues.append("PHYSICS_CONTRACT_UNAVAILABLE")
+    if not speed_valid or speed_hash is None:
+        issues.append("MOTION_SPEED_CONTRACT_UNAVAILABLE")
+
+    window_complete = bool(
+        run_status == "stopped"
+        and stop_reason == "observation_window_complete"
+        and actual_end_tick == configured_ticks
+        and target_snapshot
+        and target_snapshot.get("ended") is True
+        and target_snapshot.get("endReason") == "observation_window_complete"
+    )
+    evidence_complete = window_complete and not issues
+    return {
+        "contractVersion": WINDOW_EVIDENCE_CONTRACT_VERSION,
+        "scope": "FIXED_OBSERVATION_WINDOW",
+        "configuredObservationTicks": configured_ticks,
+        "actualEndTick": actual_end_tick,
+        "stopReason": stop_reason,
+        "observerEndReason": target_snapshot.get("endReason") if target_snapshot else None,
+        "evidenceQuality": "COMPLETE" if evidence_complete else "INCOMPLETE",
+        "windowComplete": window_complete,
+        "evidenceComplete": evidence_complete,
+        "comparisonEligible": bool(evidence_complete and scenario_signature),
+        "eligibilityReason": (
+            "FIXED_OBSERVATION_WINDOW_MOTION_EVIDENCE_COMPLETE"
+            if evidence_complete
+            else issues[0] if issues else "FIXED_OBSERVATION_WINDOW_MOTION_EVIDENCE_INCOMPLETE"
+        ),
+        "consistencyIssues": issues,
+        "scenarioSignature": scenario_signature,
+        "topologyRevision": topology_revision,
+        "physicsContractHash": physics_hash,
+        "speedContractHash": speed_hash,
+        "completedNaturally": False,
+    }
 
 
 def aggregate_motion_distance_metrics(
@@ -373,9 +507,13 @@ def aggregate_motion_distance_metrics(
             incomplete_robots.add(movement.robot_id)
         robot_types[movement.robot_id] = movement.robot_type
 
-    snapshot_quality, snapshot_reason = _quality_for_run(run_status, target_snapshot)
+    snapshot_quality, snapshot_reason = _quality_for_run(
+        run_status,
+        target_snapshot,
+        state.get("stopReason"),
+    )
     completeness_issues: list[str] = []
-    if malformed_batch_count or excluded_batch_count or invalid_count:
+    if malformed_batch_count or excluded_batch_count or invalid_count or invalid_reasons:
         completeness_issues.append("MALFORMED_OR_SCOPE_MISMATCH_EVIDENCE")
     if conflict_count:
         completeness_issues.append("MOVEMENT_ID_CONFLICT")
@@ -383,6 +521,8 @@ def aggregate_motion_distance_metrics(
         completeness_issues.append("PHYSICS_VERSION_MISMATCH")
     if trajectory_breaks:
         completeness_issues.append("TRAJECTORY_DISCONTINUITY")
+    if incomplete_movement_count:
+        completeness_issues.append("INCOMPLETE_MOVEMENT_EVIDENCE")
 
     last_movement = max(trusted, key=lambda item: (item.to_tick, item.event_sequence, item.movement_id), default=None)
     event_watermark = (
@@ -397,6 +537,15 @@ def aggregate_motion_distance_metrics(
     if target_snapshot and snapshot_watermark != event_watermark:
         # Explicit zero movement has no watermark on either side and is not a mismatch.
         completeness_issues.append("SNAPSHOT_EVENT_WATERMARK_MISMATCH")
+
+    window_motion_evidence = _fixed_window_evidence(
+        state,
+        run_status,
+        target_generation,
+        target_snapshot,
+        physics_available,
+        completeness_issues,
+    )
 
     generation_exists = target_generation in observed_generations or target_snapshot is not None
     if not generation_exists:
@@ -557,6 +706,7 @@ def aggregate_motion_distance_metrics(
             "observationCompleteness": "INCOMPLETE" if overall_quality == "INCOMPLETE" else "COMPLETE",
             "consistencyIssues": completeness_issues,
         },
+        "windowMotionEvidence": window_motion_evidence,
         "plannedHorizontalMeters": None,
         "extraDistanceMeters": None,
         "attributableReplanExtraMeters": None,
@@ -572,6 +722,7 @@ def aggregate_motion_distance_metrics(
             "perRobotSort": "horizontalMeters + verticalMeters descending; robotId tie-break",
             "plannedActualComparisonAvailable": False,
             "exactlyOnceClaimed": False,
+            "fixedWindowDistanceMeaning": "movement observed inside the contracted window; not distance required to complete all orders",
         },
     }
 
@@ -625,6 +776,25 @@ def _empty_contract(run_id: str, generation: int | None, malformed: int, reason:
             "observationCompleteness": "UNAVAILABLE",
             "consistencyIssues": [],
         },
+        "windowMotionEvidence": {
+            "contractVersion": WINDOW_EVIDENCE_CONTRACT_VERSION,
+            "scope": "UNKNOWN",
+            "configuredObservationTicks": None,
+            "actualEndTick": None,
+            "stopReason": None,
+            "observerEndReason": None,
+            "evidenceQuality": "UNAVAILABLE",
+            "windowComplete": False,
+            "evidenceComplete": False,
+            "comparisonEligible": False,
+            "eligibilityReason": reason,
+            "consistencyIssues": [reason],
+            "scenarioSignature": None,
+            "topologyRevision": None,
+            "physicsContractHash": None,
+            "speedContractHash": None,
+            "completedNaturally": False,
+        },
         "plannedHorizontalMeters": None,
         "extraDistanceMeters": None,
         "attributableReplanExtraMeters": None,
@@ -640,8 +810,80 @@ def _empty_contract(run_id: str, generation: int | None, malformed: int, reason:
             "perRobotSort": "horizontalMeters + verticalMeters descending; robotId tie-break",
             "plannedActualComparisonAvailable": False,
             "exactlyOnceClaimed": False,
+            "fixedWindowDistanceMeaning": "movement observed inside the contracted window; not distance required to complete all orders",
         },
     }
 
 
-__all__ = ["aggregate_motion_distance_metrics"]
+def compare_fixed_window_motion_metrics(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare equal-window evidence without claiming equal completed work."""
+
+    reasons: list[str] = []
+    left = _payload(baseline.get("windowMotionEvidence"))
+    right = _payload(candidate.get("windowMotionEvidence"))
+    if left is None or right is None:
+        reasons.append("WINDOW_MOTION_EVIDENCE_MISSING")
+    else:
+        if not left.get("comparisonEligible") or not right.get("comparisonEligible"):
+            reasons.append("WINDOW_MOTION_EVIDENCE_INCOMPLETE")
+        if left.get("scenarioSignature") != right.get("scenarioSignature"):
+            reasons.append("SCENARIO_SIGNATURE_MISMATCH")
+        if left.get("configuredObservationTicks") != right.get("configuredObservationTicks"):
+            reasons.append("OBSERVATION_WINDOW_MISMATCH")
+        if left.get("physicsContractHash") != right.get("physicsContractHash"):
+            reasons.append("PHYSICS_CONTRACT_MISMATCH")
+        if left.get("speedContractHash") != right.get("speedContractHash"):
+            reasons.append("SPEED_CONTRACT_MISMATCH")
+        if left.get("topologyRevision") != right.get("topologyRevision"):
+            reasons.append("TOPOLOGY_REVISION_MISMATCH")
+
+    def total(result: Mapping[str, Any], metric_id: str) -> float | None:
+        metrics = _payload(result.get("totalMetrics"))
+        metric = _payload((metrics or {}).get(metric_id))
+        value = (metric or {}).get("value")
+        return _number(value) if value is not None else None
+
+    left_horizontal = total(baseline, "totalHorizontalMeters")
+    right_horizontal = total(candidate, "totalHorizontalMeters")
+    left_vertical = total(baseline, "shuttleLiftVerticalMeters")
+    right_vertical = total(candidate, "shuttleLiftVerticalMeters")
+    if left_horizontal is None or right_horizontal is None:
+        reasons.append("WINDOW_HORIZONTAL_DISTANCE_UNAVAILABLE")
+    reasons = list(dict.fromkeys(reasons))
+    comparable = not reasons
+    return {
+        "contractVersion": WINDOW_COMPARISON_CONTRACT_VERSION,
+        "comparisonType": "FIXED_WINDOW_MOTION_COMPARISON",
+        "baselineRunId": baseline.get("runId"),
+        "candidateRunId": candidate.get("runId"),
+        "comparable": comparable,
+        "comparisonReasons": reasons,
+        "baselineHorizontalMeters": left_horizontal,
+        "candidateHorizontalMeters": right_horizontal,
+        "horizontalDistanceDeltaMeters": (
+            right_horizontal - left_horizontal if comparable else None
+        ),
+        "baselineLiftVerticalMeters": left_vertical,
+        "candidateLiftVerticalMeters": right_vertical,
+        "liftVerticalDistanceDeltaMeters": (
+            right_vertical - left_vertical
+            if comparable and left_vertical is not None and right_vertical is not None
+            else None
+        ),
+        "semantics": {
+            "sameObservationWindowRequired": True,
+            "sameScenarioSignatureRequired": True,
+            "samePhysicsAndSpeedContractsRequired": True,
+            "completedWorkScopeMayDiffer": True,
+            "completedWorkDistanceOptimizationClaimed": False,
+        },
+    }
+
+
+__all__ = [
+    "aggregate_motion_distance_metrics",
+    "compare_fixed_window_motion_metrics",
+]

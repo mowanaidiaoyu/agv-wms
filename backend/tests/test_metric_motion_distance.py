@@ -42,6 +42,7 @@ assert app_config.DB_PATH.resolve() != DEFAULT_DB.resolve()
 assert app_db.DB_PATH.resolve() != DEFAULT_DB.resolve()
 
 from app.api import routes  # noqa: E402
+from app.analytics.motion_distance_metrics import compare_fixed_window_motion_metrics  # noqa: E402
 from app.core.repository import Repository  # noqa: E402
 
 
@@ -77,6 +78,30 @@ def physics(version: str = "physics-test-v1", meters: float = 0.8) -> dict[str, 
         "shuttleLevelHeightMeters": 1.4,
         "floorHeightMeters": 4.2,
         "coordinateContractVersion": "grid-test-v1",
+    }
+
+
+def speed(tick_seconds: float = 0.6) -> dict[str, Any]:
+    return {
+        "speedContractVersion": "motion-speed-v1",
+        "ctuMetersPerSecond": 1.0,
+        "shuttleMetersPerSecond": 1.2,
+        "liftMetersPerSecond": 0.5,
+        "simTickSeconds": tick_seconds,
+    }
+
+
+def experiment(ticks: int = 600, signature: str = "fixed-window-scenario") -> dict[str, Any]:
+    return {
+        "experimentContractVersion": "algorithm-experiment-v1",
+        "scenarioId": "p3-r-fixed-window",
+        "scenarioVersion": "1",
+        "scenarioSignature": signature,
+        "topologyRevision": "2.0.0:test",
+        "observationTicks": ticks,
+        "pathPolicy": "astar",
+        "assignmentPolicy": "greedy",
+        "variableDimension": "assignmentPolicy",
     }
 
 
@@ -204,8 +229,22 @@ def create_run(
     diag: dict[str, Any] | None | object = ...,
     status: str = "completed",
     legacy: bool = False,
+    tick: int = 1,
+    stop_reason: str | None = None,
+    experiment_contract: dict[str, Any] | None = None,
+    physics_contract: dict[str, Any] | None | object = ...,
+    speed_contract: dict[str, Any] | None | object = ...,
 ) -> str:
-    payload: dict[str, Any] = {"tick": 1, "tasks": []}
+    frozen_physics = physics() if physics_contract is ... else physics_contract
+    frozen_speed = speed() if speed_contract is ... else speed_contract
+    payload: dict[str, Any] = {
+        "tick": tick,
+        "tasks": [],
+        "stopReason": stop_reason,
+        "algorithmExperimentContract": deepcopy(experiment_contract),
+        "motionPhysicsContract": deepcopy(frozen_physics),
+        "motionSpeedContract": deepcopy(frozen_speed),
+    }
     if not legacy:
         payload["motionDistanceDiagnosticsV1"] = diagnostics(run_id) if diag is ... else diag
     repo.create_run(run_id, status, "topology-test", payload, {})
@@ -235,6 +274,53 @@ def one_movement_result(repository: Repository, **kwargs: Any) -> dict[str, Any]
 
 def value(result: dict[str, Any], name: str) -> Any:
     return result["totalMetrics"][name]["value"]
+
+
+def fixed_window_result(
+    repository: Repository,
+    run_id: str,
+    *,
+    configured_ticks: int = 600,
+    actual_tick: int = 600,
+    status: str = "stopped",
+    stop_reason: str | None = "observation_window_complete",
+    observer_end_reason: str = "observation_window_complete",
+    observer_ended: bool = True,
+    total: int = 1,
+    add_event: bool = True,
+    generation: int = 1,
+    snapshot_generation: int | None = None,
+    physics_available: bool = True,
+    signature: str = "fixed-window-scenario",
+) -> dict[str, Any]:
+    snapshot_generation = generation if snapshot_generation is None else snapshot_generation
+    contract = physics() if physics_available else None
+    diag = diagnostics(
+        run_id,
+        generation=snapshot_generation,
+        total=total,
+        last_tick=actual_tick,
+        last_id="m1" if total else None,
+        ended=observer_ended,
+        end_reason=observer_end_reason,
+        contract=contract,
+    )
+    create_run(
+        repository,
+        run_id,
+        diag=diag,
+        status=status,
+        tick=actual_tick,
+        stop_reason=stop_reason,
+        experiment_contract=experiment(configured_ticks, signature),
+        physics_contract=contract,
+    )
+    if add_event:
+        item = movement(run_id, "m1", generation=generation, tick=actual_tick)
+        add_batch(repository, run_id, batch(run_id, actual_tick, [item], generation=generation))
+    result = repository.get_motion_distance_metrics(run_id)
+    assert result is not None
+    return result
 
 
 def test_ctu_normal_horizontal_movement(repository: Repository) -> None:
@@ -418,6 +504,8 @@ def test_historical_recovery_is_incomplete(repository: Repository) -> None:
 def test_normal_completed_run_is_complete(repository: Repository) -> None:
     result = one_movement_result(repository)
     assert result["dataQuality"] == "COMPLETE"
+    assert result["windowMotionEvidence"]["scope"] == "FULL_RUN"
+    assert result["windowMotionEvidence"]["completedNaturally"] is True
 
 
 def test_running_run_is_degraded(repository: Repository) -> None:
@@ -434,6 +522,246 @@ def test_manual_stop_is_degraded(repository: Repository) -> None:
     add_batch(repository, run_id, batch(run_id, 1, [movement(run_id, "m1")]))
     result = repository.get_motion_distance_metrics(run_id)
     assert result and result["dataQuality"] == "DEGRADED"
+
+
+def test_complete_fixed_observation_window_has_independent_complete_evidence(
+    repository: Repository,
+) -> None:
+    result = fixed_window_result(repository, "window-600")
+    evidence = result["windowMotionEvidence"]
+    assert result["dataQuality"] == "DEGRADED"
+    assert result["reason"] == "FIXED_OBSERVATION_WINDOW_COMPLETE"
+    assert result["acceptanceEligible"] is False
+    assert evidence["scope"] == "FIXED_OBSERVATION_WINDOW"
+    assert evidence["configuredObservationTicks"] == 600
+    assert evidence["actualEndTick"] == 600
+    assert evidence["windowComplete"] is True
+    assert evidence["evidenceComplete"] is True
+    assert evidence["comparisonEligible"] is True
+    assert evidence["evidenceQuality"] == "COMPLETE"
+
+
+@pytest.mark.parametrize("actual_tick", [599, 600])
+def test_manual_stop_never_qualifies_as_complete_window(
+    repository: Repository,
+    actual_tick: int,
+) -> None:
+    result = fixed_window_result(
+        repository,
+        f"manual-{actual_tick}",
+        actual_tick=actual_tick,
+        stop_reason="user",
+        observer_end_reason="user",
+    )
+    evidence = result["windowMotionEvidence"]
+    assert result["reason"] == "RUN_STOPPED_BEFORE_NORMAL_COMPLETION"
+    assert evidence["evidenceQuality"] == "INCOMPLETE"
+    assert evidence["comparisonEligible"] is False
+    assert "OBSERVATION_STOP_REASON_MISMATCH" in evidence["consistencyIssues"]
+
+
+def test_window_not_reached_is_incomplete(repository: Repository) -> None:
+    result = fixed_window_result(
+        repository,
+        "window-running",
+        actual_tick=500,
+        status="running",
+        stop_reason=None,
+        observer_end_reason="running",
+        observer_ended=False,
+    )
+    evidence = result["windowMotionEvidence"]
+    assert result["reason"] == "RUN_IN_PROGRESS"
+    assert evidence["windowComplete"] is False
+    assert "OBSERVATION_END_TICK_MISMATCH" in evidence["consistencyIssues"]
+
+
+@pytest.mark.parametrize("reason", ["safety_limit", "runtime_error"])
+def test_abnormal_stop_does_not_gain_window_eligibility(
+    repository: Repository,
+    reason: str,
+) -> None:
+    result = fixed_window_result(
+        repository,
+        f"window-{reason}",
+        stop_reason=reason,
+        observer_end_reason=reason,
+    )
+    assert result["dataQuality"] == "INCOMPLETE"
+    assert result["windowMotionEvidence"]["comparisonEligible"] is False
+
+
+def test_missing_movement_event_invalidates_window(repository: Repository) -> None:
+    result = fixed_window_result(repository, "window-event-missing", add_event=False)
+    assert "SNAPSHOT_EVENT_COUNT_MISMATCH" in result["windowMotionEvidence"]["consistencyIssues"]
+    assert result["windowMotionEvidence"]["evidenceComplete"] is False
+
+
+def test_conflicting_movement_id_invalidates_window(repository: Repository) -> None:
+    run_id = "window-conflict"
+    result = fixed_window_result(repository, run_id)
+    add_batch(
+        repository,
+        run_id,
+        batch(run_id, 600, [movement(run_id, "m1", tick=600, horizontal=1.6, to_col=2)]),
+    )
+    result = repository.get_motion_distance_metrics(run_id)
+    assert result is not None
+    assert "MOVEMENT_ID_CONFLICT" in result["windowMotionEvidence"]["consistencyIssues"]
+
+
+def test_window_snapshot_watermark_mismatch_is_incomplete(repository: Repository) -> None:
+    run_id = "window-watermark"
+    diag = diagnostics(
+        run_id,
+        total=1,
+        last_tick=600,
+        last_id="different",
+        end_reason="observation_window_complete",
+    )
+    create_run(
+        repository,
+        run_id,
+        diag=diag,
+        status="stopped",
+        tick=600,
+        stop_reason="observation_window_complete",
+        experiment_contract=experiment(),
+    )
+    add_batch(repository, run_id, batch(run_id, 600, [movement(run_id, "m1", tick=600)]))
+    result = repository.get_motion_distance_metrics(run_id)
+    assert result is not None
+    assert "SNAPSHOT_EVENT_WATERMARK_MISMATCH" in result["windowMotionEvidence"]["consistencyIssues"]
+
+
+def test_generation_mismatch_invalidates_window(repository: Repository) -> None:
+    result = fixed_window_result(
+        repository,
+        "window-generation",
+        generation=1,
+        snapshot_generation=2,
+    )
+    assert result["windowMotionEvidence"]["evidenceComplete"] is False
+    assert "SNAPSHOT_EVENT_COUNT_MISMATCH" in result["windowMotionEvidence"]["consistencyIssues"]
+
+
+def test_trajectory_break_invalidates_window(repository: Repository) -> None:
+    run_id = "window-trajectory"
+    first = movement(run_id, "m1", tick=599, from_col=0, to_col=1)
+    second = movement(run_id, "m2", tick=600, from_col=9, to_col=10)
+    diag = diagnostics(
+        run_id,
+        total=2,
+        last_tick=600,
+        last_id="m2",
+        end_reason="observation_window_complete",
+    )
+    create_run(
+        repository,
+        run_id,
+        diag=diag,
+        status="stopped",
+        tick=600,
+        stop_reason="observation_window_complete",
+        experiment_contract=experiment(),
+    )
+    add_batch(repository, run_id, batch(run_id, 599, [first]))
+    add_batch(repository, run_id, batch(run_id, 600, [second]))
+    result = repository.get_motion_distance_metrics(run_id)
+    assert result is not None
+    assert "TRAJECTORY_DISCONTINUITY" in result["windowMotionEvidence"]["consistencyIssues"]
+
+
+def test_missing_physics_contract_invalidates_window(repository: Repository) -> None:
+    result = fixed_window_result(repository, "window-no-physics", physics_available=False)
+    assert "PHYSICS_CONTRACT_UNAVAILABLE" in result["windowMotionEvidence"]["consistencyIssues"]
+    assert value(result, "totalHorizontalMeters") is None
+
+
+def test_complete_zero_movement_window_is_authoritative_zero(repository: Repository) -> None:
+    result = fixed_window_result(
+        repository,
+        "window-zero",
+        total=0,
+        add_event=False,
+    )
+    assert result["windowMotionEvidence"]["evidenceComplete"] is True
+    assert value(result, "totalHorizontalMeters") == pytest.approx(0.0)
+
+
+def test_fixed_window_preserves_real_horizontal_and_lift_distances(repository: Repository) -> None:
+    run_id = "window-real-distance"
+    items = [
+        movement(run_id, "m1", robot_id="ctu-1", tick=600, horizontal=54.4),
+        movement(
+            run_id,
+            "m2",
+            robot_id="shuttle-1",
+            robot_type="shuttle",
+            tick=600,
+            sequence=2,
+            movement_type="LIFT",
+            horizontal=0.0,
+            vertical=9.0,
+            from_layer=1,
+            to_layer=2,
+        ),
+    ]
+    diag = diagnostics(
+        run_id,
+        total=2,
+        last_tick=600,
+        last_id="m2",
+        last_sequence=2,
+        robots={"ctu-1": "ctu", "shuttle-1": "shuttle"},
+        end_reason="observation_window_complete",
+    )
+    create_run(
+        repository,
+        run_id,
+        diag=diag,
+        status="stopped",
+        tick=600,
+        stop_reason="observation_window_complete",
+        experiment_contract=experiment(),
+    )
+    add_batch(repository, run_id, batch(run_id, 600, items))
+    result = repository.get_motion_distance_metrics(run_id)
+    assert result is not None
+    assert value(result, "totalHorizontalMeters") == pytest.approx(54.4)
+    assert value(result, "shuttleLiftVerticalMeters") == pytest.approx(9.0)
+    assert result["windowMotionEvidence"]["evidenceComplete"] is True
+
+
+def test_equal_fixed_windows_are_comparable_without_completed_work_claim(
+    repository: Repository,
+) -> None:
+    baseline = fixed_window_result(repository, "compare-left", signature="same")
+    candidate = fixed_window_result(repository, "compare-right", signature="same")
+    comparison = compare_fixed_window_motion_metrics(baseline, candidate)
+    assert comparison["comparable"] is True
+    assert comparison["horizontalDistanceDeltaMeters"] == pytest.approx(0.0)
+    assert comparison["semantics"]["completedWorkDistanceOptimizationClaimed"] is False
+
+
+def test_different_fixed_windows_are_not_directly_comparable(repository: Repository) -> None:
+    baseline = fixed_window_result(
+        repository,
+        "compare-600",
+        configured_ticks=600,
+        actual_tick=600,
+        signature="same",
+    )
+    candidate = fixed_window_result(
+        repository,
+        "compare-300",
+        configured_ticks=300,
+        actual_tick=300,
+        signature="same",
+    )
+    comparison = compare_fixed_window_motion_metrics(baseline, candidate)
+    assert comparison["comparable"] is False
+    assert "OBSERVATION_WINDOW_MISMATCH" in comparison["comparisonReasons"]
 
 
 @pytest.mark.parametrize("reason", ["safety_limit", "runtime_error"])

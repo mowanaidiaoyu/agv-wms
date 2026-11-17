@@ -152,6 +152,8 @@
 .eta-scatter-details .analytics-table-wrap{max-height:240px;margin-top:9px}
 .analytics-distance-grid{margin-bottom:10px}
 .analytics-distance-kpi strong{color:#0f766e}
+.analytics-window-evidence{display:grid;gap:4px;margin:0 0 14px;padding:12px 14px;border:1px solid #cbd5e1;border-radius:12px;background:#f8fafc;color:#52677a;font-size:12px;line-height:1.55}
+.analytics-window-evidence strong{color:#24445e;font-size:13px}.analytics-window-evidence small{color:#718397}.analytics-window-evidence.is-complete{border-color:#99d8cf;background:#f0fdfa}.analytics-window-evidence.is-complete strong{color:#0f766e}.analytics-window-evidence.is-incomplete{border-color:#f1c98c;background:#fff8e8}.analytics-window-evidence.is-incomplete strong{color:#8a5b16}
 .analytics-motion-contract{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px}
 .analytics-motion-contract span{padding:7px 10px;border:1px solid rgba(15,118,110,.15);border-radius:10px;background:rgba(240,253,250,.78);font-size:12px}
 .analytics-motion-types small{display:block;margin-top:3px;color:#738497;font-size:10px}

@@ -792,6 +792,26 @@ export interface MotionDistanceRobotMetric {
   dataQuality: MetricDataQuality | string
 }
 
+export interface WindowMotionEvidence {
+  contractVersion: 'fixed-window-motion-evidence-v1' | string
+  scope: 'FIXED_OBSERVATION_WINDOW' | 'FULL_RUN' | 'UNKNOWN' | string
+  configuredObservationTicks: number | null
+  actualEndTick: number | null
+  stopReason: string | null
+  observerEndReason: string | null
+  evidenceQuality: MetricDataQuality | 'NOT_APPLICABLE' | string
+  windowComplete: boolean
+  evidenceComplete: boolean
+  comparisonEligible: boolean
+  eligibilityReason: string
+  consistencyIssues: string[]
+  scenarioSignature: string | null
+  topologyRevision: string | null
+  physicsContractHash: string | null
+  speedContractHash: string | null
+  completedNaturally: boolean
+}
+
 export interface MotionDistanceMetrics {
   contractVersion: 'motion-distance-metrics-v1' | string
   runId: string
@@ -818,6 +838,7 @@ export interface MotionDistanceMetrics {
   totalRobotCount: number
   perRobotMetricsTruncated: boolean
   evidenceSummary: Record<string, unknown>
+  windowMotionEvidence: WindowMotionEvidence
   plannedHorizontalMeters: number | null
   extraDistanceMeters: number | null
   attributableReplanExtraMeters: number | null
