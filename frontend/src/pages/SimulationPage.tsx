@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Gauge,
+  FilePlus2,
   Loader2,
   LocateFixed,
   PanelRightOpen,
@@ -120,8 +121,9 @@ function LiveEventCount({ persistedCount }: { persistedCount?: number }) {
 
 export function SimulationPage() {
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const requestedTopologyId = searchParams.get('topologyId') ?? ''
+  const requestedRunId = searchParams.get('runId') ?? ''
   const queryClient = useQueryClient()
   const selectedTopologyId = usePlatformStore((state) => state.selectedTopologyId)
   const selectedRunId = usePlatformStore((state) => state.selectedRunId)
@@ -134,6 +136,7 @@ export function SimulationPage() {
   const clearLiveEvents = usePlatformStore((state) => state.clearLiveEvents)
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
+  const [runRestoreError, setRunRestoreError] = useState('')
   const [starting, setStarting] = useState(false)
   const [motionPhysicsEnabled, setMotionPhysicsEnabled] = useState(false)
   const [motionPhysicsDraft, setMotionPhysicsDraft] = useState(DEFAULT_MOTION_PHYSICS_DRAFT)
@@ -153,6 +156,7 @@ export function SimulationPage() {
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
   const [runConfigOpen, setRunConfigOpen] = useState(false)
+  const [newSimulationPromptOpen, setNewSimulationPromptOpen] = useState(false)
   const [ordersCollapsed, setOrdersCollapsed] = useState(false)
   const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
   const [removingOrderId, setRemovingOrderId] = useState('')
@@ -179,6 +183,8 @@ export function SimulationPage() {
   } | null>(null)
   const seededOrdersRef = useRef(false)
   const observedPickedRef = useRef(new Map<string, number>())
+  const restoredRunSourceRef = useRef('')
+  const skipRunRestoreRef = useRef(false)
 
   const topologiesQuery = useQuery({
     queryKey: ['topologies'],
@@ -194,6 +200,7 @@ export function SimulationPage() {
     queryKey: ['simulation-state', selectedRunId],
     queryFn: () => api.getSimulationState(selectedRunId),
     enabled: Boolean(selectedRunId),
+    retry: false,
     // 即使 WebSocket 显示已连接，也定期核对权威状态；浏览器休眠或网络
     // 切换时连接可能保持 OPEN，却已经漏掉货箱逐模块位置帧。
     refetchInterval: selectedRunId ? 1500 : false,
@@ -239,6 +246,39 @@ export function SimulationPage() {
     }
   }, [resolvedTopologyId, selectedTopologyId, setSelectedTopologyId])
 
+  useEffect(() => {
+    if (!resolvedTopologyId) return
+    if (skipRunRestoreRef.current) {
+      if (!requestedRunId) {
+        skipRunRestoreRef.current = false
+        restoredRunSourceRef.current = `${resolvedTopologyId}:`
+      }
+      return
+    }
+    const storageKey = `agv-wms:selected-run:${resolvedTopologyId}`
+    const restoredRunId = requestedRunId || window.sessionStorage.getItem(storageKey) || ''
+    const sourceKey = `${resolvedTopologyId}:${restoredRunId}`
+    if (restoredRunSourceRef.current === sourceKey) return
+    restoredRunSourceRef.current = sourceKey
+    if (restoredRunId && restoredRunId !== selectedRunId) setSelectedRunId(restoredRunId)
+  }, [requestedRunId, resolvedTopologyId, selectedRunId, setSelectedRunId])
+
+  useEffect(() => {
+    if (!resolvedTopologyId) return
+    const storageKey = `agv-wms:selected-run:${resolvedTopologyId}`
+    const next = new URLSearchParams(searchParams)
+    const authoritativeState = stateQuery.data?.id === selectedRunId ? stateQuery.data : undefined
+    const verifiedRunId = authoritativeState?.topologyId === resolvedTopologyId ? selectedRunId : ''
+    if (verifiedRunId) {
+      window.sessionStorage.setItem(storageKey, selectedRunId)
+      next.set('runId', selectedRunId)
+    } else if (!selectedRunId) {
+      window.sessionStorage.removeItem(storageKey)
+      next.delete('runId')
+    }
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true })
+  }, [resolvedTopologyId, searchParams, selectedRunId, setSearchParams, stateQuery.data])
+
   const candidateState = selectSimulationStateSource(liveState, stateQuery.data, socketConnected)
   const currentState = candidateState?.topologyId === resolvedTopologyId
     && candidateState.id === selectedRunId
@@ -277,6 +317,18 @@ export function SimulationPage() {
   useEffect(() => {
     if (!socketConnected && stateQuery.data) setLiveState(stateQuery.data)
   }, [setLiveState, socketConnected, stateQuery.data])
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setRunRestoreError('')
+      return
+    }
+    if (stateQuery.isError && !currentState) {
+      setRunRestoreError(`Run ${selectedRunId} 不存在或无法从当前后端数据库读取；未使用前端缓存替代。`)
+    } else if (stateQuery.data?.id === selectedRunId) {
+      setRunRestoreError('')
+    }
+  }, [currentState, selectedRunId, stateQuery.data?.id, stateQuery.isError])
 
   useEffect(() => {
     observedPickedRef.current.clear()
@@ -346,12 +398,15 @@ export function SimulationPage() {
   }
 
   useEffect(() => {
-    if (seededOrdersRef.current || selectedRunId || !catalogQuery.data?.skus.length) return
+    const persistedRunId = resolvedTopologyId
+      ? window.sessionStorage.getItem(`agv-wms:selected-run:${resolvedTopologyId}`)
+      : ''
+    if (seededOrdersRef.current || selectedRunId || requestedRunId || persistedRunId || !catalogQuery.data?.skus.length) return
     seededOrdersRef.current = true
     const demoOrders = createDemoOrders(catalogQuery.data.skus)
     setLocalOrders(demoOrders)
     setSelectedOrderId(demoOrders[0]?.id ?? '')
-  }, [catalogQuery.data, selectedRunId])
+  }, [catalogQuery.data, requestedRunId, resolvedTopologyId, selectedRunId])
 
   const displayedOrders = useMemo(() => {
     const runtimeOrders = currentState?.orders ?? []
@@ -571,6 +626,60 @@ export function SimulationPage() {
     }
   }
 
+  function resetNewRunDraft() {
+    setLocalOrders([])
+    setLocalTransfers([])
+    setSelectedOrderId('')
+    setMotionPhysicsEnabled(false)
+    setMotionPhysicsDraft(DEFAULT_MOTION_PHYSICS_DRAFT)
+    setMotionSpeedEnabled(false)
+    setMotionSpeedDraft(DEFAULT_MOTION_SPEED_DRAFT)
+    setAlgorithmExperimentEnabled(false)
+    setExperimentScenarioId('p5-comparison-01')
+    setExperimentPathPolicy('astar')
+    setExperimentAssignmentPolicy('greedy')
+    setExperimentVariableDimension('pathPolicy')
+    setThroughputObservationEnabled(false)
+    setThroughputObservationTicks('600')
+  }
+
+  function enterNewSimulationDraft(preserveDraft: boolean) {
+    const exitedRunWasActive = isRunActive
+    skipRunRestoreRef.current = true
+    if (resolvedTopologyId) {
+      window.sessionStorage.removeItem(`agv-wms:selected-run:${resolvedTopologyId}`)
+    }
+    const next = new URLSearchParams(searchParams)
+    next.delete('runId')
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true })
+
+    resetRun()
+    if (!preserveDraft) resetNewRunDraft()
+    seededOrdersRef.current = true
+    observedPickedRef.current.clear()
+    setStartError('')
+    setRunRestoreError('')
+    setDetailsOpen(false)
+    setOrderComposerOpen(false)
+    setRunConfigOpen(true)
+    setWorkspaceTab('orders')
+    setSelectedRobotId('')
+    setFollowSelectedRobot(false)
+    setPickupNotice(null)
+    setNewSimulationPromptOpen(false)
+    setControlNotice(exitedRunWasActive
+      ? '已退出当前 Run 视图并进入新 Run 草稿；后台 Run 不受影响。'
+      : '已进入新 Run 草稿；历史 Run 仍完整保留。')
+  }
+
+  function requestNewSimulation() {
+    if (isRunActive || hasUnsavedRunDraft) {
+      setNewSimulationPromptOpen(true)
+      return
+    }
+    enterNewSimulationDraft(false)
+  }
+
   const sortedTasks = useMemo(() => [...(currentState?.tasks ?? [])].sort((left, right) => {
     const leftWeight = left.status === 'completed' ? 1 : 0
     const rightWeight = right.status === 'completed' ? 1 : 0
@@ -594,6 +703,23 @@ export function SimulationPage() {
   const displayedPhysicsEnabled = runConfigReadOnly ? Boolean(frozenMotionPhysicsContract) : motionPhysicsEnabled
   const displayedSpeedEnabled = runConfigReadOnly ? Boolean(frozenMotionSpeedContract) : motionSpeedEnabled
   const displayedExperimentEnabled = runConfigReadOnly ? Boolean(frozenAlgorithmContract) : algorithmExperimentEnabled
+  const hasCustomizedRunConfigDraft = motionPhysicsEnabled
+    || motionSpeedEnabled
+    || algorithmExperimentEnabled
+    || throughputObservationEnabled
+    || motionPhysicsDraft.metersPerCell !== DEFAULT_MOTION_PHYSICS_DRAFT.metersPerCell
+    || motionPhysicsDraft.shuttleLevelHeightMeters !== DEFAULT_MOTION_PHYSICS_DRAFT.shuttleLevelHeightMeters
+    || motionPhysicsDraft.floorHeightMeters !== DEFAULT_MOTION_PHYSICS_DRAFT.floorHeightMeters
+    || motionSpeedDraft.simTickSeconds !== DEFAULT_MOTION_SPEED_DRAFT.simTickSeconds
+    || motionSpeedDraft.ctuSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.ctuSpeedMetersPerSecond
+    || motionSpeedDraft.shuttleSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.shuttleSpeedMetersPerSecond
+    || motionSpeedDraft.liftSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.liftSpeedMetersPerSecond
+    || experimentScenarioId !== 'p5-comparison-01'
+    || experimentPathPolicy !== 'astar'
+    || experimentAssignmentPolicy !== 'greedy'
+    || experimentVariableDimension !== 'pathPolicy'
+    || throughputObservationTicks !== '600'
+  const hasUnsavedRunDraft = localOrders.length > 0 || localTransfers.length > 0 || hasCustomizedRunConfigDraft
   const sceneTasks = useMemo(() => workspaceTab === 'orders'
     ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
     : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
@@ -677,6 +803,15 @@ export function SimulationPage() {
             <ArrowLeft size={16} />
             返回编辑
           </button>
+          <button
+            className="simulation-new-run-button"
+            onClick={requestNewSimulation}
+            disabled={starting || Boolean(controlAction)}
+            type="button"
+          >
+            <FilePlus2 size={16} />
+            新建仿真
+          </button>
           {pickingTask ? (
             <button className="ghost-button" onClick={() => void completePicking()} disabled={completingPicking} type="button">
               <CheckCircle2 size={16} />
@@ -729,6 +864,44 @@ export function SimulationPage() {
           </button>
         </div>
       </header>
+
+      {newSimulationPromptOpen ? (
+        <div className="simulation-new-run-dialog-backdrop" role="presentation">
+          <section
+            className="simulation-new-run-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="simulation-new-run-title"
+            aria-describedby="simulation-new-run-description"
+          >
+            <div className="simulation-new-run-dialog-icon"><FilePlus2 size={22} /></div>
+            <div>
+              <h2 id="simulation-new-run-title">进入新 Run 草稿</h2>
+              <p id="simulation-new-run-description">
+                {isRunActive
+                  ? '仅退出当前 Run 视图，后台 Run 不受影响；不会停止 Run，也不会取消正在执行的订单。'
+                  : '当前历史 Run 会完整保留，可稍后重新查询；此操作不会调用重置、停止或删除接口。'}
+              </p>
+              {hasUnsavedRunDraft ? (
+                <p className="simulation-new-run-draft-warning">
+                  检测到未提交的订单、跨层任务或运行配置草稿，请选择保留或放弃。
+                </p>
+              ) : null}
+            </div>
+            <div className="simulation-new-run-dialog-actions">
+              <button className="ghost-button" type="button" onClick={() => setNewSimulationPromptOpen(false)}>取消</button>
+              {hasUnsavedRunDraft ? (
+                <>
+                  <button className="ghost-button" type="button" onClick={() => enterNewSimulationDraft(false)}>放弃草稿并新建</button>
+                  <button className="accent-button" type="button" onClick={() => enterNewSimulationDraft(true)}>保留草稿并新建</button>
+                </>
+              ) : (
+                <button className="accent-button" type="button" onClick={() => enterNewSimulationDraft(false)}>退出视图并新建</button>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       <section className="simulation-config-summary" aria-label="当前Run冻结配置摘要">
         <div><span>米制比例</span><strong>{frozenMotionPhysicsContract ? `${frozenMotionPhysicsContract.metersPerCell} m/格` : '未冻结'}</strong></div>
@@ -823,9 +996,10 @@ export function SimulationPage() {
         ) : (
           <TransferInventoryPanel simulation={currentState} />
         )}
-        {startError || controlNotice || safetyStopMessage || runtimeErrorMessage || taskFailureMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
+        {startError || runRestoreError || controlNotice || safetyStopMessage || runtimeErrorMessage || taskFailureMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
           <div className="simulation-message-stack">
             {startError ? <p className="form-error">{startError}</p> : null}
+            {runRestoreError ? <p className="form-error" role="alert">{runRestoreError}</p> : null}
             {controlNotice ? <p className="simulation-control-notice" role="status">{controlNotice}</p> : null}
             {safetyStopMessage ? <p className="form-error">{safetyStopMessage}</p> : null}
             {runtimeErrorMessage ? <p className="form-error" role="alert">{runtimeErrorMessage}</p> : null}

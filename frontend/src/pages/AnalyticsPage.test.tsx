@@ -524,6 +524,8 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(screen.queryByText('动态参数自适应')).not.toBeInTheDocument()
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     expect(await screen.findByText('当前数据库没有实验 Run')).toBeInTheDocument()
+    expect(screen.getByText('选择同一场景下的两次实验，对比路径规划或任务分配算法效果。')).toBeInTheDocument()
+    expect(screen.queryByText('运行 A*')).not.toBeInTheDocument()
     expect(String(fetchMock.mock.calls[0][0])).toContain('/algorithm-experiments')
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/simulations/'))).toBe(false)
   })
@@ -591,7 +593,42 @@ describe('algorithm performance analytics M2-5B', () => {
     const improvementLabel = await screen.findByText('距离改善率')
     expect(improvementLabel.parentElement).toHaveTextContent('20 %')
     expect(screen.getByText('时间改善率').parentElement).toHaveTextContent('0 %')
-    expect(screen.getByText(/SYNTHETIC 波次距离不会进入本表/)).toBeInTheDocument()
+    expect(screen.getByLabelText('查看算法对比数据范围说明').closest('details')).toHaveTextContent('不会混入 SYNTHETIC 实验数据')
+  })
+
+  it('restores baseline and candidate selections from URL after navigation or refresh', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'completed', scenarioId: 'paired', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'assignmentPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', observationTicks: 600, simulatedSeconds: 360, tick: 600, replayEligible: true },
+      { runId: 'exp-b', status: 'completed', scenarioId: 'paired', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'assignmentPolicy', pathPolicy: 'astar', assignmentPolicy: 'hungarian', algorithmVersion: 'v1', observationTicks: 600, simulatedSeconds: 360, tick: 600, replayEligible: true },
+    ]
+    installFetch((url) => {
+      if (url.includes('/algorithm-experiments/throughput-compare')) return new Response(JSON.stringify(throughputComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.includes('/algorithm-experiments/compare')) return new Response(JSON.stringify(algorithmComparison()), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/algorithm-experiments')) return new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', sourceScope: 'CURRENT_BACKEND_DATABASE', sourceDescription: '实验 Run 来自当前后端数据库，实验结果不会跨不同 SQLite 自动合并。', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      return undefined
+    })
+    const entry = '/simulation/analytics?runId=run-a&baselineRunId=exp-a&candidateRunId=exp-b'
+    const first = renderPage(entry)
+    expect(await screen.findByLabelText('基线实验Run')).toHaveValue('exp-a')
+    expect(screen.getByLabelText('候选实验Run')).toHaveValue('exp-b')
+    expect(screen.getByText(/实验 Run 来自当前后端数据库/)).toBeInTheDocument()
+    first.unmount()
+    renderPage(entry)
+    expect(await screen.findByLabelText('基线实验Run')).toHaveValue('exp-a')
+    expect(screen.getByLabelText('候选实验Run')).toHaveValue('exp-b')
+  })
+
+  it('reports URL experiment Runs that do not exist in the current database', async () => {
+    const runs = [
+      { runId: 'exp-a', status: 'completed', scenarioId: 'paired', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'assignmentPolicy', pathPolicy: 'astar', assignmentPolicy: 'greedy', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+      { runId: 'exp-b', status: 'completed', scenarioId: 'paired', scenarioVersion: '1', scenarioSignature: 'same', variableDimension: 'assignmentPolicy', pathPolicy: 'astar', assignmentPolicy: 'hungarian', algorithmVersion: 'v1', simulatedSeconds: 10, tick: 20 },
+    ]
+    installFetch((url) => url.endsWith('/algorithm-experiments')
+      ? new Response(JSON.stringify({ contractVersion: 'algorithm-experiment-list-v1', sourceScope: 'CURRENT_BACKEND_DATABASE', sourceDescription: '当前数据库', runs }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      : undefined)
+    renderPage('/simulation/analytics?runId=run-a&baselineRunId=missing-run&candidateRunId=exp-b')
+    expect(await screen.findByRole('alert')).toHaveTextContent('URL 中的基线 Run 不存在于当前后端数据库')
+    expect(screen.getByLabelText('基线实验Run')).toHaveValue('')
   })
 
   it('guides the user when only one algorithm experiment Run exists', async () => {
@@ -639,52 +676,69 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(document.querySelector('[data-metric-id="LEGACY_COMPLETED_TASKS"]')).toBeNull()
     const blockedCard = document.querySelector('[data-metric-id="BLOCKED_ROBOT_COUNT_CURRENT"]') as HTMLElement
     expect(within(blockedCard).getByText('0')).toBeInTheDocument()
-    const occupancyLabel = screen.getByText('当前输送节点占用代理')
-    expect(occupancyLabel.parentElement).toHaveTextContent('12.5 %')
+    const occupancyLabel = screen.getAllByText('输送节点占用率').find((label) => label.parentElement?.textContent?.includes('12.5 %'))
+    expect(occupancyLabel?.parentElement).toHaveTextContent('12.5 %')
     expect(screen.queryByText('1250.0%')).not.toBeInTheDocument()
-    expect(screen.getByText(/当前状态为0，不代表整个 Run 期间均为0/)).toBeInTheDocument()
+    expect(screen.getByText(/当前值为0；历史变化请查看上方趋势图/)).toBeInTheDocument()
+  })
+
+  it('keeps metric explanations keyboard-accessible and off the primary reading line', async () => {
+    installFetch()
+    renderPage()
+    const stationInfo = (await screen.findAllByLabelText('查看站台相关任务数说明'))[0]
+    expect(stationInfo.tagName).toBe('SUMMARY')
+    expect(stationInfo).toHaveAttribute('tabindex', '0')
+    stationInfo.focus()
+    expect(document.activeElement).toBe(stationInfo)
+    fireEvent.click(stationInfo)
+    expect(stationInfo.closest('details')).toHaveAttribute('open')
+    expect(stationInfo.closest('details')).toHaveTextContent('包含处理中任务，不等于纯等待队列')
+    const occupancyInfo = screen.getByLabelText('查看输送节点占用率说明')
+    fireEvent.click(occupancyInfo)
+    expect(occupancyInfo.closest('details')).toHaveTextContent('不代表设备时间利用率')
   })
 
   it('uses persisted first-assignment evidence and historical robot-task associations', async () => {
     installFetch()
     renderPage()
     expect((await screen.findAllByText('187.0 Tick')).length).toBeGreaterThan(0)
-    expect(screen.getByText(/不使用任务最终 startedTick/)).toBeInTheDocument()
+    expect(screen.getAllByLabelText('查看首次分配平均等待说明')[0].closest('details')).toHaveTextContent('firstAssignmentTick - createdTick')
     expect(screen.getAllByText('ctu-01').length).toBeGreaterThan(0)
     expect(screen.getByText('ctu-02')).toBeInTheDocument()
-    expect(screen.getByText(/不同 robotId \+ taskId 去重/)).toBeInTheDocument()
+    expect(screen.getByLabelText('查看CTU历史关联任务数说明').closest('details')).toHaveTextContent('不代表设备利用率')
     expect(screen.queryByText(/最近一次开始 Tick/)).not.toBeInTheDocument()
   })
 
   it('labels suspected deadlocks without rendering unavailable confirmed-deadlock metrics', async () => {
     installFetch()
     renderPage()
-    const section = (await screen.findByText('死锁与拥堵诊断')).closest('.analytics-module') as HTMLElement
+    const section = (await screen.findAllByText('死锁与拥堵诊断'))[0].closest('.analytics-module') as HTMLElement
     expect(within(section).getByText('疑似死锁告警次数')).toBeInTheDocument()
     expect(within(section).getByText('4')).toBeInTheDocument()
-    expect(within(section).getByText(/不等于确认死锁/)).toBeInTheDocument()
+    expect(screen.getByText('指标说明').closest('details')).toHaveTextContent('不等同于不可恢复的物理死锁')
     expect(screen.queryByText(/真实死锁率|解锁成功率|平均解锁时长/)).not.toBeInTheDocument()
     expect(screen.getByText('任务生命周期')).toBeInTheDocument()
-    expect(screen.getByText(/不是 ETA 预测准确率/)).toBeInTheDocument()
+    expect(screen.getAllByLabelText('查看已完成父任务平均生命周期说明')[0].closest('details')).toHaveTextContent('不是 ETA 预测准确率')
   })
 
   it('renders real deadlock lifecycle metrics without mixing legacy alerts and Episodes', async () => {
     installFetch()
     renderPage()
-    const section = (await screen.findByText('死锁与拥堵诊断')).closest('.analytics-module') as HTMLElement
+    const section = (await screen.findAllByText('死锁与拥堵诊断'))[0].closest('.analytics-module') as HTMLElement
     expect(within(section).getByText('疑似死锁告警次数')).toBeInTheDocument()
     expect(within(section).getByText('疑似循环 Episode')).toBeInTheDocument()
     expect(within(section).getByText('持续循环等待 Episode')).toBeInTheDocument()
     expect(within(section).getByText('持续循环等待 Episode').parentElement).toHaveTextContent('1')
-    expect(within(section).getByText(/不与新版 Episode 数相加/)).toBeInTheDocument()
-    expect(within(section).getByText(/PERSISTENT_WAIT_CYCLE 不代表物理设备不可恢复死锁/)).toBeInTheDocument()
+    const metricDetails = screen.getByText('指标说明').closest('details') as HTMLDetailsElement
+    expect(metricDetails).toHaveTextContent('疑似告警不与 Episode 数相加')
+    expect(metricDetails).toHaveTextContent('不等同于不可恢复的物理死锁')
     expect(within(section).getByText('累计阻塞车辆Tick').parentElement).toHaveTextContent('41 robot·Tick')
     expect(within(section).getByText('平均确认恢复耗时').parentElement).toHaveTextContent('7.0 Tick')
     expect(within(section).getByText('确认恢复比例（非正式成功率）').parentElement).toHaveTextContent('100.0 %')
     expect(within(section).getByText('已确认恢复事件').parentElement).toHaveTextContent('1')
     expect(within(section).getByText('Run结束未解除事件').parentElement).toHaveTextContent('0')
     expect(within(section).getByText('无法确认事件').parentElement).toHaveTextContent('0')
-    expect(within(section).getByLabelText('死锁生命周期统计合同')).toHaveTextContent(/generation\s*2/)
+    expect(metricDetails).toHaveTextContent(/generation：2/)
   })
 
   it('preserves lifecycle zero but hides null, non-finite, and unsampled averages', async () => {
@@ -707,7 +761,7 @@ describe('algorithm performance analytics M2-5B', () => {
       } as Response
     })
     renderPage()
-    const section = (await screen.findByText('死锁与拥堵诊断')).closest('.analytics-module') as HTMLElement
+    const section = (await screen.findAllByText('死锁与拥堵诊断'))[0].closest('.analytics-module') as HTMLElement
     expect(within(section).getByText('累计阻塞车辆Tick').parentElement).toHaveTextContent('0 robot·Tick')
     expect(within(section).queryByText('阻塞事件次数')).not.toBeInTheDocument()
     expect(within(section).queryByText('最长连续阻塞Tick')).not.toBeInTheDocument()
@@ -729,7 +783,7 @@ describe('algorithm performance analytics M2-5B', () => {
       return new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
     renderPage()
-    const section = (await screen.findByText('死锁与拥堵诊断')).closest('.analytics-module') as HTMLElement
+    const section = (await screen.findAllByText('死锁与拥堵诊断'))[0].closest('.analytics-module') as HTMLElement
     expect(within(section).getByText('疑似死锁告警次数')).toBeInTheDocument()
     expect(within(section).queryByText('累计阻塞车辆Tick')).not.toBeInTheDocument()
     expect(within(section).queryByText('持续循环等待 Episode')).not.toBeInTheDocument()
@@ -749,11 +803,11 @@ describe('algorithm performance analytics M2-5B', () => {
   it('keeps watermark limitations in the default-collapsed quality details', async () => {
     installFetch()
     renderPage()
-    const summary = await screen.findByText('数据质量与指标限制')
+    const summary = await screen.findByText('指标说明')
     const details = summary.closest('details') as HTMLDetailsElement
     expect(details).not.toHaveAttribute('open')
-    expect(details).toHaveTextContent('P2-2B 死锁生命周期')
-    expect(details).toHaveTextContent('数据库事件水位：ID 99 / Tick 635')
+    expect(details).toHaveTextContent('死锁与拥堵诊断')
+    expect(details).toHaveTextContent('事件水位：ID 99 / Tick 635')
     expect(details).toHaveTextContent('重复 1；冲突 0')
     expect(details).toHaveTextContent('BEST_EFFORT_NOT_EXACTLY_ONCE')
     expect(details).toHaveTextContent('阈值尚未现场标定')
@@ -790,11 +844,12 @@ describe('algorithm performance analytics M2-5B', () => {
   it('shows history quality counts and full-data peak independently from sampled charts', async () => {
     installFetch()
     renderPage()
-    expect(await screen.findByText('2000')).toBeInTheDocument()
-    expect(screen.getByText('1999')).toBeInTheDocument()
-    expect(screen.getByText(/全量阻塞峰值为 5，峰值 Tick 为 635/)).toBeInTheDocument()
-    expect(screen.getByText(/曲线来自后端按 Tick 去重后的安全抽样/)).toBeInTheDocument()
-    expect(screen.getByText('UNCONFIRMED')).toBeInTheDocument()
+    const details = (await screen.findByText('指标说明')).closest('details') as HTMLDetailsElement
+    expect(details).toHaveTextContent('原始 2000 条')
+    expect(details).toHaveTextContent('去重后 1999 个 Tick')
+    expect(details).toHaveTextContent('全量阻塞峰值为 5，峰值 Tick 为 635')
+    expect(screen.getByLabelText('查看历史趋势说明').closest('details')).toHaveTextContent('缺失值不会绘制为 0')
+    expect(details).toHaveTextContent('完整性：UNCONFIRMED')
   })
 
   it('renders valid planning samples and backend P50/P90/P99 without unavailable placeholders', async () => {
@@ -805,7 +860,7 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(screen.getByText('样本不足 5/100')).toBeInTheDocument()
     expect(screen.getAllByText(/SUCCESS_ONLY_SAMPLE/).length).toBeGreaterThan(0)
     expect(screen.getByText('路径规划与车辆实际里程')).toBeInTheDocument()
-    expect(screen.getByText(/不是车辆实际运行里程/)).toBeInTheDocument()
+    expect(screen.getByLabelText('查看规划诊断说明').closest('details')).toHaveTextContent('不等同于车辆实际行驶里程')
     expect(screen.queryByText(/路径优化率|重规划样本|实际距离无数据/)).not.toBeInTheDocument()
   })
 
@@ -822,8 +877,8 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(within(movementTypes).getByText('回退').parentElement).toHaveTextContent('0.800 m')
     expect(within(movementTypes).getByText('返回待命').parentElement).toHaveTextContent('1.600 m')
     expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/0.800 m/)
-    expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/用户定义模拟参数\s*是/)
-    expect(within(section).getByText(/Lift 位移是垂直运输证据/)).toBeInTheDocument()
+    expect(within(section).getByLabelText('物理距离合同')).toHaveTextContent(/用户定义\s*·\s*UNVERIFIED/)
+    expect(within(section).getByLabelText('查看垂直运输说明').closest('details')).toHaveTextContent(/不与 CTU 或 Shuttle 水平里程相加/)
   })
 
   it('labels complete fixed-window mileage without claiming natural completion', async () => {
@@ -997,9 +1052,10 @@ describe('algorithm performance analytics M2-5B', () => {
       return new Response(JSON.stringify(changed), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
     renderPage()
-    expect(await screen.findByText('输送协同')).toBeInTheDocument()
+    const conveyorSection = (await screen.findAllByText('输送协同'))[0].closest('.analytics-module') as HTMLElement
+    expect(conveyorSection).toBeInTheDocument()
     expect(document.querySelector('[data-metric-id="CONVEYOR_NODE_OCCUPANCY_CURRENT"]')).toBeNull()
-    expect(screen.queryByText('当前输送节点占用代理')).not.toBeInTheDocument()
+    expect(within(conveyorSection).queryByText('输送节点占用率')).not.toBeInTheDocument()
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
     const waitCards = screen.getAllByText('当前输送等待任务数')
     expect(waitCards.length).toBeGreaterThan(0)
@@ -1014,7 +1070,7 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(await screen.findByText(/父子任务指标读取失败：task metrics unavailable/)).toBeInTheDocument()
     expect(screen.queryByText('已完成父任务数量')).not.toBeInTheDocument()
     expect(Array.from(document.querySelectorAll('.analytics-kpi strong')).some((node) => node.textContent === '—')).toBe(false)
-    expect(screen.getByText('死锁与拥堵诊断')).toBeInTheDocument()
+    expect(screen.getAllByText('死锁与拥堵诊断').length).toBeGreaterThan(0)
   })
 
   it('switches query keys by run without showing the previous run value', async () => {
@@ -1029,15 +1085,16 @@ describe('algorithm performance analytics M2-5B', () => {
       expect(within(card).getByText('3')).toBeInTheDocument()
       expect(within(card).queryByText('9')).not.toBeInTheDocument()
       expect(screen.getByText('累计阻塞车辆Tick').parentElement).toHaveTextContent('5 robot·Tick')
-      expect(screen.getByLabelText('死锁生命周期统计合同')).toHaveTextContent(/generation\s*3/)
+      expect(screen.getByText('指标说明').closest('details')).toHaveTextContent(/generation：3/)
       expect(screen.queryByText('41 robot·Tick')).not.toBeInTheDocument()
     })
   })
 
-  it('keeps the original return navigation and the truthful station proxy name', async () => {
+  it('keeps the original return navigation and the user-facing station metric name', async () => {
     installFetch()
     renderPage()
-    expect((await screen.findAllByText('当前站台阶段任务数（代理）')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('站台相关任务数')).length).toBeGreaterThan(0)
+    expect(screen.queryByText('当前站台阶段任务数（代理）')).not.toBeInTheDocument()
     expect(screen.queryByText('站台等待队列')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /返回仿真工作台/ }))
     expect(await screen.findByText('simulation-destination')).toBeInTheDocument()
@@ -1055,10 +1112,10 @@ describe('algorithm performance analytics M2-5B', () => {
   it('keeps concise source and calculation quality details collapsed without listing missing metrics', async () => {
     installFetch()
     renderPage()
-    const summary = await screen.findByText('数据质量与指标限制')
+    const summary = await screen.findByText('指标说明')
     const details = summary.closest('details') as HTMLDetailsElement
     expect(details).not.toHaveAttribute('open')
-    expect(details).toHaveTextContent('M2-1 任务状态')
+    expect(details).toHaveTextContent('任务状态与生命周期')
     expect(details).toHaveTextContent('仅统计成功的 Shuttle 初始规划')
     expect(screen.queryByText(/正式指标缺口|尚不可计算|未实现的正式指标/)).not.toBeInTheDocument()
   })
@@ -1256,7 +1313,7 @@ describe('algorithm performance analytics M2-5B', () => {
     expect(screen.getByText('增加运输件数').parentElement).toHaveTextContent('50')
     expect(screen.getByText('吞吐量提升率').parentElement).toHaveTextContent('50.00%')
     expect(screen.getByRole('img', { name: '累计有效交付件数随仿真Tick变化' })).toBeInTheDocument()
-    expect(screen.getByText(/真实放入合同指定 drop_zone 后，按SKU实际件数累计/)).toBeInTheDocument()
+    expect(screen.getByLabelText('查看运输吞吐量口径说明').closest('details')).toHaveTextContent('按 SKU 件数累计')
   })
 
   it('preserves a legal zero throughput improvement', async () => {

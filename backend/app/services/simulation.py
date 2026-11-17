@@ -217,6 +217,8 @@ class SimulationService:
         motion_physics_contract: dict[str, Any] | None = None,
         motion_speed_contract: dict[str, Any] | None = None,
         algorithm_experiment_contract: dict[str, Any] | None = None,
+        *,
+        expected_replay_evidence: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         config = build_simulation_config(topology)
         if motion_physics_contract is not None:
@@ -304,14 +306,119 @@ class SimulationService:
             experiment["topologyId"] = topology["id"]
             experiment["dataSource"] = "REAL_SIMULATION_EXPERIMENT"
             config["algorithmExperimentContract"] = experiment
+            config["experimentReplayContract"] = {
+                "contractVersion": "algorithm-experiment-replay-v1",
+                "topologyId": topology["id"],
+                "topologyRevision": expected_revision,
+                "orders": deepcopy(orders or []),
+                "transfers": deepcopy(transfers or []),
+                "motionPhysicsContract": deepcopy(motion_physics_contract),
+                "motionSpeedContract": deepcopy(motion_speed_contract),
+                "algorithmExperimentContract": deepcopy(algorithm_experiment_contract),
+                "workloadMutationCount": 0,
+                "workloadMutationReasons": [],
+            }
         if not config["robots"]:
             raise ValueError("当前拓扑没有 CTU 或四向车设备，无法启动仿真")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         runtime = self._create_runtime(run_id, topology, config, orders, prepared_transfers)
+        if expected_replay_evidence is not None:
+            actual_contract = runtime.state.get("algorithmExperimentContract") or {}
+            mismatches = [
+                key for key, expected in expected_replay_evidence.items()
+                if actual_contract.get(key) != expected
+            ]
+            if mismatches:
+                raise ValueError(
+                    "Candidate initial scene could not be restored: " + ", ".join(sorted(mismatches))
+                )
         self.runtimes[run_id] = runtime
         self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
         return {"runId": run_id, "status": "running"}
+
+    async def create_assignment_candidate(
+        self,
+        baseline_run_id: str,
+        assignment_policy: str,
+        topology: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay one authoritative frozen scene while changing assignmentPolicy only."""
+
+        if assignment_policy not in {"greedy", "hungarian", "throughput_aware"}:
+            raise ValueError("Unsupported assignmentPolicy")
+        baseline = self.repo.get_run_read_only(baseline_run_id)
+        if baseline is None:
+            raise KeyError(baseline_run_id)
+        state = baseline.get("payload") or {}
+        if baseline.get("status") not in {"completed", "stopped"}:
+            raise ValueError("Baseline experiment must be terminal before it can be copied")
+        experiment = state.get("algorithmExperimentContract")
+        replay = state.get("experimentReplayContract")
+        if not isinstance(experiment, dict) or not isinstance(replay, dict):
+            raise ValueError("Baseline Run lacks authoritative frozen replay evidence")
+        if replay.get("contractVersion") != "algorithm-experiment-replay-v1":
+            raise ValueError("Baseline Run replay contract is unsupported")
+        if int(replay.get("workloadMutationCount") or 0) > 0:
+            raise ValueError("Baseline Run contains unregistered order insertion or cancellation")
+        if experiment.get("variableDimension") != "assignmentPolicy":
+            raise ValueError("Baseline experiment does not isolate assignmentPolicy")
+        if experiment.get("orderArrivalPlanHash"):
+            raise ValueError("Baseline registered arrival plan cannot yet be replayed from authoritative inputs")
+        if experiment.get("assignmentPolicy") == assignment_policy:
+            raise ValueError("Candidate assignmentPolicy must differ from baseline")
+        if replay.get("topologyId") != topology.get("id"):
+            raise ValueError("Baseline topology identity no longer matches")
+        if replay.get("topologyRevision") != topology_revision(topology):
+            raise ValueError("Baseline topology revision can no longer be restored")
+
+        source_contract = deepcopy(replay.get("algorithmExperimentContract"))
+        if not isinstance(source_contract, dict):
+            raise ValueError("Baseline Run lacks the original experiment request")
+        source_contract["assignmentPolicy"] = assignment_policy
+        source_contract["algorithmVersion"] = (
+            THROUGHPUT_AWARE_VERSION
+            if assignment_policy == "throughput_aware"
+            else "agv-routing-assignment-v1"
+        )
+        if assignment_policy != "throughput_aware":
+            source_contract.pop("throughputAwareWeights", None)
+        expected = {
+            key: str(experiment.get(key) or "")
+            for key in (
+                "scenarioSignature",
+                "initialInventoryHash",
+                "initialVehicleSnapshotHash",
+                "orderSnapshotHash",
+            )
+        }
+        if any(not value for value in expected.values()):
+            raise ValueError("Baseline Run initial scene evidence is incomplete")
+        return await self.start(
+            topology,
+            orders=deepcopy(replay.get("orders") or []),
+            transfers=deepcopy(replay.get("transfers") or []),
+            motion_physics_contract=deepcopy(replay.get("motionPhysicsContract")),
+            motion_speed_contract=deepcopy(replay.get("motionSpeedContract")),
+            algorithm_experiment_contract=source_contract,
+            expected_replay_evidence=expected,
+        )
+
+    @staticmethod
+    def _mark_experiment_workload_mutation(runtime: RunRuntime, reason: str) -> None:
+        replay = runtime.state.get("experimentReplayContract")
+        experiment = runtime.state.get("algorithmExperimentContract")
+        if not isinstance(replay, dict) or not isinstance(experiment, dict):
+            return
+        replay["workloadMutationCount"] = int(replay.get("workloadMutationCount") or 0) + 1
+        replay.setdefault("workloadMutationReasons", []).append(reason)
+        experiment["workloadMutationCount"] = replay["workloadMutationCount"]
+        experiment["workloadIntegrity"] = "MUTATED_AFTER_START"
+        if isinstance(runtime.config.get("algorithmExperimentContract"), dict):
+            runtime.config["algorithmExperimentContract"].update({
+                "workloadMutationCount": replay["workloadMutationCount"],
+                "workloadIntegrity": "MUTATED_AFTER_START",
+            })
 
     def pause(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
@@ -357,7 +464,13 @@ class SimulationService:
         self._persist(runtime)
         return {"runId": run_id, "status": runtime.state["status"], "speedMultiplier": multiplier}
 
-    async def add_order(self, run_id: str, order: dict[str, Any]) -> dict[str, Any]:
+    async def add_order(
+        self,
+        run_id: str,
+        order: dict[str, Any],
+        *,
+        registered_experiment_arrival: bool = False,
+    ) -> dict[str, Any]:
         """向当前 Run 插入一张订单，并立即完成库存预留和任务拆解。
 
         仿真时钟和 HTTP 请求共用同一 asyncio 事件循环；本方法在第一个
@@ -425,6 +538,8 @@ class SimulationService:
         runtime.state.setdefault("orders", []).append(order_state)
         runtime.state.setdefault("tasks", []).extend(tasks)
         runtime.state["orderDriven"] = True
+        if not registered_experiment_arrival:
+            self._mark_experiment_workload_mutation(runtime, f"ORDER_INSERTED:{order_id}")
         runtime.state["updatedAt"] = now_dt().isoformat()
         self._record_event(runtime, tick, "order_inserted", {"orderId": order_id})
         decomposition = order_state.get("decomposition") or {}
@@ -559,6 +674,7 @@ class SimulationService:
             order["cancelledTick"] = tick
         decomposition = order.setdefault("decomposition", {})
         decomposition["stage"] = "returning" if returning else "cancelled"
+        self._mark_experiment_workload_mutation(runtime, f"ORDER_CANCELLED:{order_id}")
         self._record_event(
             runtime,
             tick,
@@ -1148,6 +1264,7 @@ class SimulationService:
             "motionPhysicsContract": deepcopy(config.get("motionPhysicsContract")),
             "motionSpeedContract": deepcopy(config.get("motionSpeedContract")),
             "algorithmExperimentContract": deepcopy(config.get("algorithmExperimentContract")),
+            "experimentReplayContract": deepcopy(config.get("experimentReplayContract")),
             "planningEvidence": [],
             "planningEvidenceContractVersion": "planning-evidence-v1",
             "planningSequence": 0,
@@ -1241,6 +1358,16 @@ class SimulationService:
             config["algorithmExperimentContract"] = deepcopy(
                 state["algorithmExperimentContract"]
             )
+            replay = state.get("experimentReplayContract")
+            if isinstance(replay, dict):
+                replay.update({
+                    "scenarioSignature": state["algorithmExperimentContract"]["scenarioSignature"],
+                    "initialInventoryHash": inventory_hash,
+                    "initialVehicleSnapshotHash": state["algorithmExperimentContract"][
+                        "initialVehicleSnapshotHash"
+                    ],
+                    "orderSnapshotHash": state["algorithmExperimentContract"]["orderSnapshotHash"],
+                })
         metrics = {
             "throughput": 0,
             "completedTasks": 0,

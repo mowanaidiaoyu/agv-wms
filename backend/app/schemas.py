@@ -303,6 +303,14 @@ class SimulationStartRequest(BaseModel):
     algorithmExperimentContract: AlgorithmExperimentContractRequest | None = None
 
 
+class AlgorithmExperimentCandidateRequest(BaseModel):
+    """Create a paired experiment by changing only the assignment policy."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    assignmentPolicy: Literal["greedy", "hungarian", "throughput_aware"]
+
+
 class ShuttleDockSettingsRequest(BaseModel):
     """四向车出货位运行时设置（四向车搬运工作台）。未传字段保持不变。"""
 

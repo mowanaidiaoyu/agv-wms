@@ -85,7 +85,8 @@ export function OrderRail({
   const counts = useMemo(() => ({
     waiting: orders.filter((order) => !order.status || ['ready', 'waiting_dispatch'].includes(order.status)).length,
     executing: orders.filter((order) => order.status === 'executing').length,
-    completed: orders.filter((order) => ['completed', 'cancelled'].includes(order.status ?? '')).length,
+    completed: orders.filter((order) => order.status === 'completed').length,
+    cancelled: orders.filter((order) => order.status === 'cancelled').length,
   }), [orders])
   const draftCount = orders.filter((order) => (order.status ?? 'ready') === 'ready').length
   const runtimeCount = orders.length - draftCount
@@ -112,6 +113,7 @@ export function OrderRail({
             <span><b>{counts.waiting}</b>待处理</span>
             <span><b>{counts.executing}</b>执行中</span>
             <span><b>{counts.completed}</b>已完成</span>
+            <span><b>{counts.cancelled}</b>已取消</span>
           </div>
           <div className="simulation-order-list">
             {orders.length ? orders.map((order) => {

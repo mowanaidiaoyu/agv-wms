@@ -258,11 +258,19 @@ def compare_throughput_metrics(
     else:
         if left.get("scenarioSignature") != right.get("scenarioSignature"):
             reasons.append("SCENARIO_SIGNATURE_MISMATCH")
+        if left.get("initialInventoryHash") != right.get("initialInventoryHash"):
+            reasons.append("INITIAL_INVENTORY_MISMATCH")
+        if left.get("initialVehicleSnapshotHash") != right.get("initialVehicleSnapshotHash"):
+            reasons.append("INITIAL_VEHICLE_STATE_MISMATCH")
+        if left.get("orderSnapshotHash") != right.get("orderSnapshotHash"):
+            reasons.append("ORDER_SNAPSHOT_MISMATCH")
         if left.get("variableDimension") != right.get("variableDimension"):
             reasons.append("VARIABLE_DIMENSION_MISMATCH")
         dimension = left.get("variableDimension")
         if dimension and left.get(dimension) == right.get(dimension):
             reasons.append("ALGORITHM_SELECTION_IDENTICAL")
+        if int(left.get("workloadMutationCount") or 0) > 0 or int(right.get("workloadMutationCount") or 0) > 0:
+            reasons.append("WORKLOAD_MUTATED_AFTER_START")
     if baseline.get("configuredObservationTicks") != candidate.get("configuredObservationTicks"):
         reasons.append("OBSERVATION_WINDOW_MISMATCH")
     if baseline.get("observationSeconds") != candidate.get("observationSeconds"):

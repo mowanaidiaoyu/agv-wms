@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Activity, ArrowLeft, BarChart3, Clock3, Database, FlaskConical, GitCompareArrows, Info, Route, TimerReset, TriangleAlert } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
@@ -111,6 +111,23 @@ function metricDisplay(metric: DisplayMetric | undefined, decimals = 0): string 
   return '结构化数据'
 }
 
+function MetricInfo({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <details className="analytics-metric-info">
+      <summary tabIndex={0} aria-label={`查看${label}说明`} title={`${label}说明`}><Info size={13} aria-hidden="true" /></summary>
+      <div role="note">{children}</div>
+    </details>
+  )
+}
+
+function MetricLabel({ label, info }: { label: string; info?: ReactNode }) {
+  return <><span>{label}</span>{info ? <MetricInfo label={label}>{info}</MetricInfo> : null}</>
+}
+
+function hasQualityConcern(metric: DisplayMetric | MotionDistanceMetricValue | undefined): boolean {
+  return Boolean(metric && (metric.reason || !['GOOD', 'COMPLETE'].includes(metric.dataQuality ?? '')))
+}
+
 function MetricCard({ label, metric, source, decimals = 0, suffix }: {
   label: string
   metric?: DisplayMetric
@@ -125,11 +142,9 @@ function MetricCard({ label, metric, source, decimals = 0, suffix }: {
     : rendered
   return (
     <article className="analytics-kpi" data-metric-id={metric?.metricId}>
-      <span>{label}</span>
+      <MetricLabel label={label} info={source} />
       <strong>{value}</strong>
-      <small>来源：{source}</small>
-      <small>样本：{metric?.sampleCount ?? '—'} · 质量：{metric?.dataQuality ?? '—'} · 正式验收：{metric?.acceptanceEligible ? '是' : '否'}</small>
-      {metric?.reason ? <small title={metric.reason}>{reasonText(metric.reason)}</small> : null}
+      {hasQualityConcern(metric) ? <small className="analytics-quality-warning" title={metric?.reason ?? undefined}>数据质量：{metric?.dataQuality ?? '未确认'}{metric?.reason ? ` · ${reasonText(metric.reason)}` : ''}</small> : null}
     </article>
   )
 }
@@ -143,41 +158,40 @@ function ValueCard({ label, value, source, suffix }: {
   if (!hasNumericValue(value)) return null
   return (
     <article className="analytics-kpi">
-      <span>{label}</span>
+      <MetricLabel label={label} info={source} />
       <strong>{formatNumber(value)}{suffix ? ` ${suffix}` : ''}</strong>
-      <small>来源：{source}</small>
-      <small>真实 Run 当前持久化状态</small>
     </article>
   )
 }
 
-function MiniMetric({ label, metric, decimals = 0, suffix }: {
+function MiniMetric({ label, metric, decimals = 0, suffix, info }: {
   label: string
   metric?: DisplayMetric
   decimals?: number
   suffix?: string
+  info?: ReactNode
 }) {
   if (!hasMetricValue(metric)) return null
-  return <div><span>{label}</span><b>{metricDisplay(metric, decimals)}{suffix ? ` ${suffix}` : ''}</b></div>
+  return <div><MetricLabel label={label} info={info} /><b>{metricDisplay(metric, decimals)}{suffix ? ` ${suffix}` : ''}</b>{hasQualityConcern(metric) ? <small className="analytics-quality-warning">数据质量：{metric.dataQuality}</small> : null}</div>
 }
 
-function MiniValue({ label, value, suffix }: {
+function MiniValue({ label, value, suffix, info }: {
   label: string
   value: number | null | undefined
   suffix?: string
+  info?: ReactNode
 }) {
   if (!hasNumericValue(value)) return null
-  return <div><span>{label}</span><b>{formatNumber(value)}{suffix ? ` ${suffix}` : ''}</b></div>
+  return <div><MetricLabel label={label} info={info} /><b>{formatNumber(value)}{suffix ? ` ${suffix}` : ''}</b></div>
 }
 
 function DistanceCard({ label, metric }: { label: string; metric?: MotionDistanceMetricValue }) {
   if (!hasNumericValue(metric?.value)) return null
   return (
     <article className="analytics-kpi analytics-distance-kpi">
-      <span>{label}</span>
+      <MetricLabel label={label} info={`来自真实 Run 的 ${metric.sampleCount} 个有效运动段。`} />
       <strong>{formatNumber(metric.value, 3)} m</strong>
-      <small>真实 Run 运动段 · n={metric.sampleCount}</small>
-      <small>数据质量：{metric.dataQuality}</small>
+      {hasQualityConcern(metric) ? <small className="analytics-quality-warning">数据质量：{metric.dataQuality}</small> : null}
     </article>
   )
 }
@@ -207,7 +221,6 @@ function DeadlockHotspotTable({ hotspots }: { hotspots: DeadlockHotspot[] }) {
           </tr>)}</tbody>
         </table>
       </div>
-      <p className="analytics-data-note">楼层仅在后端提供可靠值时展示；未记录时不推断为1F，也不生成3D定位入口。</p>
     </div>
   )
 }
@@ -266,7 +279,7 @@ function AssignmentBars({ values }: { values: VehicleAssociation[] }) {
   const max = Math.max(1, ...values.map((item) => item.taskCount))
   return (
     <div className="analytics-chart-card">
-      <h3>各 CTU 已观察历史任务关联数 <small>不同 robotId + taskId 去重；不是设备利用率</small></h3>
+      <h3 className="analytics-heading-with-info">各 CTU 历史关联任务数 <MetricInfo label="CTU历史关联任务数">按车辆与任务的唯一关联统计，不代表设备利用率。</MetricInfo></h3>
       <div className="analytics-bars">{values.map((item) => (
           <div className="analytics-bar-row" key={item.robotId}>
             <span title={item.robotId}>{item.robotId}</span>
@@ -297,10 +310,9 @@ function QuantilePanel({ groups }: { groups: PathQuantileGroup[] }) {
   return <div className="analytics-quantile-list">{groups.map((entry, index) => (
     <div className="analytics-quantile-group" key={`${entry.group.algorithm}-${entry.group.topologyRevision ?? 'unknown'}-${index}`}>
       <h5>{entry.group.algorithm.toUpperCase()} · {entry.sampleCount} 个成功样本</h5>
-      <p>版本：拓扑 {entry.group.topologyRevision ?? '未记录'} / 配置 {entry.group.configRevision ?? '未记录'}</p>
       <div className="analytics-quantiles">{(['p50', 'p90', 'p99'] as const).map((key) => {
         const item = entry.quantiles[key]
-        return <div key={key}><span>{key.toUpperCase()}</span><strong>{item.value === null ? `样本不足 ${item.actualSampleCount}/${item.requiredSampleCount}` : `${formatNumber(item.value, 2)} ms`}</strong><small>{item.reason ?? '最近秩法，后端计算'}</small></div>
+        return <div key={key}><span>{key.toUpperCase()}</span><strong>{item.value === null ? `样本不足 ${item.actualSampleCount}/${item.requiredSampleCount}` : `${formatNumber(item.value, 2)} ms`}</strong></div>
       })}</div>
       <QualityBadge quality={entry.dataQuality} reason={entry.reason} />
     </div>
@@ -600,8 +612,8 @@ function ThroughputComparisonPanel({ baselineRunId, candidateRunId }: { baseline
   const result: ThroughputComparisonResult | undefined = query.data
   if (!enabled) {
     return <div className="analytics-throughput-panel" id="throughput-comparison">
-      <h4>运输吞吐量对比</h4>
-      <p className="analytics-data-note">选择两个固定观察窗口实验Run后，显示侧向理货臂真实放入 drop_zone 的累计交付件数。已拣件数、库存预留量和跨层移库数量不会计入。</p>
+      <h4 className="analytics-heading-with-info">运输吞吐量对比 <MetricInfo label="运输吞吐量口径">仅统计侧向理货臂实际放入指定放置区的 SKU 件数；已拣件数、库存预留量和跨层移库数量不计入。</MetricInfo></h4>
+      <p className="analytics-section-intro">选择两次固定观察窗口实验，比较相同时间内的有效交付量。</p>
     </div>
   }
   if (query.isError) {
@@ -613,8 +625,7 @@ function ThroughputComparisonPanel({ baselineRunId, candidateRunId }: { baseline
   const baselineLabel = `${result.baseline.algorithm.pathPolicy?.toUpperCase() ?? '—'} / ${result.baseline.algorithm.assignmentPolicy ?? '—'}`
   const candidateLabel = `${result.candidate.algorithm.pathPolicy?.toUpperCase() ?? '—'} / ${result.candidate.algorithm.assignmentPolicy ?? '—'}`
   return <div className="analytics-throughput-panel" id="throughput-comparison">
-    <div className="analytics-throughput-title"><div><span>P6</span><h4>运输吞吐量对比</h4></div><b>{result.comparable ? '固定窗口可比' : '保留证据 · 不输出正式提升率'}</b></div>
-    <p className="analytics-data-note">口径：侧向理货臂把货物真实放入合同指定 drop_zone 后，按SKU实际件数累计。观察窗口不同、场景签名不同或证据不完整时，不计算正式改善率。</p>
+    <div className="analytics-throughput-title"><div><h4 className="analytics-heading-with-info">运输吞吐量对比 <MetricInfo label="运输吞吐量口径">货物实际进入指定放置区后按 SKU 件数累计。只有观察窗口、场景签名和交付证据均满足条件时才计算改善率。</MetricInfo></h4></div><b>{result.comparable ? '固定窗口可比' : '保留证据 · 不输出正式提升率'}</b></div>
     <div className="analytics-throughput-kpis">
       <div><span>基线运输件数</span><b>{result.baseline.deliveredPieces ?? '—'}</b><small>{baselineLabel}</small></div>
       <div><span>候选运输件数</span><b>{result.candidate.deliveredPieces ?? '—'}</b><small>{candidateLabel}</small></div>
@@ -642,24 +653,53 @@ function ThroughputComparisonPanel({ baselineRunId, candidateRunId }: { baseline
 }
 
 function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: () => void }) {
-  const [baselineRunId, setBaselineRunId] = useState('')
-  const [candidateRunId, setCandidateRunId] = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const queryClient = useQueryClient()
+  const baselineParam = searchParams.get('baselineRunId') ?? ''
+  const candidateParam = searchParams.get('candidateRunId') ?? ''
+  const [baselineRunId, setBaselineRunId] = useState(baselineParam)
+  const [candidateRunId, setCandidateRunId] = useState(candidateParam)
+  const [candidatePolicy, setCandidatePolicy] = useState<AlgorithmExperimentRunSummary['assignmentPolicy']>('hungarian')
   const runsQuery = useQuery({
     queryKey: ['algorithm-experiment-runs'],
     queryFn: api.getAlgorithmExperimentRuns,
     retry: false,
     staleTime: 15_000,
   })
+  useEffect(() => setBaselineRunId(baselineParam), [baselineParam])
+  useEffect(() => setCandidateRunId(candidateParam), [candidateParam])
+  const updateRunSelection = (key: 'baselineRunId' | 'candidateRunId', value: string) => {
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set(key, value)
+    else next.delete(key)
+    setSearchParams(next, { replace: true })
+    if (key === 'baselineRunId') setBaselineRunId(value)
+    else setCandidateRunId(value)
+  }
   const comparisonQuery = useQuery({
     queryKey: ['algorithm-experiment-comparison', baselineRunId, candidateRunId],
     queryFn: () => api.compareAlgorithmExperimentRuns(baselineRunId, candidateRunId),
-    enabled: Boolean(baselineRunId && candidateRunId && baselineRunId !== candidateRunId),
+    enabled: Boolean(
+      baselineRunId && candidateRunId && baselineRunId !== candidateRunId
+      && runsQuery.data?.runs.some((run) => run.runId === baselineRunId)
+      && runsQuery.data?.runs.some((run) => run.runId === candidateRunId)
+    ),
     retry: false,
   })
   const runs: AlgorithmExperimentRunSummary[] = runsQuery.data?.runs ?? []
+  const baselineRun = runs.find((run) => run.runId === baselineRunId)
+  const missingBaseline = Boolean(baselineRunId && !runsQuery.isPending && !baselineRun)
+  const missingCandidate = Boolean(candidateRunId && !runsQuery.isPending && !runs.some((run) => run.runId === candidateRunId))
+  const candidateMutation = useMutation({
+    mutationFn: () => api.createAlgorithmExperimentCandidate(baselineRunId, candidatePolicy),
+    onSuccess: async (created) => {
+      await queryClient.invalidateQueries({ queryKey: ['algorithm-experiment-runs'] })
+      updateRunSelection('candidateRunId', created.runId)
+    },
+  })
   const result: AlgorithmComparisonResult | undefined = comparisonQuery.data
   const formatAlgorithm = (run: AlgorithmExperimentRunSummary) => (
-    `${run.runId} · ${run.pathPolicy.toUpperCase()} / ${run.assignmentPolicy}`
+    `${run.runId} · ${run.pathPolicy.toUpperCase()} / ${run.assignmentPolicy} · ${run.scenarioId} · ${run.observationTicks ?? '完整Run'} · ${run.status}`
   )
   const visitedStates = (item: AlgorithmComparisonResult['baseline']) => (
     item.planningEvidence?.reduce((total, evidence) => total + (hasNumericValue(evidence.visitedStateCount) ? evidence.visitedStateCount : 0), 0) ?? 0
@@ -673,16 +713,24 @@ function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: 
     ? '未提供'
     : baselineContract.topologyRevision === candidateContract.topologyRevision ? '一致' : '不一致'
   return <section className="analytics-module analytics-module-wide analytics-algorithm-comparison" id="algorithm-comparison">
-    <div className="analytics-module-top"><div><span className="analytics-module-no">P5</span><h3>算法对比</h3></div><span className="analytics-state analytics-state-partial">真实隔离 Run</span></div>
-    <div className="analytics-experiment-guide" aria-label="A/B实验步骤"><span><b>1</b>运行 A*</span><i /><span><b>2</b>运行 Dijkstra</span><i /><span><b>3</b>查看真实结果</span></div>
-    <p className="analytics-data-note">后端仅在场景签名、工作量、终态和里程证据一致时计算改善率；SYNTHETIC 波次距离不会进入本表，不同数据库中的 Run 也不会被自动拼接。</p>
+    <div className="analytics-module-top"><div><h3 className="analytics-heading-with-info">算法对比 <MetricInfo label="算法对比数据范围">{runsQuery.data?.sourceDescription ?? '实验 Run 仅从当前后端数据库读取。'} 不会跨不同 SQLite 自动合并，也不会混入 SYNTHETIC 实验数据。</MetricInfo></h3></div><span className="analytics-state analytics-state-partial">真实隔离 Run</span></div>
+    <p className="analytics-section-intro">选择同一场景下的两次实验，对比路径规划或任务分配算法效果。</p>
+    <div className="analytics-experiment-guide" aria-label="A/B实验步骤"><span><b>1</b>选择同一场景</span><i /><span><b>2</b>选择两次实验</span><i /><span><b>3</b>查看算法差异</span></div>
     {runsQuery.isError ? <QueryError name="算法实验Run列表" error={runsQuery.error} retry={() => { void runsQuery.refetch() }} /> : null}
-    {!runsQuery.isPending && runs.length === 0 ? <div className="analytics-comparison-empty"><Info size={18} /><div><strong>当前数据库没有实验 Run</strong><span>请在运行配置中标记可复现实验，使用相同场景分别运行 A* 与 Dijkstra。</span></div><button type="button" onClick={onCreateExperiment}>新建实验</button></div> : null}
+    {!runsQuery.isPending && runs.length === 0 ? <div className="analytics-comparison-empty"><Info size={18} /><div><strong>当前数据库没有实验 Run</strong><span>请先创建至少两次同场景实验，可对比路径规划或任务分配策略。</span></div><button type="button" onClick={onCreateExperiment}>新建实验</button></div> : null}
     {runs.length === 1 ? <div className="analytics-comparison-empty"><Info size={18} /><div><strong>目前只有一个实验 Run</strong><span>至少需要两个使用相同场景、但算法不同的终态 Run。已有：{formatAlgorithm(runs[0])}</span></div><button type="button" onClick={onCreateExperiment}>创建第二个实验</button></div> : null}
     {runs.length >= 2 ? <><h4 className="analytics-subhead">1. 实验选择</h4><div className="analytics-comparison-selectors">
-      <label>基线 Run<select aria-label="基线实验Run" value={baselineRunId} onChange={(event) => setBaselineRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
-      <label>候选 Run<select aria-label="候选实验Run" value={candidateRunId} onChange={(event) => setCandidateRunId(event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
+      <label>基线 Run<select aria-label="基线实验Run" value={baselineRunId} onChange={(event) => updateRunSelection('baselineRunId', event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
+      <label>候选 Run<select aria-label="候选实验Run" value={candidateRunId} onChange={(event) => updateRunSelection('candidateRunId', event.target.value)}><option value="">请选择</option>{runs.map((run) => <option key={run.runId} value={run.runId}>{formatAlgorithm(run)}</option>)}</select></label>
     </div></> : null}
+    {missingBaseline || missingCandidate ? <div className="analytics-notice" role="alert"><TriangleAlert size={17} /><span>URL 中的{missingBaseline ? '基线' : '候选'} Run 不存在于当前后端数据库，请重新选择。</span></div> : null}
+    {baselineRunId ? <div className="analytics-replay-card">
+      <div><strong>复制基线创建候选实验</strong><span>从权威冻结输入复刻订单、库存、车辆和资源条件，只切换 assignmentPolicy；原 Run 不会被修改。</span></div>
+      <label>候选分配算法<select aria-label="候选分配算法" value={candidatePolicy} onChange={(event) => setCandidatePolicy(event.target.value as AlgorithmExperimentRunSummary['assignmentPolicy'])}><option value="greedy">Greedy</option><option value="hungarian">Hungarian</option><option value="throughput_aware">Throughput-Aware</option></select></label>
+      <button type="button" disabled={!baselineRun?.replayEligible || baselineRun.assignmentPolicy === candidatePolicy || candidateMutation.isPending} onClick={() => candidateMutation.mutate()}>{candidateMutation.isPending ? '正在创建…' : '复制并启动候选 Run'}</button>
+      {!baselineRun?.replayEligible ? <small>当前基线不可复制：{baselineRun?.replayIneligibilityReason ?? '未提供权威冻结重放证据'}。</small> : null}
+      {candidateMutation.isError ? <small role="alert">创建失败：{candidateMutation.error instanceof Error ? candidateMutation.error.message : '未知错误'}</small> : null}
+    </div> : null}
     {comparisonQuery.isError ? <QueryError name="算法实验对比" error={comparisonQuery.error} retry={() => { void comparisonQuery.refetch() }} /> : null}
     {result ? <>
       <h4 className="analytics-subhead">2. 场景可比性</h4>
@@ -734,7 +782,9 @@ function AlgorithmComparisonPanel({ onCreateExperiment }: { onCreateExperiment: 
         </div>
       </> : <div className="analytics-notice"><Info size={17} /><span>不可正式比较：{result.comparisonReasons.join(' / ')}。保留原始 Run 数据，但隐藏正式改善率。</span></div>}
     </> : null}
-    <ThroughputComparisonPanel baselineRunId={baselineRunId} candidateRunId={candidateRunId} />
+    {baselineRun && runs.some((run) => run.runId === candidateRunId)
+      ? <ThroughputComparisonPanel baselineRunId={baselineRunId} candidateRunId={candidateRunId} />
+      : null}
   </section>
 }
 
@@ -888,7 +938,10 @@ export function AnalyticsPage() {
   ].filter((entry) => (entry[1] as PathAggregateGroup[]).length > 0) as Array<[string, PathAggregateGroup[]]>
   const showPerformance = Boolean(performanceData?.motionSpeedContract)
   const hasRealContent = showOverview || showHistory || showCtu || showContention || showLifecycle || showPathAndMotion || showConveyor || showPerformance
-  const backUrl = `/simulation?${new URLSearchParams(topologyId ? { topologyId } : {}).toString()}`
+  const backUrl = `/simulation?${new URLSearchParams({
+    ...(topologyId ? { topologyId } : {}),
+    ...(runId ? { runId } : {}),
+  }).toString()}`
   const zeroCurrentConveyor = [nodeOccupancy, conveyorWait, bufferWait, stationQueue].some((item) => item?.value === 0)
 
   const queryErrors = [
@@ -936,7 +989,7 @@ export function AnalyticsPage() {
       {queryErrors.map(([name, query]) => query.isError ? <QueryError key={name} name={name} error={query.error} retry={() => { void query.refetch() }} /> : null)}
 
       {showOverview ? <>
-      <div className="analytics-section-head"><Activity size={18} /><h2>A. 运行概览</h2><small>六个只读指标接口 · 不回退到旧口径</small></div>
+      <div className="analytics-section-head"><Activity size={18} /><h2>A. 运行概览</h2></div>
       <div className="analytics-kpi-grid">
         <MetricCard label="已完成父任务数量" metric={parentCompleted} source="M2-1 /metrics/tasks · 最终任务状态重算" />
         <MetricCard label="父任务平均生命周期" metric={parentLifetime} source="M2-1 completedTick - createdTick" decimals={1} suffix="Tick" />
@@ -946,12 +999,12 @@ export function AnalyticsPage() {
         <MetricCard label="首次分配最长等待" metric={waitMaximum} source="M2-3 firstAssignmentTick - createdTick" suffix="Tick" />
         <MetricCard label="当前输送等待任务数" metric={conveyorWait} source="M2-5A 当前持久化状态" />
         <MetricCard label="当前缓存等待任务数" metric={bufferWait} source="M2-5A 当前持久化状态" />
-        <MetricCard label="当前站台阶段任务数（代理）" metric={stationQueue} source="M2-5A 当前阶段任务代理" />
+        <MetricCard label="站台相关任务数" metric={stationQueue} source="按当前处于输送至拣货、拣货中、放货阶段的任务数统计，包含处理中任务，不等于纯等待队列。" />
       </div>
       </> : null}
 
       {showPerformance && performanceData?.motionSpeedContract ? <section className="analytics-module analytics-module-wide analytics-speed-summary">
-        <div className="analytics-module-top"><div><span className="analytics-module-no">P4</span><h3>物理速度与仿真时间</h3></div><span className="analytics-state analytics-state-partial">用户定义 · UNVERIFIED</span></div>
+        <div className="analytics-module-top"><div><h3 className="analytics-heading-with-info">物理速度与仿真时间 <MetricInfo label="物理速度与仿真时间">仿真耗时按冻结的 simTickSeconds × Tick 计算；播放倍率不参与物理统计。</MetricInfo></h3></div><span className="analytics-state analytics-state-warning">用户定义 · UNVERIFIED</span></div>
         <div className="analytics-mini-grid">
           <MiniValue label="CTU配置速度" value={performanceData.motionSpeedContract.ctuSpeedMetersPerSecond} suffix="m/s" />
           <MiniValue label="Shuttle配置速度" value={performanceData.motionSpeedContract.shuttleSpeedMetersPerSecond} suffix="m/s" />
@@ -963,42 +1016,31 @@ export function AnalyticsPage() {
           <MiniValue label="平均有效水平速度" value={performanceData.averageEffectiveHorizontalSpeedMetersPerSecond} suffix="m/s" />
           <MiniValue label="任务完成率" value={performanceData.taskCompletionRatePercent} suffix="%" />
         </div>
-        <p className="analytics-data-note">模拟耗时由冻结 simTickSeconds × Tick 计算；有效速度不使用墙钟时间，播放倍率 {performanceData.playbackMultiplier}× 不进入物理统计。</p>
       </section> : null}
 
       {showHistory ? <>
-      <div className="analytics-section-head"><TimerReset size={18} /><h2>B. 历史运行趋势</h2><small>横轴为仿真 Tick；曲线最多输出 240 个去重抽样点</small></div>
-      <div className="analytics-history-meta">
-        <span>原始快照 <b>{historyData?.rawSampleCount}</b></span>
-        <span>唯一 Tick <b>{historyData?.uniqueTickCount}</b></span>
-        <span>重复快照 <b>{historyData?.duplicateSnapshotCount}</b></span>
-        <span>输出点 <b>{historyData?.outputSampleCount}</b></span>
-        <span>无效快照 <b>{historyData?.invalidSnapshotCount}</b></span>
-        <span>采集完整性 <b>{historyData?.collectionCompleteness}</b></span>
-      </div>
+      <div className="analytics-section-head"><TimerReset size={18} /><h2 className="analytics-heading-with-info">B. 历史运行趋势 <MetricInfo label="历史趋势">横轴为仿真 Tick；缺失值不会绘制为 0。快照去重与抽样信息可在“指标说明”中查看。</MetricInfo></h2></div>
       <div className="analytics-chart-grid">
         {showTaskTrend ? <TrendChart title="任务进度趋势" points={historyPoints} series={[{ key: 'completedTasks', name: '已完成任务', color: '#0f766e' }, { key: 'pendingTasks', name: '待处理任务', color: '#ea580c' }]} unit="任务数" /> : null}
         {showBlockedTrend ? <TrendChart title="阻塞车辆趋势" points={historyPoints} series={[{ key: 'blockedRobots', name: '阻塞车辆', color: '#dc2626' }]} unit="车辆数" /> : null}
         {showQueueTrend ? <TrendChart title="输送与缓存等待趋势" points={historyPoints} series={[{ key: 'conveyorQueueDepth', name: '输送等待任务', color: '#d97706' }, { key: 'bufferOccupancy', name: '缓存相关任务', color: '#2563eb' }]} unit="任务数" /> : null}
-        {showOccupancyTrend ? <TrendChart title="输送节点占用代理趋势" points={historyPoints} series={[{ key: 'conveyorUtilization', name: '节点占用代理', color: '#0f766e' }]} unit="%（节点占用代理，非物理利用率）" /> : null}
+        {showOccupancyTrend ? <TrendChart title="输送节点占用率趋势" points={historyPoints} series={[{ key: 'conveyorUtilization', name: '输送节点占用率', color: '#0f766e' }]} unit="%" /> : null}
       </div>
-      <p className="analytics-data-note">曲线来自后端按 Tick 去重后的安全抽样，缺失字段不会绘制成 0。{hasNumericValue(blockedPeak) ? `全量阻塞峰值为 ${blockedPeak}${hasNumericValue(blockedPeakTick) ? `，峰值 Tick 为 ${blockedPeakTick}` : ''}。` : ''}输送占用值表示当前输送图节点占用比例，不是时间加权物理利用率。</p>
       </> : null}
 
       {(showCtu || showContention || showLifecycle || showPathAndMotion || showConveyor) ? <>
-      <div className="analytics-section-head"><GitCompareArrows size={18} /><h2>C. 算法效果与运行诊断</h2><small>真实 Run 与 SYNTHETIC 实验不混合统计</small></div>
+      <div className="analytics-section-head"><GitCompareArrows size={18} /><h2>C. 算法效果与运行诊断</h2><small>真实 Run</small></div>
       <div className="analytics-module-list">
         {showCtu ? <section className="analytics-module" id="section-6-3">
           <div className="analytics-module-top"><div><span className="analytics-module-no">6.3</span><h3>CTU 任务分配</h3></div><span className="analytics-state analytics-state-partial">真实 Run</span></div>
           <div className="analytics-mini-grid">
             <MiniValue label="CTU 父任务总数" value={ctuParentTaskCount} />
             <MiniMetric label="已观察分配任务数" metric={ctuAssigned} />
-            <MiniMetric label="首次分配平均等待" metric={waitAverage} decimals={1} suffix="Tick" />
+            <MiniMetric label="首次分配平均等待" metric={waitAverage} decimals={1} suffix="Tick" info="按首次有效分配 Tick 与任务创建 Tick 的差值统计。" />
             <MiniMetric label="首次分配最长等待" metric={waitMaximum} suffix="Tick" />
             <MiniMetric label="有效等待样本数" metric={waitSamples} />
           </div>
           <AssignmentBars values={associations} />
-          <p className="analytics-data-note">首次分配 Tick 取持久化分配事件的最早有效 Tick，不使用任务最终 startedTick；车辆历史关联数不是设备利用率。</p>
         </section> : null}
 
         {showContention ? <section className="analytics-module analytics-module-wide analytics-deadlock-module" id="section-6-4">
@@ -1011,7 +1053,6 @@ export function AnalyticsPage() {
               <MiniMetric label="疑似死锁告警次数" metric={suspectedDeadlock} />
               <MiniMetric label="已观察主动让行次数" metric={yieldEvents} />
             </div>
-            <p className="analytics-data-note">旧版疑似死锁告警来自已观察 deadlock_detected，不与新版 Episode 数相加，也不等于确认死锁。事件采集完整性为 {contentionData?.eventCollectionCompleteness ?? '未确认'}；阻塞趋势见上方 Tick 曲线。</p>
           </> : null}
           {[cumulativeBlockedTicks, blockEpisodeCount, maxContinuousBlocked].some(hasMetricValue) ? <>
             <h4 className="analytics-subhead">B. 累计阻塞统计</h4>
@@ -1029,7 +1070,6 @@ export function AnalyticsPage() {
               <MiniMetric label="持续循环等待 Episode" metric={persistentCycleCount} />
               <MiniMetric label="当前开放 Episode" metric={openCycleCount} />
             </div>
-            <p className="analytics-data-note">新版 Episode 表示仿真中达到检测条件的循环等待；PERSISTENT_WAIT_CYCLE 不代表物理设备不可恢复死锁。</p>
           </> : null}
           {[confirmedResolvedCount, unresolvedAtEndCount, endedUnverifiedCount].some(hasMetricValue)
             || hasSampledMetricValue(averageResolutionTicks)
@@ -1044,19 +1084,12 @@ export function AnalyticsPage() {
             </div>
           </> : null}
           {deadlockData ? <DeadlockHotspotTable hotspots={deadlockData.hotspots} /> : null}
-          {showDeadlockLifecycle && deadlockData ? <div className="analytics-deadlock-contract" aria-label="死锁生命周期统计合同">
-            <span>generation <b>{deadlockData.generation ?? '未提供'}</b></span>
-            <span>数据来源 <b>真实 Run</b></span>
-            <span>统计单位 <b>Tick / robot·Tick</b></span>
-            <span>对象 <b>仿真循环等待</b></span>
-            <span>完整性 <b>{deadlockData.observationCompleteness}</b></span>
-          </div> : null}
+          {showDeadlockLifecycle && deadlockData && (deadlockData.observationCompleteness !== 'COMPLETE' || hasQualityConcern(deadlockData.metrics.find(hasQualityConcern))) ? <div className="analytics-quality-alert" role="status"><TriangleAlert size={16} /><span>死锁生命周期数据不完整：{deadlockData.observationCompleteness}。诊断结果仅代表已采集事件。</span></div> : null}
         </section> : null}
 
         {showLifecycle ? <section className="analytics-module" id="section-6-5">
           <div className="analytics-module-top"><div><span className="analytics-module-no">6.5</span><h3>任务生命周期</h3></div><span className="analytics-state analytics-state-auxiliary">真实完成任务</span></div>
-          <MetricCard label="已完成父任务平均生命周期" metric={parentLifetime} source="合法父任务 completedTick - createdTick" decimals={1} suffix="Tick" />
-          <p className="analytics-data-note">该值是已完成任务的实际生命周期 Tick，不是 ETA 预测准确率，也不与模拟 ETA 实验合并。</p>
+          <MetricCard label="已完成父任务平均生命周期" metric={parentLifetime} source="按已完成父任务的 completedTick - createdTick 计算；不是 ETA 预测准确率，也不与模拟 ETA 实验合并。" decimals={1} suffix="Tick" />
         </section> : null}
 
         {showPathAndMotion ? <section className="analytics-module analytics-module-wide" id="section-6-6">
@@ -1068,35 +1101,29 @@ export function AnalyticsPage() {
               <span>本Run按 {fixedWindowEvidence.configuredObservationTicks ?? '未声明'} Tick观察窗口结束，窗口内里程不代表完成全部订单所需里程。</span>
               <small>实际结束 Tick：{fixedWindowEvidence.actualEndTick ?? '未知'} · 停止原因：{fixedWindowEvidence.stopReason ?? '未知'} · 证据质量：{fixedWindowEvidence.evidenceQuality}</small>
             </div> : null}
-            <h4 className="analytics-subhead">A. 水平行驶</h4>
+            <h4 className="analytics-subhead analytics-heading-with-info">A. 水平行驶 <MetricInfo label="水平里程">来自 CTU 与 Shuttle 的实际运动段，不包含 Lift 垂直运输。</MetricInfo></h4>
             <div className="analytics-kpi-grid analytics-distance-grid">
               <DistanceCard label={fixedWindowEvidence ? '窗口内 CTU 水平距离' : 'CTU 总水平行驶距离'} metric={ctuDistance} />
               <DistanceCard label={fixedWindowEvidence ? '窗口内 Shuttle 水平距离' : 'Shuttle 总水平行驶距离'} metric={shuttleDistance} />
               <DistanceCard label={fixedWindowEvidence ? '窗口内总水平距离' : '总水平行驶距离'} metric={totalHorizontalDistance} />
             </div>
-            <p className="analytics-data-note">水平里程来自 CTU 与 Shuttle 已提交的实际运动段，不包含 Lift 垂直运输。</p>
             {motionData && hasNumericValue(motionData.metersPerCell) ? <div className="analytics-motion-contract" aria-label="物理距离合同">
               <span>每格 <b>{formatNumber(motionData.metersPerCell, 3)} m</b></span>
-              <span>合同 <b>{motionData.physicsContractVersion}</b></span>
-              <span>generation <b>{motionData.generation}</b></span>
-              <span>来源 <b>真实 Run 运动段</b></span>
-              <span>用户定义模拟参数 <b>{motionData.physicsContractSource === 'USER_DEFINED_SIMULATION' ? '是' : '来源未声明'}</b></span>
-              <span>标定 <b>{motionData.calibrationStatus ?? '未声明'}</b></span>
+              <span className="is-warning">{motionData.physicsContractSource === 'USER_DEFINED_SIMULATION' ? '用户定义' : '参数来源未声明'} · <b>{motionData.calibrationStatus ?? '未标定'}</b></span>
             </div> : null}
-            <h4 className="analytics-subhead">B. 垂直运输</h4>
+            <h4 className="analytics-subhead analytics-heading-with-info">B. 垂直运输 <MetricInfo label="垂直运输">Lift 位移单独统计，不与 CTU 或 Shuttle 水平里程相加为“AGV 行驶里程”。</MetricInfo></h4>
             {hasValidLiftMovement ? <div className="analytics-vertical-transport">
               <DistanceCard label={fixedWindowEvidence ? '窗口内 Lift 垂直位移' : 'Lift 垂直位移'} metric={liftVerticalDistance} />
               <div><span>有效 Lift 运动段</span><b>{liftMovementMetric?.movementCount}</b><small>垂直位移与车辆自主水平里程分别统计</small></div>
               <div><span>相关数据质量</span><b>{liftMovementMetric?.dataQuality}</b><small>{motionData?.observationCompleteness}</small></div>
             </div> : <div className="analytics-no-lift"><Info size={16} /><span>当前Run未记录有效Lift垂直运输段。</span></div>}
-            <p className="analytics-data-note">Lift 位移是垂直运输证据，不与 CTU / Shuttle 水平里程简单相加为“AGV 行驶里程”。</p>
             {movementRows.length ? <>
               <h4 className="analytics-subhead">C. 运动行为</h4>
               <div className="analytics-mini-grid analytics-motion-types">
                 {movementRows.map(([movementType, metric]) => <div key={movementType}>
                   <span>{{ NORMAL: '正常行驶', YIELD: '主动让行', BACKOFF: '回退', RETURN_TO_STANDBY: '返回待命', LIFT: 'Lift 垂直位移' }[movementType] ?? movementType}</span>
                   <b>{formatNumber(metric.horizontalMeters as number, 3)} m</b>
-                  <small>{metric.movementCount} 个运动段 · {metric.dataQuality}</small>
+                  <small>{metric.movementCount} 个运动段{metric.dataQuality !== 'COMPLETE' ? ` · ${metric.dataQuality}` : ''}</small>
                 </div>)}
               </div>
             </> : null}
@@ -1105,11 +1132,11 @@ export function AnalyticsPage() {
               <div className="analytics-table-wrap analytics-motion-table"><table><thead><tr><th>排名</th><th>车辆ID</th><th>类型</th><th>水平里程</th><th>垂直位移</th><th>主动让行</th><th>回退</th><th>返回待命</th><th>数据质量</th></tr></thead><tbody>
                 {robotDistanceRows.map((row, index) => <tr key={row.robotId}><td>{index + 1}</td><td>{row.robotId}</td><td>{row.robotType.toUpperCase()}</td><td>{hasNumericValue(row.horizontalMeters) ? `${formatNumber(row.horizontalMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.verticalMeters) ? `${formatNumber(row.verticalMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.yieldMeters) ? `${formatNumber(row.yieldMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.backoffMeters) ? `${formatNumber(row.backoffMeters, 3)} m` : '—'}</td><td>{hasNumericValue(row.returnToStandbyMeters) ? `${formatNumber(row.returnToStandbyMeters, 3)} m` : '—'}</td><td>{row.dataQuality}</td></tr>)}
               </tbody></table></div>
-              {motionData && (motionData.perRobotMetricsTruncated || motionData.totalRobotCount > robotDistanceRows.length) ? <p className="analytics-data-note">显示前20辆，共{motionData.totalRobotCount}辆；排序沿用后端“水平与垂直位移合计降序、车辆ID并列决胜”合同。</p> : null}
+              {motionData && (motionData.perRobotMetricsTruncated || motionData.totalRobotCount > robotDistanceRows.length) ? <p className="analytics-data-note">当前显示前20辆，共{motionData.totalRobotCount}辆。</p> : null}
             </> : null}
           </> : null}
           {showPath ? <>
-          <h4 className="analytics-subhead">E. 规划诊断</h4>
+          <h4 className="analytics-subhead analytics-heading-with-info">E. 规划诊断 <MetricInfo label="规划诊断">计划路径以 cell 计量，仅统计成功的 Shuttle 初始规划，不等同于车辆实际行驶里程。</MetricInfo></h4>
           <div className="analytics-mini-grid">
             <MiniMetric label="成功初始规划样本数" metric={pathSuccess} />
             {Array.isArray(pathAlgorithm?.value) && pathAlgorithm.value.length ? <div><span>算法名称</span><b>{pathAlgorithm.value.map((item) => `${item.algorithm.toUpperCase()} · n=${item.sampleCount}`).join(' / ')}</b></div> : null}
@@ -1119,34 +1146,33 @@ export function AnalyticsPage() {
           </div>
           {pathSummaries.length ? <div className="analytics-path-summary">{pathSummaries.map(([label, rows]) => <div key={label}><h5>{label}</h5>{rows.map((row, index) => <p key={index}>{row.group.algorithm.toUpperCase()}：平均 {formatNumber(row.average, 2)}，最小 {formatNumber(row.minimum, 2)}，最大 {formatNumber(row.maximum, 2)}，n={row.validSampleCount}</p>)}</div>)}</div> : null}
           {quantileGroups.length ? <><h4 className="analytics-subhead"><Route size={15} /> 规划耗时分位数</h4><QuantilePanel groups={quantileGroups} /></> : null}
-          <p className="analytics-data-note">路径长度单位为 cell，表示成功 Shuttle 初始计划路径，不是车辆实际运行里程；统计仅包含持久化成功样本。</p>
           </> : null}
         </section> : null}
 
         {showConveyor ? <section className="analytics-module" id="section-6-7">
           <div className="analytics-module-top"><div><span className="analytics-module-no">6.7</span><h3>输送协同</h3></div><span className="analytics-state analytics-state-partial">真实 Run 当前值</span></div>
           <div className="analytics-mini-grid">
-            <MiniMetric label="当前输送节点占用代理" metric={nodeOccupancy} decimals={1} suffix="%" />
+            <MiniMetric label="输送节点占用率" metric={nodeOccupancy} decimals={1} suffix="%" info="按输送图节点占用比例统计，不代表设备时间利用率。" />
             <MiniMetric label="当前输送等待任务数" metric={conveyorWait} />
             <MiniMetric label="当前缓存等待任务数" metric={bufferWait} />
-            <MiniMetric label="当前站台阶段任务数（代理）" metric={stationQueue} />
+            <MiniMetric label="站台相关任务数" metric={stationQueue} info="按当前处于输送至拣货、拣货中、放货阶段的任务数统计，包含处理中任务，不等于纯等待队列。" />
           </div>
-          {zeroCurrentConveyor ? <p className="analytics-data-note">当前状态为0，不代表整个 Run 期间均为0；历史变化请查看上方 M2-2 趋势。</p> : null}
-          {hasMetricValue(nodeOccupancy) ? <p className="analytics-data-note">节点占用代理以输送图节点总数为分母，不是设备时间利用率或物理输送线利用率。</p> : null}
+          {zeroCurrentConveyor ? <p className="analytics-data-note">当前值为0；历史变化请查看上方趋势图。</p> : null}
         </section> : null}
       </div>
       </> : null}
 
       {hasRealContent ? <details className="analytics-quality-details">
-      <summary><Database size={17} /><span>数据质量与指标限制</span><small>数据来源与计算口径 · 默认折叠 · 仅说明当前已展示指标</small></summary>
+      <summary><Database size={17} /><span>指标说明</span><small>来源、口径与数据质量</small></summary>
       <div className="analytics-quality-grid">
-        {(hasMetricValue(parentCompleted) || hasMetricValue(parentLifetime)) ? <div><h3>M2-1 任务状态</h3><QualityBadge quality={parentCompleted?.dataQuality ?? parentLifetime?.dataQuality} reason={parentCompleted?.reason ?? parentLifetime?.reason} /><p>完成数按最终父任务状态重算；生命周期为 completedTick - createdTick。</p></div> : null}
-        {showHistory ? <div><h3>M2-2 历史快照</h3><QualityBadge quality={historyData?.dataQuality} reason={historyData?.reason} /><p>采集完整性：{historyData?.collectionCompleteness}；同 Tick 重复快照只读去重。</p></div> : null}
-        {(showCtu || showLegacyContention) ? <div><h3>M2-3 CTU 与争用事件</h3><QualityBadge quality={contentionData?.dataQuality} reason={contentionData?.reason} /><p>事件完整性：{contentionData?.eventCollectionCompleteness}；疑似死锁和让行仅统计已观察事件。</p></div> : null}
-        {showDeadlockLifecycle && deadlockData ? <div><h3>P2-2B 死锁生命周期</h3><QualityBadge quality={deadlockData.dataQuality} reason={deadlockData.reason} /><p>generation：{deadlockData.generation ?? '未提供'}；观察完整性：{deadlockData.observationCompleteness}；快照 Tick：{deadlockData.snapshotAsOfTick ?? '未提供'}。</p><p>数据库事件水位：ID {deadlockData.eventPersistenceWatermark.databaseEventId ?? '未提供'} / Tick {deadlockData.eventPersistenceWatermark.databaseEventTick ?? '未提供'}；快照确认水位：{deadlockData.eventPersistenceWatermark.snapshotLastAcknowledgedTransitionKey ?? '未提供'}。</p><p>唯一转换 {deadlockData.eventPersistenceWatermark.uniqueTransitionCount}；重复 {deadlockData.eventPersistenceWatermark.duplicateTransitionCount}；冲突 {deadlockData.eventPersistenceWatermark.conflictingTransitionCount}；待持久化 {deadlockData.eventPersistenceWatermark.snapshotPendingTransitionCount ?? '未知'}。BEST_EFFORT_NOT_EXACTLY_ONCE；阈值尚未现场标定；正式验收：{deadlockData.acceptanceEligible ? '是' : '否'}。</p></div> : null}
-        {showPath ? <div><h3>M2-4 路径规划</h3><QualityBadge quality={pathData?.dataQuality} reason={pathData?.reason} /><p>仅统计成功的 Shuttle 初始规划；cell 距离不是实际行驶里程。</p></div> : null}
-        {showMotion && motionData ? <div><h3>P3-3A 车辆实际里程</h3><QualityBadge quality={motionData.dataQuality} reason={motionData.reason} /><p>generation：{motionData.generation ?? '未提供'}；运动段观察完整性：{motionData.observationCompleteness}；米制参数仅为 {motionData.calibrationStatus ?? '未标定'} 的用户模拟合同。</p></div> : null}
-        {showConveyor ? <div><h3>M2-5A 输送协同</h3><QualityBadge quality={conveyorData?.dataQuality} reason={conveyorData?.reason} /><p>队列为当前计数；节点占用为最终状态代理，不是时间利用率。</p></div> : null}
+        {(hasMetricValue(parentCompleted) || hasMetricValue(parentLifetime)) ? <div><h3>任务状态与生命周期</h3><QualityBadge quality={parentCompleted?.dataQuality ?? parentLifetime?.dataQuality} reason={parentCompleted?.reason ?? parentLifetime?.reason} /><p>完成数按父任务最终状态统计；生命周期按 completedTick - createdTick 计算，仅代表已完成任务，不是 ETA 准确率。</p></div> : null}
+        {showPerformance ? <div><h3>物理速度与仿真时间</h3><QualityBadge quality={performanceData?.motionSpeedContract?.calibrationStatus} /><p>仿真耗时按 simTickSeconds × Tick 计算，当前播放倍率 {performanceData?.playbackMultiplier ?? '—'}× 不进入物理统计。用户定义速度尚未现场标定。</p></div> : null}
+        {showHistory ? <div><h3>历史运行趋势</h3><QualityBadge quality={historyData?.dataQuality} reason={historyData?.reason} /><p>横轴为仿真 Tick；同 Tick 快照只读去重，缺失值不补 0。原始 {historyData?.rawSampleCount} 条，去重后 {historyData?.uniqueTickCount} 个 Tick，输出 {historyData?.outputSampleCount} 点；完整性：{historyData?.collectionCompleteness}。</p>{hasNumericValue(blockedPeak) ? <p>全量阻塞峰值为 {blockedPeak}{hasNumericValue(blockedPeakTick) ? `，峰值 Tick 为 ${blockedPeakTick}` : ''}。</p> : null}</div> : null}
+        {(showCtu || showLegacyContention) ? <div><h3>CTU 分配与争用</h3><QualityBadge quality={contentionData?.dataQuality} reason={contentionData?.reason} /><p>首次分配等待按 firstAssignmentTick - createdTick 计算；车辆历史关联任务数不是设备利用率。疑似死锁和让行仅统计已观察事件，完整性：{contentionData?.eventCollectionCompleteness}。</p></div> : null}
+        {showDeadlockLifecycle && deadlockData ? <div><h3>死锁与拥堵诊断</h3><QualityBadge quality={deadlockData.dataQuality} reason={deadlockData.reason} /><p>Episode 表示达到检测条件的循环等待，不等同于不可恢复的物理死锁；疑似告警不与 Episode 数相加。观察完整性：{deadlockData.observationCompleteness}，generation：{deadlockData.generation ?? '未提供'}。</p><p>事件水位：ID {deadlockData.eventPersistenceWatermark.databaseEventId ?? '未提供'} / Tick {deadlockData.eventPersistenceWatermark.databaseEventTick ?? '未提供'}；快照确认水位：{deadlockData.eventPersistenceWatermark.snapshotLastAcknowledgedTransitionKey ?? '未提供'}。</p><p>唯一转换 {deadlockData.eventPersistenceWatermark.uniqueTransitionCount}；重复 {deadlockData.eventPersistenceWatermark.duplicateTransitionCount}；冲突 {deadlockData.eventPersistenceWatermark.conflictingTransitionCount}；待持久化 {deadlockData.eventPersistenceWatermark.snapshotPendingTransitionCount ?? '未知'}。BEST_EFFORT_NOT_EXACTLY_ONCE；检测阈值尚未现场标定；正式验收：{deadlockData.acceptanceEligible ? '是' : '否'}。</p></div> : null}
+        {showPath ? <div><h3>路径规划</h3><QualityBadge quality={pathData?.dataQuality} reason={pathData?.reason} /><p>仅统计成功的 Shuttle 初始规划；计划路径以 cell 计量，不是车辆实际行驶里程。</p></div> : null}
+        {showMotion && motionData ? <div><h3>车辆实际里程</h3><QualityBadge quality={motionData.dataQuality} reason={motionData.reason} /><p>水平里程来自 CTU 与 Shuttle 运动段；Lift 垂直位移单独统计。运动证据完整性：{motionData.observationCompleteness}；合同：{motionData.physicsContractVersion}；generation：{motionData.generation}；米制参数：{motionData.calibrationStatus ?? '未标定'}。</p>{fixedWindowEvidence ? <p>本 Run 按固定观察窗口结束；窗口证据与全 Run 完成语义分开，窗口内里程不代表完成全部订单所需里程。</p> : null}</div> : null}
+        {showConveyor ? <div><h3>输送协同</h3><QualityBadge quality={conveyorData?.dataQuality} reason={conveyorData?.reason} /><p>输送与缓存数据为当前计数，不能替代全 Run 历史累计值。输送节点占用率按输送图节点占用比例统计，不代表设备时间利用率。</p><p>站台相关任务数包含输送至拣货、拣货中和放货阶段的处理中任务，不等于纯等待队列。</p></div> : null}
       </div>
       </details> : null}
       </>}

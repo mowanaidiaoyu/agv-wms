@@ -338,3 +338,25 @@ def test_comparison_hides_rates_when_scenario_differs_or_baseline_is_zero() -> N
     zero = compare_algorithm_experiment_runs(zero_repo, "a", "b")
     assert zero and zero["comparable"] is True
     assert zero["distanceImprovementPercent"] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("initialInventoryHash", "INITIAL_INVENTORY_MISMATCH"),
+        ("initialVehicleSnapshotHash", "INITIAL_VEHICLE_STATE_MISMATCH"),
+        ("orderSnapshotHash", "ORDER_SNAPSHOT_MISMATCH"),
+    ],
+)
+def test_comparison_rejects_forged_same_signature_with_different_frozen_input(
+    field: str,
+    reason: str,
+) -> None:
+    left = experiment_state("astar", 10.0)
+    right = experiment_state("dijkstra", 8.0)
+    left["algorithmExperimentContract"][field] = "left"
+    right["algorithmExperimentContract"][field] = "right"
+    result = compare_algorithm_experiment_runs(FakeComparisonRepo({"a": left, "b": right}), "a", "b")
+    assert result and result["comparable"] is False
+    assert reason in result["comparisonReasons"]
+    assert result["distanceImprovementPercent"] is None

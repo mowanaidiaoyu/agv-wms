@@ -654,6 +654,16 @@ export interface AlgorithmExperimentRunSummary {
   observationTicks?: number | null
   simulatedSeconds: number | null
   tick: number
+  createdAt?: string
+  replayEligible?: boolean
+  replayIneligibilityReason?: string | null
+}
+
+export interface AlgorithmExperimentRunList {
+  contractVersion: string
+  sourceScope: 'CURRENT_BACKEND_DATABASE'
+  sourceDescription: string
+  runs: AlgorithmExperimentRunSummary[]
 }
 
 export interface AlgorithmRunMetrics {

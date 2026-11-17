@@ -919,6 +919,26 @@ class Repository:
             contract = payload.get("algorithmExperimentContract")
             if not isinstance(contract, dict):
                 continue
+            replay = payload.get("experimentReplayContract")
+            replay_eligible = bool(
+                isinstance(replay, dict)
+                and replay.get("contractVersion") == "algorithm-experiment-replay-v1"
+                and int(replay.get("workloadMutationCount") or 0) == 0
+                and contract.get("variableDimension") == "assignmentPolicy"
+                and not contract.get("orderArrivalPlanHash")
+                and decoded.get("status") in {"completed", "stopped"}
+            )
+            replay_reason = None
+            if not isinstance(replay, dict):
+                replay_reason = "FROZEN_REPLAY_EVIDENCE_MISSING"
+            elif int(replay.get("workloadMutationCount") or 0) > 0:
+                replay_reason = "WORKLOAD_MUTATED_AFTER_START"
+            elif contract.get("variableDimension") != "assignmentPolicy":
+                replay_reason = "VARIABLE_DIMENSION_NOT_ASSIGNMENT_POLICY"
+            elif contract.get("orderArrivalPlanHash"):
+                replay_reason = "REGISTERED_ARRIVAL_PLAN_INPUTS_NOT_REPLAYABLE"
+            elif decoded.get("status") not in {"completed", "stopped"}:
+                replay_reason = "BASELINE_NOT_TERMINAL"
             result.append(
                 {
                     "runId": decoded["id"],
@@ -935,6 +955,8 @@ class Repository:
                     "simulatedSeconds": payload.get("simulatedSeconds"),
                     "tick": payload.get("tick"),
                     "createdAt": decoded.get("created_at"),
+                    "replayEligible": replay_eligible,
+                    "replayIneligibilityReason": replay_reason,
                 }
             )
         return result

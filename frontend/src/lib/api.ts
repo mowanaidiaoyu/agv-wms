@@ -17,6 +17,7 @@ import type {
   MotionSpeedContractInput,
   AlgorithmExperimentContractInput,
   AlgorithmExperimentRunSummary,
+  AlgorithmExperimentRunList,
   AlgorithmComparisonResult,
   ThroughputComparisonResult,
   ThroughputRunMetrics,
@@ -265,7 +266,19 @@ export const api = {
     return request<RunPerformanceMetrics>(`/simulations/${encodeURIComponent(runId)}/metrics/run-performance`)
   },
   getAlgorithmExperimentRuns() {
-    return request<{ contractVersion: string; runs: AlgorithmExperimentRunSummary[] }>('/algorithm-experiments')
+    return request<AlgorithmExperimentRunList>('/algorithm-experiments')
+  },
+  createAlgorithmExperimentCandidate(
+    baselineRunId: string,
+    assignmentPolicy: AlgorithmExperimentRunSummary['assignmentPolicy'],
+  ) {
+    return request<{ runId: string; status: string }>(
+      `/algorithm-experiments/${encodeURIComponent(baselineRunId)}/candidates`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ assignmentPolicy }),
+      },
+    )
   },
   compareAlgorithmExperimentRuns(baselineRunId: string, candidateRunId: string) {
     const query = new URLSearchParams({ baselineRunId, candidateRunId })

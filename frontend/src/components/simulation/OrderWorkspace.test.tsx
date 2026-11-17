@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { GoodsCatalogSku, SimulationOrder, SimulationTask } from '../../types'
-import { OrderComposer, OrderOrchestrationPanel } from './OrderWorkspace'
+import { OrderComposer, OrderOrchestrationPanel, OrderRail } from './OrderWorkspace'
 
 const catalog: GoodsCatalogSku[] = [
   { skuId: 'SKU-001', name: '演示商品一', spec: 'BOX-A' },
@@ -81,6 +81,40 @@ describe('OrderComposer', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('503 Service Unavailable')
     fireEvent.click(screen.getByRole('button', { name: '重试商品目录' }))
     expect(onRetryCatalog).toHaveBeenCalledOnce()
+  })
+})
+
+describe('OrderRail', () => {
+  it('reports completed and cancelled orders separately', () => {
+    const baseOrder: Omit<SimulationOrder, 'id' | 'status' | 'statusLabel' | 'completedTasks'> = {
+      priority: 'normal',
+      targetStation: '出库口 01',
+      createdAt: '2026-11-17T00:00:00Z',
+      lines: [{ id: 'line-1', skuId: 'SKU-001', skuName: '演示商品一', quantity: 1 }],
+      taskIds: [],
+      totalTasks: 1,
+      progress: 100,
+    }
+    const orders: SimulationOrder[] = [
+      { ...baseOrder, id: 'ORD-COMPLETED', status: 'completed', statusLabel: '已完成', completedTasks: 1 },
+      { ...baseOrder, id: 'ORD-CANCELLED', status: 'cancelled', statusLabel: '已取消', completedTasks: 0 },
+    ]
+
+    render(
+      <OrderRail
+        orders={orders}
+        selectedOrderId="ORD-COMPLETED"
+        collapsed={false}
+        onSelect={vi.fn()}
+        onToggle={vi.fn()}
+        onCreate={vi.fn()}
+      />,
+    )
+
+    const counts = document.querySelector('.simulation-order-counts') as HTMLElement
+    expect(counts).toBeInTheDocument()
+    expect(screen.getByText('已完成', { selector: '.simulation-order-counts span' })).toHaveTextContent('1已完成')
+    expect(screen.getByText('已取消', { selector: '.simulation-order-counts span' })).toHaveTextContent('1已取消')
   })
 })
 

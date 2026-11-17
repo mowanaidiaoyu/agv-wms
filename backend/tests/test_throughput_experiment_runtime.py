@@ -131,7 +131,11 @@ async def _run_fixed_window(
         arrivals.setdefault(int(arrival_tick), []).append(order)
     while runtime.state["tick"] < OBSERVATION_TICKS:
         for order in arrivals.get(int(runtime.state["tick"]), []):
-            await service.add_order(runtime.run_id, order)
+            await service.add_order(
+                runtime.run_id,
+                order,
+                registered_experiment_arrival=True,
+            )
         service._step_runtime(runtime, persist=False)
     runtime.state["status"] = "stopped"
     runtime.state["stopReason"] = "observation_window_complete"

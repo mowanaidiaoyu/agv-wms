@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ..core.config import API_PREFIX
 from ..schemas import (
+    AlgorithmExperimentCandidateRequest,
     ShuttleDockSettingsRequest,
     ShuttlePlanRequest,
     ShuttleTransferFailRequest,
@@ -446,8 +447,34 @@ def get_simulation_throughput_metrics(run_id: str, generation: int | None = None
 def list_algorithm_experiments():
     return {
         "contractVersion": "algorithm-experiment-list-v1",
+        "sourceScope": "CURRENT_BACKEND_DATABASE",
+        "sourceDescription": "实验 Run 来自当前后端数据库；不同 SQLite 不会自动合并。",
         "runs": repo.list_algorithm_experiment_runs(),
     }
+
+
+@router.post("/algorithm-experiments/{baseline_run_id}/candidates", response_model=SimulationControlResponse)
+async def create_algorithm_experiment_candidate(
+    baseline_run_id: str,
+    payload: AlgorithmExperimentCandidateRequest,
+):
+    baseline = repo.get_run_read_only(baseline_run_id)
+    if baseline is None:
+        raise HTTPException(status_code=404, detail="Baseline experiment Run not found")
+    topology_id = baseline.get("topology_id")
+    topology = repo.get_topology(topology_id) if topology_id else None
+    if topology is None:
+        raise HTTPException(status_code=409, detail="Baseline topology is no longer available")
+    try:
+        return await simulation_service.create_assignment_candidate(
+            baseline_run_id,
+            payload.assignmentPolicy,
+            topology["payload"],
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Baseline experiment Run not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.get("/algorithm-experiments/compare")
