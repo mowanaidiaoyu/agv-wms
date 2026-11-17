@@ -82,10 +82,15 @@ async def _run_fixed_window(
     assignment_policy: str,
     variable_dimension: str,
     seed: int = 42,
+    throughput_aware_weights: dict | None = None,
+    initial_orders: list[dict] | None = None,
+    scheduled_orders: list[tuple[int, dict]] | None = None,
+    order_arrival_plan_hash: str | None = None,
 ) -> str:
+    orders = _orders(topology) if initial_orders is None else initial_orders
     started = await service.start(
         topology,
-        _orders(topology),
+        orders,
         [],
         motion_physics_contract=PHYSICS,
         motion_speed_contract=SPEED,
@@ -101,6 +106,16 @@ async def _run_fixed_window(
             "assignmentPolicy": assignment_policy,
             "variableDimension": variable_dimension,
             "algorithmVersion": "p6-throughput-runtime-v1",
+            **(
+                {"throughputAwareWeights": throughput_aware_weights}
+                if throughput_aware_weights is not None
+                else {}
+            ),
+            **(
+                {"orderArrivalPlanHash": order_arrival_plan_hash}
+                if order_arrival_plan_hash is not None
+                else {}
+            ),
         },
     )
     runtime = service.runtimes[started["runId"]]
@@ -111,7 +126,12 @@ async def _run_fixed_window(
         await runtime.task_handle
     runtime.resetting = False
 
+    arrivals: dict[int, list[dict]] = {}
+    for arrival_tick, order in scheduled_orders or []:
+        arrivals.setdefault(int(arrival_tick), []).append(order)
     while runtime.state["tick"] < OBSERVATION_TICKS:
+        for order in arrivals.get(int(runtime.state["tick"]), []):
+            await service.add_order(runtime.run_id, order)
         service._step_runtime(runtime, persist=False)
     runtime.state["status"] = "stopped"
     runtime.state["stopReason"] = "observation_window_complete"
@@ -127,10 +147,11 @@ async def _run_fixed_window(
     return started["runId"]
 
 
-async def _run_all(service: SimulationService, topology: dict) -> tuple[str, str, str, str]:
+async def _run_all(service: SimulationService, topology: dict) -> tuple[str, str, str, str, str]:
     return (
         await _run_fixed_window(service, topology, path_policy="astar", assignment_policy="greedy", variable_dimension="assignmentPolicy"),
         await _run_fixed_window(service, topology, path_policy="astar", assignment_policy="hungarian", variable_dimension="assignmentPolicy"),
+        await _run_fixed_window(service, topology, path_policy="astar", assignment_policy="throughput_aware", variable_dimension="assignmentPolicy"),
         await _run_fixed_window(service, topology, path_policy="dijkstra", assignment_policy="greedy", variable_dimension="pathPolicy"),
         await _run_fixed_window(service, topology, path_policy="astar", assignment_policy="greedy", variable_dimension="pathPolicy"),
     )
@@ -148,7 +169,7 @@ def test_real_multi_ctu_fixed_window_throughput_pairs_are_fair_and_complete(
     service = SimulationService(repo)
     topology = json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
 
-    greedy_id, hungarian_id, dijkstra_id, astar_id = asyncio.run(_run_all(service, topology))
+    greedy_id, hungarian_id, throughput_aware_id, dijkstra_id, astar_id = asyncio.run(_run_all(service, topology))
     assignment = compare_throughput_metrics(
         repo.get_throughput_metrics(greedy_id),
         repo.get_throughput_metrics(hungarian_id),
@@ -157,8 +178,12 @@ def test_real_multi_ctu_fixed_window_throughput_pairs_are_fair_and_complete(
         repo.get_throughput_metrics(dijkstra_id),
         repo.get_throughput_metrics(astar_id),
     )
+    throughput_aware = compare_throughput_metrics(
+        repo.get_throughput_metrics(greedy_id),
+        repo.get_throughput_metrics(throughput_aware_id),
+    )
 
-    for comparison in (assignment, path):
+    for comparison in (assignment, throughput_aware, path):
         assert comparison["comparable"] is True
         assert comparison["comparisonReasons"] == []
         assert comparison["baseline"]["acceptanceEligible"] is True
@@ -168,7 +193,7 @@ def test_real_multi_ctu_fixed_window_throughput_pairs_are_fair_and_complete(
         assert comparison["baseline"]["deliveredPieces"] > 0
         assert comparison["candidate"]["deliveredPieces"] > 0
 
-    for run_id in (greedy_id, hungarian_id, dijkstra_id, astar_id):
+    for run_id in (greedy_id, hungarian_id, throughput_aware_id, dijkstra_id, astar_id):
         saved = repo.get_run_read_only(run_id)
         assert saved is not None
         state = saved["payload"]
@@ -191,3 +216,8 @@ def test_real_multi_ctu_fixed_window_throughput_pairs_are_fair_and_complete(
         assert all(":cargo-" in delivery_id for delivery_id in delivery_ids)
         assert int(state["throughputCargoSequence"]) >= delivered
         assert all(int(item.get("qty") or 0) >= 0 for item in state["inventory"])
+
+    throughput_state = repo.get_run_read_only(throughput_aware_id)["payload"]
+    assert throughput_state["algorithmExperimentContract"]["assignmentAlgorithmVersion"] == "throughput-aware-v1"
+    assert throughput_state["algorithmExperimentContract"]["throughputAwareWeights"]["contractVersion"] == "throughput-aware-v1"
+    assert throughput_state["throughputAwareAssignmentEvidence"]

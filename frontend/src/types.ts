@@ -603,11 +603,23 @@ export interface AlgorithmExperimentContractInput {
   safetyLimitTicks: number
   observationTicks?: number
   pathPolicy: 'astar' | 'dijkstra'
-  assignmentPolicy: 'greedy' | 'hungarian'
+  assignmentPolicy: 'greedy' | 'hungarian' | 'throughput_aware'
   variableDimension: 'pathPolicy' | 'assignmentPolicy'
   algorithmVersion: string
   scenarioSignature?: string
   dataSource?: 'REAL_SIMULATION_EXPERIMENT'
+  assignmentAlgorithmVersion?: 'throughput-aware-v1'
+  throughputAwareWeights?: {
+    contractVersion: 'throughput-aware-v1'
+    travelTimeWeight: number
+    congestionWeight: number
+    ageWeight: number
+    returnWeight: number
+    handlingTicks: number
+    maxCongestionPenaltyTicks: number
+    maxAgeBonusTicks: number
+  } | null
+  orderArrivalPlanHash?: string | null
 }
 
 export interface RunPerformanceMetrics {
@@ -637,7 +649,7 @@ export interface AlgorithmExperimentRunSummary {
   scenarioSignature: string
   variableDimension: 'pathPolicy' | 'assignmentPolicy'
   pathPolicy: 'astar' | 'dijkstra'
-  assignmentPolicy: 'greedy' | 'hungarian'
+  assignmentPolicy: 'greedy' | 'hungarian' | 'throughput_aware'
   algorithmVersion: string
   observationTicks?: number | null
   simulatedSeconds: number | null

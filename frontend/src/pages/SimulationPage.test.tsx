@@ -1030,6 +1030,26 @@ describe('SimulationPage', () => {
     expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).not.toHaveProperty('observationTicks')
   })
 
+  it('offers throughput-aware assignment as an explicit next-Run policy', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-throughput-aware', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-throughput-aware'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByLabelText('将下次 Run 标记为可复现实验'))
+    fireEvent.click(within(screen.getByRole('group', { name: '分配算法' })).getByRole('button', { name: /吞吐量感知调度/ }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).toMatchObject({
+      assignmentPolicy: 'throughput_aware',
+      pathPolicy: 'astar',
+      algorithmVersion: 'throughput-aware-v1',
+    })
+  })
+
   it('freezes an explicit throughput observation window without changing ordinary P5 experiments', async () => {
     vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-throughput-window', status: 'running' })
     vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-throughput-window'))

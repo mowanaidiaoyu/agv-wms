@@ -16,6 +16,8 @@ from fastapi import WebSocket
 
 from ..analytics.throughput_metrics import CONTRACT_VERSION as THROUGHPUT_CONTRACT_VERSION
 from ..analytics.throughput_metrics import DELIVERY_EVENT_TYPE, DELIVERY_EVENT_VERSION
+from .throughput_aware_assignment import ALGORITHM_VERSION as THROUGHPUT_AWARE_VERSION
+from .throughput_aware_assignment import frozen_weights as freeze_throughput_aware_weights
 from ..core.repository import Repository
 from .assignment import assign_tasks
 from .conveyor import (
@@ -252,6 +254,12 @@ class SimulationService:
             config["seed"] = int(experiment["seed"])
             config["pathPolicy"] = str(experiment["pathPolicy"])
             config["dispatchPolicy"] = str(experiment["assignmentPolicy"])
+            if config["dispatchPolicy"] == "throughput_aware":
+                config["throughputAwareWeights"] = freeze_throughput_aware_weights(
+                    experiment.get("throughputAwareWeights")
+                )
+                experiment["throughputAwareWeights"] = deepcopy(config["throughputAwareWeights"])
+                experiment["assignmentAlgorithmVersion"] = THROUGHPUT_AWARE_VERSION
             config["safetyLimitTicks"] = int(experiment["safetyLimitTicks"])
             for transfer in prepared_transfers:
                 transfer["algorithm"] = config["pathPolicy"]
@@ -260,6 +268,12 @@ class SimulationService:
             } if experiment["variableDimension"] == "pathPolicy" else {
                 "pathPolicy": config["pathPolicy"]
             }
+            if (
+                experiment["variableDimension"] == "pathPolicy"
+                and config["dispatchPolicy"] == "throughput_aware"
+            ):
+                fixed_algorithm["assignmentAlgorithmVersion"] = THROUGHPUT_AWARE_VERSION
+                fixed_algorithm["throughputAwareWeights"] = config["throughputAwareWeights"]
             scenario_payload = {
                 "experimentContractVersion": experiment["experimentContractVersion"],
                 "scenarioId": experiment["scenarioId"],
@@ -276,6 +290,7 @@ class SimulationService:
                 "motionSpeedContract": config["motionSpeedContract"],
                 "safetyLimitTicks": experiment["safetyLimitTicks"],
                 "observationTicks": experiment.get("observationTicks"),
+                "orderArrivalPlanHash": experiment.get("orderArrivalPlanHash"),
                 "variableDimension": experiment["variableDimension"],
                 **fixed_algorithm,
             }
@@ -1136,6 +1151,7 @@ class SimulationService:
             "planningEvidence": [],
             "planningEvidenceContractVersion": "planning-evidence-v1",
             "planningSequence": 0,
+            "throughputAwareAssignmentEvidence": [],
             "performanceCounters": {
                 "movementRobotTicks": 0,
                 "physicalTravelWaitRobotTicks": 0,
@@ -3567,6 +3583,8 @@ class SimulationService:
             runtime.topology,
             runtime.config.get("pathPolicy", "astar"),
             failed_cells,
+            runtime_state=runtime.state,
+            runtime_config=runtime.config,
         )
         for robot_id, task_id in matches:
             robot = next(item for item in runtime.state["robots"] if item["id"] == robot_id)

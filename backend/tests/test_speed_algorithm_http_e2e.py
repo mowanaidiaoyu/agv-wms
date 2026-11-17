@@ -58,7 +58,13 @@ def _transfer() -> dict:
     }
 
 
-def _start(client: TestClient, policy: str) -> str:
+def _start(
+    client: TestClient,
+    policy: str,
+    *,
+    assignment_policy: str = "greedy",
+    variable_dimension: str = "pathPolicy",
+) -> str:
     response = client.post(
         "/api/v1/simulations/start",
         json={
@@ -75,9 +81,13 @@ def _start(client: TestClient, policy: str) -> str:
                 "topologyRevision": "2.0.0:16e70cca04bee0ef",
                 "safetyLimitTicks": 400,
                 "pathPolicy": policy,
-                "assignmentPolicy": "greedy",
-                "variableDimension": "pathPolicy",
-                "algorithmVersion": f"{policy}-http-v1",
+                "assignmentPolicy": assignment_policy,
+                "variableDimension": variable_dimension,
+                "algorithmVersion": (
+                    "throughput-aware-v1"
+                    if assignment_policy == "throughput_aware"
+                    else f"{policy}-http-v1"
+                ),
             },
         },
     )
@@ -121,6 +131,13 @@ def _run_isolated_speed_and_algorithm_http_chain(app: object) -> None:
         astar_state = _wait_for_terminal(client, astar_id)
         dijkstra_id = _start(client, "dijkstra")
         dijkstra_state = _wait_for_terminal(client, dijkstra_id)
+        throughput_aware_id = _start(
+            client,
+            "astar",
+            assignment_policy="throughput_aware",
+            variable_dimension="assignmentPolicy",
+        )
+        throughput_aware_state = _wait_for_terminal(client, throughput_aware_id)
 
         for run_id, state, policy in (
             (astar_id, astar_state, "astar"),
@@ -138,11 +155,17 @@ def _run_isolated_speed_and_algorithm_http_chain(app: object) -> None:
             assert result["taskCompletionRatePercent"] == 100.0
             assert result["movementRobotSeconds"] > 0
 
+        assert throughput_aware_state["status"] == "completed"
+        assert throughput_aware_state["algorithmExperimentContract"]["assignmentPolicy"] == "throughput_aware"
+        assert throughput_aware_state["algorithmExperimentContract"]["assignmentAlgorithmVersion"] == "throughput-aware-v1"
+        assert throughput_aware_state["algorithmExperimentContract"]["throughputAwareWeights"]["contractVersion"] == "throughput-aware-v1"
+
         experiments = client.get("/api/v1/algorithm-experiments")
         assert experiments.status_code == 200
         assert {item["runId"] for item in experiments.json()["runs"]} == {
             astar_id,
             dijkstra_id,
+            throughput_aware_id,
         }
         comparison = client.get(
             "/api/v1/algorithm-experiments/compare",

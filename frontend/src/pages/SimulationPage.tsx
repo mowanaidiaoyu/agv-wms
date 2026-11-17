@@ -142,7 +142,7 @@ export function SimulationPage() {
   const [algorithmExperimentEnabled, setAlgorithmExperimentEnabled] = useState(false)
   const [experimentScenarioId, setExperimentScenarioId] = useState('p5-comparison-01')
   const [experimentPathPolicy, setExperimentPathPolicy] = useState<'astar' | 'dijkstra'>('astar')
-  const [experimentAssignmentPolicy, setExperimentAssignmentPolicy] = useState<'greedy' | 'hungarian'>('greedy')
+  const [experimentAssignmentPolicy, setExperimentAssignmentPolicy] = useState<'greedy' | 'hungarian' | 'throughput_aware'>('greedy')
   const [experimentVariableDimension, setExperimentVariableDimension] = useState<'pathPolicy' | 'assignmentPolicy'>('pathPolicy')
   const [throughputObservationEnabled, setThroughputObservationEnabled] = useState(false)
   const [throughputObservationTicks, setThroughputObservationTicks] = useState('600')
@@ -425,7 +425,9 @@ export function SimulationPage() {
             pathPolicy: experimentPathPolicy,
             assignmentPolicy: experimentAssignmentPolicy,
             variableDimension: experimentVariableDimension,
-            algorithmVersion: 'agv-routing-assignment-v1',
+            algorithmVersion: experimentAssignmentPolicy === 'throughput_aware'
+              ? 'throughput-aware-v1'
+              : 'agv-routing-assignment-v1',
           }
         : undefined
       if (algorithmExperimentContract && (!motionPhysicsContract || !motionSpeedContract || !algorithmExperimentContract.topologyRevision)) {
@@ -768,7 +770,7 @@ export function SimulationPage() {
               {([['astar', 'A*', '启发式搜索，通常访问更少状态'], ['dijkstra', 'Dijkstra', '无启发式的最短路径基线']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.pathPolicy : experimentPathPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentPathPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
             </div></fieldset>
             <fieldset className="simulation-algorithm-fieldset" disabled={!displayedExperimentEnabled || runConfigReadOnly}><legend>分配算法</legend><div className="simulation-algorithm-cards">
-              {([['greedy', 'Greedy', '逐任务选择当前最优车辆'], ['hungarian', 'Hungarian', '批量求解全局匹配成本']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.assignmentPolicy : experimentAssignmentPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentAssignmentPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
+              {([['greedy', 'Greedy', '逐任务选择当前最优车辆'], ['hungarian', 'Hungarian', '批量求解全局匹配成本'], ['throughput_aware', '吞吐量感知调度', '综合预计交付耗时、当前道路拥堵和任务等待年龄进行任务分配。']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.assignmentPolicy : experimentAssignmentPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentAssignmentPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
             </div></fieldset>
             <label className="simulation-config-text-field"><span>本组唯一变量</span><select value={runConfigReadOnly ? frozenAlgorithmContract?.variableDimension ?? experimentVariableDimension : experimentVariableDimension} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
             <label className="simulation-config-toggle"><input aria-label="启用固定吞吐观察窗口" type="checkbox" checked={runConfigReadOnly ? frozenAlgorithmContract?.observationTicks !== undefined && frozenAlgorithmContract?.observationTicks !== null : throughputObservationEnabled} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setThroughputObservationEnabled(event.target.checked)} />启用固定吞吐观察窗口</label>

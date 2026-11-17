@@ -234,6 +234,40 @@ class MotionSpeedContractRequest(BaseModel):
         return result
 
 
+class ThroughputAwareWeightsRequest(BaseModel):
+    """Frozen, bounded scoring weights for throughput-aware-v1."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    contractVersion: Literal["throughput-aware-v1"] = "throughput-aware-v1"
+    travelTimeWeight: float = Field(default=1.0, ge=0.0, le=10.0)
+    congestionWeight: float = Field(default=0.65, ge=0.0, le=10.0)
+    ageWeight: float = Field(default=0.20, ge=0.0, le=10.0)
+    returnWeight: float = Field(default=0.25, ge=0.0, le=10.0)
+    handlingTicks: float = Field(default=2.0, ge=0.0, le=1_000.0)
+    maxCongestionPenaltyTicks: float = Field(default=30.0, ge=0.0, le=1_000.0)
+    maxAgeBonusTicks: float = Field(default=60.0, ge=0.0, le=1_000.0)
+
+    @field_validator(
+        "travelTimeWeight",
+        "congestionWeight",
+        "ageWeight",
+        "returnWeight",
+        "handlingTicks",
+        "maxCongestionPenaltyTicks",
+        "maxAgeBonusTicks",
+        mode="before",
+    )
+    @classmethod
+    def validate_finite_weight(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite number")
+        result = float(value)
+        if not isfinite(result):
+            raise ValueError("must be a finite number")
+        return result
+
+
 class AlgorithmExperimentContractRequest(BaseModel):
     """Versioned, reproducible Run experiment selection."""
 
@@ -247,9 +281,11 @@ class AlgorithmExperimentContractRequest(BaseModel):
     safetyLimitTicks: int = Field(ge=1, le=100_000)
     observationTicks: int | None = Field(default=None, ge=1, le=100_000)
     pathPolicy: Literal["astar", "dijkstra"] = "astar"
-    assignmentPolicy: Literal["greedy", "hungarian"] = "greedy"
+    assignmentPolicy: Literal["greedy", "hungarian", "throughput_aware"] = "greedy"
     variableDimension: Literal["pathPolicy", "assignmentPolicy"]
     algorithmVersion: str = Field(min_length=1)
+    throughputAwareWeights: ThroughputAwareWeightsRequest | None = None
+    orderArrivalPlanHash: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def validate_observation_window(self):
