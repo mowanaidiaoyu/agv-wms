@@ -1,8 +1,6 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Trash2, Layers, Box, MapPin, Type, RefreshCw } from 'lucide-react'
 import { TopologyGlyph } from '../TopologyGlyph'
-import { api } from '../../lib/api'
 import {
   CELL_LABELS,
   CONVEYOR_DECK_LABELS,
@@ -321,7 +319,7 @@ export function TopologyPropertyPanel() {
             ) : null}
           </div>
         ) : null}
-        {node.type === 'shuttle_dock' ? <ShuttleDockFields node={node} onChange={updateNode} /> : null}
+        {node.type === 'shuttle_dock' ? <ShuttleDockFields node={node} /> : null}
         <label className="topo-property-field">
           <span>所属区域</span>
           <select value={node.zoneId ?? ''} onChange={(event) => updateNode(node.id, { zoneId: event.target.value || null })}>
@@ -550,50 +548,12 @@ function ConveyorBatchEditor({
 }
 
 /** 四向车出货位设置：取什么货物（商品目录）+ 取多少（箱）。 */
-function ShuttleDockFields({
-  node,
-  onChange,
-}: {
-  node: TopologyNode
-  onChange: (id: string, patch: Partial<TopologyNode>) => void
-}) {
-  const catalogQuery = useQuery({ queryKey: ['goods', 'catalog'], queryFn: () => api.getGoodsCatalog() })
-  const skus = catalogQuery.data?.skus ?? []
-
+function ShuttleDockFields({ node }: { node: TopologyNode }) {
   return (
-    <>
-      <label className="topo-property-field">
-        <span>取什么货物</span>
-        <select
-          value={node.skuId ?? ''}
-          onChange={(event) => {
-            const sku = skus.find((item) => item.skuId === event.target.value)
-            onChange(node.id, {
-              skuId: sku?.skuId ?? null,
-              skuName: sku?.name ?? null,
-              largeCategory: sku?.largeCategory ?? null,
-            })
-          }}
-        >
-          <option value="">（未设置）</option>
-          {skus.map((sku) => (
-            <option key={sku.skuId} value={sku.skuId}>
-              {sku.name}（{sku.skuId}）
-            </option>
-          ))}
-        </select>
-      </label>
-      <NumericField
-        label="取多少（箱）"
-        value={node.quantity ?? 1}
-        min={1}
-        onChange={(quantity) => onChange(node.id, { quantity: Math.max(1, Math.floor(quantity)) })}
-      />
-      <div className="topo-property-note">
-        <strong>四向车出货位</strong>
-        <p>放在地面输送线上。启动仿真后按此处设置生成搬运任务：四向车从车库取货 → 经巷道出库 → 在此交付，货箱沿带面运走。每箱一趟任务。</p>
-      </div>
-    </>
+    <div className="topo-property-note">
+      <strong>四向车出货位 · {node.row},{node.col}</strong>
+      <p>仅作为位置标记：放在地面输送线上，四向车在此交付整箱货物，货箱沿带面运走。取什么货物、取多少由订单调度决定。</p>
+    </div>
   )
 }
 

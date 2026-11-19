@@ -60,7 +60,7 @@ def build_simulation_config(topology: dict[str, Any]) -> dict[str, Any]:
         "pickTicks": 6,
         # 拣出的货物放到放置区（drop_zone）所需 tick 数；无 drop_zone 时跳过该阶段。
         "placeTicks": 3,
-        # 90 tick 仅作为原统计周期；任务未完成时继续运行，2000 tick 是异常保护上限。
+        # 90 tick 仅作为原统计周期；任务未完成时继续运行，10000 tick 是异常保护上限。
         "durationTicks": 90,
-        "maxDurationTicks": 2000,
+        "maxDurationTicks": 10000,
     }

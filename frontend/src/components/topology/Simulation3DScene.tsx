@@ -87,6 +87,10 @@ export type Simulation3DSceneProps = {
   /** 仿真是否进行中（running/paused）：运行时机械臂常驻显示，空闲时保持待机姿态 */
   simulationActive?: boolean
   speedMultiplier?: 1 | 2 | 4
+  /** 空托盘在 (76,35) 地面输送线上的堆积层数：四向车库货位取空后回收的托盘 */
+  emptyPalletStack?: SimulationState['emptyPalletStack']
+  /** 5 个出货口放置区默认承载的空托盘（state.palletDocks，键 = 出货口行号） */
+  palletDocks?: SimulationState['palletDocks']
 }
 
 const CTU_GOODS_COLOR = '#fde047'
@@ -94,6 +98,10 @@ const CTU_GOODS_EMISSIVE = '#ca8a04'
 // 回库箱（picking_return）：与出货货物同色系区分，避免"凭空出现的箱子"被误认为幽灵箱
 const RETURN_BOX_COLOR = '#60a5fa'
 const CONVEYOR_CARGO_SIZE: [number, number, number] = [0.5, 0.3, 0.42]
+/** 空托盘厚度：放置区承载位与 (76,35) 回收堆共用同一视觉规格。 */
+const PALLET_THICKNESS = 0.14
+/** 地面楼板顶面高度（SlabView 楼板 0.18 + 放置区贴地标记面 0.215），托盘必须落在其上才可见。 */
+const FLOOR_TOP_SURFACE_Y = 0.22
 const EMPTY_HIGHLIGHTS: ReadonlySet<string> = new Set()
 const ignoreInteraction = () => undefined
 
@@ -929,6 +937,35 @@ function cellWorldPosition(
   ]
 }
 
+/** 空托盘回收堆：机械臂取走货物后变空的托盘由四向车送到 (76,35)，在地面输送线上按层堆叠。 */
+function EmptyPalletStackView({
+  cellId,
+  count,
+  cols,
+  rows,
+}: {
+  cellId: string
+  count: number
+  cols: number
+  rows: number
+}) {
+  const cell = parseCellId(cellId)
+  if (!cell || count <= 0) return null
+  // (76,35) 是 2×2 地面输送块的锚点格：块中心 = 格中心 + 半格偏移。
+  const x = worldX(cell.col, cols) + CELL / 2
+  const z = worldZ(cell.row, rows) - CELL / 2
+  const palletH = PALLET_THICKNESS
+  return (
+    <group position={[x, CONVEYOR_GROUND_BELT_Y, z]}>
+      {Array.from({ length: count }, (_, index) => (
+        <mesh key={index} position={[0, palletH / 2 + index * (palletH + 0.01), 0]}>
+          <boxGeometry args={[1.1, palletH, 1.1]} />
+          <meshStandardMaterial color="#b45309" roughness={0.72} metalness={0.16} />
+        </mesh>
+      ))}
+    </group>
+  )
+}
 function Simulation3DScene({
   topology,
   goods,
@@ -963,6 +1000,8 @@ function Simulation3DScene({
   armDropBoxes = [],
   simulationActive = false,
   speedMultiplier = 1,
+  emptyPalletStack = null,
+  palletDocks = null,
 }: Simulation3DSceneProps) {
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
@@ -1049,6 +1088,11 @@ function Simulation3DScene({
   const armHandoffNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_handoff'), [topology])
   // 机械臂底座节点（picking_arm）覆盖布局计划的安装位：编辑器里把底座放哪里，机械臂就装在哪里；
   // 拣货位节点（picking_handoff）覆盖取货点：四向车实际停在该节点所在格（后端 handoffCellId 同源）。
+  // 放置区（drop_zone）纵向中列：侧臂把出货口的货箱放到这一列的对应行上。
+  const dropZoneCol = useMemo(() => {
+    const dropZone = topology.zones.find((zone) => zone.type === 'drop_zone')
+    return dropZone ? dropZone.x + Math.floor(dropZone.width / 2) : 67
+  }, [topology.zones])
   // 新增的臂没有 picking_handoff，负责把侧向出货口（col 62 上层帽口）的货箱搬进放置区：
   // 取货点 = 最近出货口，放货点 = 放置区内同一行的落位。
   const armLayouts = useMemo(() => {
@@ -1057,8 +1101,7 @@ function Simulation3DScene({
     const portCells = topology.cells.filter(
       (cell) => cell.type === 'conveyor' && Number(cell.col) === 62 && (cell.floor ?? '1F') === '1F',
     )
-    const dropZone = topology.zones.find((zone) => zone.type === 'drop_zone')
-    const dropCol = dropZone ? dropZone.x + Math.floor(dropZone.width / 2) : 67
+    const dropCol = dropZoneCol
     const upperBeltHeight = CONVEYOR_DECK_BASE + CONVEYOR_DECK_STEP
     return armNodes.map((node) => {
       const installation = { ...template.installation, floor: '1F', row: Number(node.row), col: Number(node.col) }
@@ -1109,7 +1152,7 @@ function Simulation3DScene({
         },
       }
     })
-  }, [armHandoffNode, armNodes, layoutPlan, topology.cells, topology.zones])
+  }, [armHandoffNode, armNodes, dropZoneCol, layoutPlan, topology.cells])
   // 取货点世界坐标：与四向车停靠位置同一套 2×2 吸附算法，保证机械臂抓的是车上的货。
   const armPickupWorld = useMemo(() => {
     if (!armHandoffNode) return undefined
@@ -1252,13 +1295,35 @@ function Simulation3DScene({
       const color = GOODS_CATEGORY_COLORS[box.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
       return {
         key: `arm-drop-${box.taskId ?? index}-${slotIndex}`,
-        position: [x + offsetX, 0.16 + Math.floor(slotIndex / slots.length) * 0.3, z + offsetZ] as [number, number, number],
+        // 放置区每个落位默认有空托盘，货箱要抬到托盘面上，不能陷进托盘里。
+        position: [
+          x + offsetX,
+          FLOOR_TOP_SURFACE_Y + PALLET_THICKNESS + CONVEYOR_CARGO_SIZE[1] / 2
+            + Math.floor(slotIndex / slots.length) * 0.3,
+          z + offsetZ,
+        ] as [number, number, number],
         size: CONVEYOR_CARGO_SIZE,
         color,
         emissive: color,
       }
     }).filter((box): box is NonNullable<typeof box> => box !== null)
   }, [armDropBoxes, spec.cols, spec.rows])
+  // 放置区托盘格位：5 个出货口各一处，基础托盘永远存在（基础设施）。
+  // dock.count = 托盘总数（只增不减），dock.availableEmpty = 当前空托盘数（侧臂放货 -1、输送线 +1）。
+  const palletDockVisuals = useMemo(() => {
+    const docks = palletDocks ?? {}
+    return Object.entries(docks)
+      .map(([rowKey, dock]) => ({
+        row: Number(rowKey),
+        count: Math.max(1, Math.floor(Number(dock?.count ?? 1))),  // 基础格位永远有至少 1 个
+        availableEmpty: Math.max(0, Math.floor(Number(dock?.availableEmpty ?? 1))),
+      }))
+      .filter((dock) => Number.isFinite(dock.row) && dock.count > 0)
+      .map((dock) => {
+        const [x, , z] = shuttleTrackWorldPosition(dock.row, dropZoneCol, 1, spec.cols, spec.rows)
+        return { key: `pallet-dock-${dock.row}`, x, z, count: dock.count, availableEmpty: dock.availableEmpty }
+      })
+  }, [dropZoneCol, palletDocks, spec.cols, spec.rows])
   // 正在输送货箱的 2×2 输送块（键 → 最近活跃时间戳），驱动局部滚筒旋转。
   const activeBlocksRef = useRef(new Map<string, number>())
 
@@ -1446,18 +1511,9 @@ function Simulation3DScene({
       return { points, beltCells, status: trace.status, message: trace.message }
     }
 
-    // 拓扑存在人工拣货位时：货箱在下层输送/升降/上层输送/拣货/放置/回程/出入口等待阶段都要可见；
-    // CTU 在出入口取走（return_to_storage）后才消失。
+    // 拓扑存在人工拣货位时：货箱在下层输送/升降/上层输送阶段由后端
+    // conveyorTransport 逐块驱动渲染；到达拣货点后由放置区/拣货位常驻渲染。
     const hasPickStation = topology.zones.some((zone) => zone.type === 'pick_station')
-    const pickFlowPhases = new Set([
-      'conveyor_to_lift',
-      'lift_to_upper',
-      'conveyor_to_pick',
-      'picking',
-      'place_goods',
-      'conveyor_return',
-      'pickup_from_port',
-    ])
     // 放置区货物：place_goods 及之后阶段（含 completed）常驻渲染。
     const dropGoodsPhases = new Set([
       'place_goods',
@@ -1477,9 +1533,20 @@ function Simulation3DScene({
         || task.deliveredGoods?.length
       if (!hasRenderableGoods) continue
 
+      // 空托盘回收 / 余货回库是库内维护任务，按 lines 兜底会渲染成一个
+      // 沿地面输送线滑动后消失的灰白色幽灵箱；托盘本身由
+      // EmptyPalletStackView（(76,35) 堆叠）和 ShuttleCartModel（车载）负责。
+      if (task.taskKind === 'empty_pallet_return' || task.taskKind === 'pallet_return_to_lane') continue
+
       // 占块门控待上线的子箱：路线首块被前箱占用时不渲染，
       // 前箱前进腾出位置后后箱才出现——避免多个箱重叠在同一块上。
       if (task.pendingTransport) continue
+
+      // CTU 父任务在逐箱交付完成后把全部货箱拆给 picking_box 子任务（pickingDelegated），
+      // 货箱位置完全由子任务的 conveyorTransport 驱动；父任务不再渲染任何货箱，
+      // 否则在无 pick_station 的拓扑中（hasPickStation=false）父任务会因
+      // deliveredGoods 非空而走 outboundPath 兜底，产生与子任务重叠的黄色幽灵箱。
+      if (task.pickingDelegated) continue
 
       // 拣出货物渲染到放置区：优先用 task.dropZoneCellId，解析失败回退到最近 drop_zone 的底边中点。
       // pickingDelegated 的父任务已把货箱交给单箱子任务，不再重复渲染整单放置区货物。
@@ -1535,19 +1602,19 @@ function Simulation3DScene({
         // 机械臂输送任务完成后由 armBeltBoxes 在真实终点保留货箱快照，
         // 不再重复播放四向车的旧交付动画。
         if (task.armConveyorCompleted) continue
-        if (hasPickStation && robot?.type !== 'shuttle') {
-          if (!pickFlowPhases.has(task.phase)) continue
-        } else {
-          // 没有拣货位、或四向车任务（整箱走地面输送线，交付后即完成）：
-          // 任务完成即播放；机器人已停在出入口的交付阶段也提前生成，
-          // 避免第一辆车交付瞬间因阶段推进而错过动画。
-          // 注意：本拓扑 CTU 任务一律由后端拣货链路驱动（transport 逐块同步），
-          // 在途与完成阶段都不需要入口重播动画——重播箱会与车上货箱、
-          // 分裂子任务重叠形成"幽灵箱"（凭空出现/两箱重叠的元凶）。
-          if (robot?.type === 'ctu') continue
-          const atPort = robot?.currentCellId === task.deliveryCellId
-          if (task.phase !== 'completed' && !(task.phase === 'delivery_to_port' && atPort)) continue
+        // CTU 拣货链路（含无 pick_station 的纯 drop_zone 拓扑）的货箱位置
+        // 完全由子任务 conveyorTransport 逐块同步；父 CTU 任务本身没有
+        // conveyorTransport，缺失时绝不走 outboundPath 兜底重播去程——否则
+        // 会与子任务的 transportPoint 渲染重叠，产生黄色滑动幽灵箱。
+        // 只有四向车（shuttle）整箱任务才允许走出入口→输送线的兜底动画。
+        if (robot?.type !== 'shuttle' && task.robotType !== 'shuttle') {
+          continue
         }
+        // 四向车任务（整箱走地面输送线，交付后即完成）：
+        // 任务完成即播放；机器人已停在出入口的交付阶段也提前生成，
+        // 避免第一辆车交付瞬间因阶段推进而错过动画。
+        const atPort = robot?.currentCellId === task.deliveryCellId
+        if (task.phase !== 'completed' && !(task.phase === 'delivery_to_port' && atPort)) continue
       }
       // 按车上实际载货箱数生成，而不是按订单行数。
       const slots = task.transitGoods?.length
@@ -2009,6 +2076,45 @@ function Simulation3DScene({
         setHoverEntity={ignoreInteraction}
       />
 
+      {emptyPalletStack && activeFloor === '1F' && (
+        <EmptyPalletStackView
+          cellId={emptyPalletStack.cellId}
+          count={Math.min(emptyPalletStack.count, emptyPalletStack.capacity)}
+          cols={spec.cols}
+          rows={spec.rows}
+        />
+      )}
+
+      {/* 放置区托盘格位：基础托盘永远存在。空托盘棕色（#b45309），已承载托盘深灰（#3f3f46）。 */}
+      {activeFloor === '1F' &&
+        palletDockVisuals.map((dock) => {
+          const occupied = dock.count - dock.availableEmpty  // 已承载的托盘数
+          return (
+            <group key={dock.key} position={[dock.x, FLOOR_TOP_SURFACE_Y, dock.z]}>
+              {Array.from({ length: dock.count }, (_, index) => {
+                const isEmpty = index < dock.availableEmpty  // 上面是空的
+                const color = isEmpty ? '#b45309' : '#3f3f46'
+                return (
+                  <mesh
+                    key={index}
+                    position={[0, PALLET_THICKNESS / 2 + index * (PALLET_THICKNESS + 0.01), 0]}
+                    castShadow
+                  >
+                    <boxGeometry args={[1.1, PALLET_THICKNESS, 1.1]} />
+                    <meshStandardMaterial color={color} roughness={0.72} metalness={0.16} />
+                  </mesh>
+                )
+              })}
+              {occupied > 0 && (
+                <mesh position={[0, dock.count * (PALLET_THICKNESS + 0.01) + 0.06, 0]}>
+                  <boxGeometry args={[1.22, 0.12, 1.22]} />
+                  <meshStandardMaterial color="#71717a" roughness={0.85} metalness={0.05} />
+                </mesh>
+              )}
+            </group>
+          )
+        })}
+
       {layers.towers.map((tower) => (
         <TowerView key={tower.key} tower={tower} highlighted={false} hovered={false} selectProps={{}} />
       ))}
@@ -2181,7 +2287,17 @@ function Simulation3DScene({
         )
       })}
 
-      {robots.map((robot) => {
+      {robots
+        // 多层视图下，只渲染 activeFloor 层的 shuttle（避免同 xy 不同层俯视时重叠）。
+        // activeFloor 对 CTU 只接受 '1F'（CTU 库恒为 1 层）。
+        .filter((robot) => {
+          if (robot.type === 'shuttle') {
+            const layer = Number(activeFloor.replace(/[^0-9]/g, '')) || 1
+            return (robot.currentLayer ?? 1) === layer
+          }
+          return (robot.currentFloor ?? '1F') === activeFloor
+        })
+        .map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
           ? shuttleVehiclePosition(robot)
           : robotWorldPosition(

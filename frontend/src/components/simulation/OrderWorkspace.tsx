@@ -23,6 +23,7 @@ import type {
   SimulationOrderPriority,
   SimulationTask,
 } from '../../types'
+import { restoreUtf8CjkLabel } from '../../lib/displayText'
 
 type OrderView = Omit<SimulationOrderInput, 'lines'>
   & Partial<Omit<SimulationOrder, 'lines'>>
@@ -84,7 +85,8 @@ export function OrderRail({
   const counts = useMemo(() => ({
     waiting: orders.filter((order) => !order.status || ['ready', 'waiting_dispatch'].includes(order.status)).length,
     executing: orders.filter((order) => order.status === 'executing').length,
-    completed: orders.filter((order) => ['completed', 'cancelled'].includes(order.status ?? '')).length,
+    completed: orders.filter((order) => order.status === 'completed').length,
+    cancelled: orders.filter((order) => order.status === 'cancelled').length,
   }), [orders])
   const draftCount = orders.filter((order) => (order.status ?? 'ready') === 'ready').length
   const runtimeCount = orders.length - draftCount
@@ -111,6 +113,7 @@ export function OrderRail({
             <span><b>{counts.waiting}</b>待处理</span>
             <span><b>{counts.executing}</b>执行中</span>
             <span><b>{counts.completed}</b>已完成</span>
+            <span><b>{counts.cancelled}</b>已取消</span>
           </div>
           <div className="simulation-order-list">
             {orders.length ? orders.map((order) => {
@@ -195,6 +198,8 @@ function nextOrderId() {
 
 export function OrderComposer({
   open,
+  runActive = false,
+  onOpenRunConfig,
   catalog,
   catalogError = '',
   onRetryCatalog,
@@ -202,6 +207,8 @@ export function OrderComposer({
   onSubmit,
 }: {
   open: boolean
+  runActive?: boolean
+  onOpenRunConfig?: () => void
   catalog: GoodsCatalogSku[]
   catalogError?: string
   onRetryCatalog?: () => void
@@ -365,11 +372,18 @@ export function OrderComposer({
       <div className="simulation-order-composer-header">
         <div>
           <strong>新建仿真订单</strong>
-          <span>订单提交后将直接进入当前仿真队列</span>
+          <span>{runActive ? '订单提交后将立即插入当前 Run' : '订单将暂存，待下一次 Run 启动时提交'}</span>
         </div>
         <button type="button" onClick={onClose} aria-label="关闭新建订单"><X size={18} /></button>
       </div>
       <div className="simulation-order-composer-body">
+        {onOpenRunConfig ? <details className="simulation-order-run-settings">
+          <summary>本次仿真运行设置</summary>
+          <div>
+            <span>{runActive ? '当前 Run 的米制、速度与算法合同已经冻结；添加订单不会修改这些配置。' : '米制、速度、路径算法和实验合同属于 Run 级配置，不会写入订单对象。'}</span>
+            <button type="button" onClick={onOpenRunConfig}>{runActive ? '查看冻结配置' : '打开运行配置'}</button>
+          </div>
+        </details> : null}
         <section>
           <h3>快速模板</h3>
           <div className="simulation-order-templates">
@@ -453,7 +467,7 @@ export function OrderComposer({
         预计拆单：四向车 {draftSplit.shuttle} 个整箱任务 · CTU {draftSplit.ctu} 个尾箱任务；没有四向车任务的订单不会启动四向车。
       </p>
       <div className="simulation-order-composer-footer">
-        <span>{lines.length} 种SKU · {draftPieces} 件 · {dispatchModeLabels[dispatchMode]}</span>
+        <span>{lines.length} 种SKU · {draftPieces} 件 · {dispatchModeLabels[dispatchMode]} · {runActive ? '立即插入当前Run' : '待下次Run启动'}</span>
         <button className="accent-button" type="button" onClick={() => void submit()} disabled={!lines.length || submitting}>
           {submitting ? '提交中…' : '提交订单'}
         </button>
@@ -513,12 +527,31 @@ export function OrderOrchestrationPanel({
       {tasks.length ? (
         <div className="simulation-order-task-map">
           {tasks.map((task, index) => (
-            <button type="button" key={task.id} disabled={!task.assignedRobotId} onClick={() => task.assignedRobotId && onFocusRobot?.(task.assignedRobotId)}>
-              <span><b>T{String(task.taskIndex ?? index + 1).padStart(2, '0')}</b><small>{task.lines.length} 箱</small></span>
+            <button
+              className="simulation-order-task-card"
+              type="button"
+              key={task.id}
+              title={task.id}
+              disabled={!task.assignedRobotId}
+              onClick={() => task.assignedRobotId && onFocusRobot?.(task.assignedRobotId)}
+            >
+              <span className="simulation-order-task-sequence">
+                <b>T{String(task.taskIndex ?? index + 1).padStart(2, '0')}</b>
+                <small title={task.id}>{task.id} · {task.lines.length} 箱</small>
+              </span>
               <em>→</em>
-              <span>
-                <b>{task.assignedRobotId ?? '等待分配'} · {task.assignedPortLabel ?? '出库口待选'}</b>
-                <small>{task.sourceGroupLabel ?? task.phaseLabel}{task.portQueuePosition ? ` · 出口队列 ${task.portQueuePosition}` : ''}</small>
+              <span className="simulation-order-task-assignment">
+                <b
+                  className="simulation-order-task-destination"
+                  title={`${task.assignedRobotId ?? '等待分配'} · ${restoreUtf8CjkLabel(task.assignedPortLabel ?? '出库口待选')}`}
+                >
+                  <span className="simulation-order-task-robot">{task.assignedRobotId ?? '等待分配'}</span>
+                  <span className="simulation-order-task-separator" aria-hidden="true">·</span>
+                  <span className="simulation-order-task-port">{restoreUtf8CjkLabel(task.assignedPortLabel ?? '出库口待选')}</span>
+                </b>
+                <small title={task.sourceGroupLabel ?? task.phaseLabel}>
+                  {task.sourceGroupLabel ?? task.phaseLabel}{task.portQueuePosition ? ` · 出口队列 ${task.portQueuePosition}` : ''}
+                </small>
               </span>
             </button>
           ))}

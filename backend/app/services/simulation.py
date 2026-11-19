@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import random
+import time
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -11,6 +14,10 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from ..analytics.throughput_metrics import CONTRACT_VERSION as THROUGHPUT_CONTRACT_VERSION
+from ..analytics.throughput_metrics import DELIVERY_EVENT_TYPE, DELIVERY_EVENT_VERSION
+from .throughput_aware_assignment import ALGORITHM_VERSION as THROUGHPUT_AWARE_VERSION
+from .throughput_aware_assignment import frozen_weights as freeze_throughput_aware_weights
 from ..core.repository import Repository
 from .assignment import assign_tasks
 from .conveyor import (
@@ -21,7 +28,30 @@ from .conveyor import (
     route_from_block_branch,
     route_from_cell,
 )
+from .deadlock_episodes import ResourceType
+from .deadlock_runtime_adapter import (
+    DIAGNOSTICS_NAMESPACE,
+    DeadlockRuntimeObserver,
+    LifecycleEvent,
+    RuntimeBlockEvidence,
+)
 from .goods import SKU_FIELDS, build_inventory, ctu_storage_nodes, load_catalog
+from .motion_distance import MovementType
+from .motion_runtime_adapter import (
+    DIAGNOSTICS_NAMESPACE as MOTION_DIAGNOSTICS_NAMESPACE,
+    EVENT_TYPE as MOTION_EVENT_TYPE,
+    MAX_BATCH_SIZE as MOTION_MAX_BATCH_SIZE,
+    MotionRuntimeObserver,
+    RuntimePosition,
+    physics_contract_from_config,
+)
+from .motion_speed import (
+    EPSILON_METERS,
+    edge_distance_meters,
+    freeze_motion_speed_contract,
+    sim_tick_seconds,
+    speed_for_edge,
+)
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -40,6 +70,8 @@ from .pathfinding import (
     shuttle_servable_slots,
 )
 from .simulation_config import build_simulation_config
+from .shuttle_topology import topology_revision
+from .text_encoding import restore_utf8_cjk_label
 from .transport_layout import _load_raw_plan
 from .unified_transfer import (
     apply_drop,
@@ -72,6 +104,22 @@ TICK_INTERVAL_SECONDS = 0.6
 DEFAULT_SPEED_MULTIPLIER = 2
 SUPPORTED_SPEED_MULTIPLIERS = {1, 2, 4}
 TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed", "exception"}
+# 空托盘回收：四向车库一个货位 = 一个托盘；货位最后一箱被取走后，托盘变空，
+# 由四向车取走并送到 1F 地面输送线 (76,35)，在那里堆积计数（最多 6 层）。
+EMPTY_PALLET_RETURN_CELL_ID = "cell-r76-c35"
+EMPTY_PALLET_STACK_CAPACITY = 6
+EMPTY_PALLET_TASK_KIND = "empty_pallet_return"
+# (76,35) 空托盘到 6 层后，四向车把托盘搬到 (74,47) 新机械臂入主线点。
+EMPTY_PALLET_COLLECT_CELL_ID = "cell-r74-c47"
+EMPTY_PALLET_COLLECT_TASK_KIND = "empty_pallet_reposition"
+# 机械臂-02（78,47）把托盘放到 row 84 col 58 上层输送主干入口。
+EMPTY_PALLET_DROPOFF_CELL_ID = "cell-r84-c58"
+# 5 个出货口（上层输送帽口）行号：每个出货口的放置区默认承载 1 个空托盘。
+PALLET_DOCK_PORT_ROWS = (102, 106, 110, 114, 118)
+DEFAULT_PALLET_DOCK_COUNT = 1
+# 托盘上的余货：四向车取箱时整托盘一起抬离货位，机械臂只取走订单要的箱，
+# 剩余箱随托盘回到原货位（托盘不能留在库里，也不能跟着回待命位）。
+PALLET_RETURN_TASK_KIND = "pallet_return_to_lane"
 # CTU 出库口排队成本：每个在途任务在出货口约占用 24 tick（与拣选三阶段节拍同量级）。
 PORT_QUEUE_SERVICE_TICKS = 24
 # 机械臂交接：四向车在交接处等待后，机械臂抓取（pick）与放箱（place）的阶段时长。
@@ -85,13 +133,20 @@ ARM_DROPZONE_PLACE_TICKS = 8
 # 相邻 2×2 模块中心相距 2 个世界单位，因此每段需要约 1.11 秒。
 ARM_CONVEYOR_VISUAL_SPEED = 1.8
 ARM_CONVEYOR_BLOCK_DISTANCE = 2.0
-TELEMETRY_EVENT_TYPES = {"metrics_snapshot", "resource_occupied", "robot_position", "conveyor_position", "arm_handoff"}
+TELEMETRY_EVENT_TYPES = {
+    "metrics_snapshot",
+    "resource_occupied",
+    "robot_position",
+    "conveyor_position",
+    "arm_handoff",
+    MOTION_EVENT_TYPE,
+}
 # 设备连续等待多少 tick 仍无法前进时，尝试绕开其它设备重新寻路（避免头对头死锁）。
 # 排序逐车推进时，后车最多需要等待数个 tick 才能观察到前车离格。
 # 过早绕行会让两车同时改道并形成 A-B-A-B 活锁，因此先稳定等待 4 tick。
 REROUTE_AFTER_BLOCK_TICKS = 4
 YIELD_AFTER_BLOCK_TICKS = 4
-MIN_SAFETY_TICKS = 2000
+MIN_SAFETY_TICKS = 10000
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 2.0
 
 
@@ -118,6 +173,13 @@ class RunRuntime:
     arm_handoff: dict[str, Any] | None = None
     # 侧向出货口理货机械臂：把送到出货口的货箱搬运到放置区（drop_zone）
     secondary_arms: list[dict[str, Any]] = field(default_factory=list)
+    # P2-2A 只读死锁观测器；不参与路径、调度或车辆状态决策。
+    deadlock_observer: DeadlockRuntimeObserver | None = None
+    # P3-2 read-only mileage observer; it never participates in movement decisions.
+    motion_observer: MotionRuntimeObserver | None = None
+    motion_collection_enabled: bool = True
+    resetting: bool = False
+    wall_clock_started_monotonic: float = field(default_factory=time.monotonic)
 
 
 class WebSocketHub:
@@ -168,16 +230,211 @@ class SimulationService:
         topology: dict[str, Any],
         orders: list[dict[str, Any]] | None = None,
         transfers: list[dict[str, Any]] | None = None,
+        motion_physics_contract: dict[str, Any] | None = None,
+        motion_speed_contract: dict[str, Any] | None = None,
+        algorithm_experiment_contract: dict[str, Any] | None = None,
+        *,
+        expected_replay_evidence: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         config = build_simulation_config(topology)
+        if motion_physics_contract is not None:
+            source = motion_physics_contract.get("source", "USER_DEFINED_SIMULATION")
+            calibration_status = motion_physics_contract.get("calibrationStatus", "UNVERIFIED")
+            if source != "USER_DEFINED_SIMULATION":
+                raise ValueError("motionPhysicsContract.source must be USER_DEFINED_SIMULATION")
+            if calibration_status != "UNVERIFIED":
+                raise ValueError("motionPhysicsContract.calibrationStatus must be UNVERIFIED")
+            candidate_config = {**config, "motionPhysicsContract": deepcopy(motion_physics_contract)}
+            contract = physics_contract_from_config(candidate_config)
+            if contract is None:
+                raise ValueError("motionPhysicsContract is required when metric distance is enabled")
+            config["motionPhysicsContract"] = {
+                **contract.to_dict(),
+                "source": source,
+                "calibrationStatus": calibration_status,
+            }
+        config["motionSpeedContract"] = freeze_motion_speed_contract(
+            motion_speed_contract,
+            config.get("motionPhysicsContract"),
+        )
+        prepared_transfers = deepcopy(transfers or [])
+        if algorithm_experiment_contract is not None:
+            expected_revision = topology_revision(topology)
+            if algorithm_experiment_contract.get("topologyRevision") != expected_revision:
+                raise ValueError(
+                    "algorithmExperimentContract.topologyRevision does not match the selected topology"
+                )
+            if config.get("motionPhysicsContract") is None or config.get("motionSpeedContract") is None:
+                raise ValueError(
+                    "algorithmExperimentContract requires both motionPhysicsContract and motionSpeedContract"
+                )
+            experiment = deepcopy(algorithm_experiment_contract)
+            config["seed"] = int(experiment["seed"])
+            config["pathPolicy"] = str(experiment["pathPolicy"])
+            config["dispatchPolicy"] = str(experiment["assignmentPolicy"])
+            if config["dispatchPolicy"] == "throughput_aware":
+                config["throughputAwareWeights"] = freeze_throughput_aware_weights(
+                    experiment.get("throughputAwareWeights")
+                )
+                experiment["throughputAwareWeights"] = deepcopy(config["throughputAwareWeights"])
+                experiment["assignmentAlgorithmVersion"] = THROUGHPUT_AWARE_VERSION
+            config["safetyLimitTicks"] = int(experiment["safetyLimitTicks"])
+            for transfer in prepared_transfers:
+                transfer["algorithm"] = config["pathPolicy"]
+            fixed_algorithm = {
+                "assignmentPolicy": config["dispatchPolicy"]
+            } if experiment["variableDimension"] == "pathPolicy" else {
+                "pathPolicy": config["pathPolicy"]
+            }
+            if (
+                experiment["variableDimension"] == "pathPolicy"
+                and config["dispatchPolicy"] == "throughput_aware"
+            ):
+                fixed_algorithm["assignmentAlgorithmVersion"] = THROUGHPUT_AWARE_VERSION
+                fixed_algorithm["throughputAwareWeights"] = config["throughputAwareWeights"]
+            scenario_payload = {
+                "experimentContractVersion": experiment["experimentContractVersion"],
+                "scenarioId": experiment["scenarioId"],
+                "scenarioVersion": experiment["scenarioVersion"],
+                "seed": experiment["seed"],
+                "topologyId": topology["id"],
+                "topologyRevision": expected_revision,
+                "orders": orders or [],
+                "transfers": [
+                    {key: value for key, value in transfer.items() if key != "algorithm"}
+                    for transfer in prepared_transfers
+                ],
+                "motionPhysicsContract": config["motionPhysicsContract"],
+                "motionSpeedContract": config["motionSpeedContract"],
+                "safetyLimitTicks": experiment["safetyLimitTicks"],
+                "observationTicks": experiment.get("observationTicks"),
+                "orderArrivalPlanHash": experiment.get("orderArrivalPlanHash"),
+                "variableDimension": experiment["variableDimension"],
+                **fixed_algorithm,
+            }
+            encoded = json.dumps(
+                scenario_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            experiment["scenarioSignature"] = hashlib.sha256(encoded).hexdigest()
+            experiment["topologyId"] = topology["id"]
+            experiment["dataSource"] = "REAL_SIMULATION_EXPERIMENT"
+            config["algorithmExperimentContract"] = experiment
+            config["experimentReplayContract"] = {
+                "contractVersion": "algorithm-experiment-replay-v1",
+                "topologyId": topology["id"],
+                "topologyRevision": expected_revision,
+                "orders": deepcopy(orders or []),
+                "transfers": deepcopy(transfers or []),
+                "motionPhysicsContract": deepcopy(motion_physics_contract),
+                "motionSpeedContract": deepcopy(motion_speed_contract),
+                "algorithmExperimentContract": deepcopy(algorithm_experiment_contract),
+                "workloadMutationCount": 0,
+                "workloadMutationReasons": [],
+            }
         if not config["robots"]:
             raise ValueError("当前拓扑没有 CTU 或四向车设备，无法启动仿真")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
-        runtime = self._create_runtime(run_id, topology, config, orders, transfers)
+        runtime = self._create_runtime(run_id, topology, config, orders, prepared_transfers)
+        if expected_replay_evidence is not None:
+            actual_contract = runtime.state.get("algorithmExperimentContract") or {}
+            mismatches = [
+                key for key, expected in expected_replay_evidence.items()
+                if actual_contract.get(key) != expected
+            ]
+            if mismatches:
+                raise ValueError(
+                    "Candidate initial scene could not be restored: " + ", ".join(sorted(mismatches))
+                )
         self.runtimes[run_id] = runtime
         self.repo.create_run(run_id, "running", topology["id"], runtime.state, runtime.metrics)
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
         return {"runId": run_id, "status": "running"}
+
+    async def create_assignment_candidate(
+        self,
+        baseline_run_id: str,
+        assignment_policy: str,
+        topology: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay one authoritative frozen scene while changing assignmentPolicy only."""
+
+        if assignment_policy not in {"greedy", "hungarian", "throughput_aware"}:
+            raise ValueError("Unsupported assignmentPolicy")
+        baseline = self.repo.get_run_read_only(baseline_run_id)
+        if baseline is None:
+            raise KeyError(baseline_run_id)
+        state = baseline.get("payload") or {}
+        if baseline.get("status") not in {"completed", "stopped"}:
+            raise ValueError("Baseline experiment must be terminal before it can be copied")
+        experiment = state.get("algorithmExperimentContract")
+        replay = state.get("experimentReplayContract")
+        if not isinstance(experiment, dict) or not isinstance(replay, dict):
+            raise ValueError("Baseline Run lacks authoritative frozen replay evidence")
+        if replay.get("contractVersion") != "algorithm-experiment-replay-v1":
+            raise ValueError("Baseline Run replay contract is unsupported")
+        if int(replay.get("workloadMutationCount") or 0) > 0:
+            raise ValueError("Baseline Run contains unregistered order insertion or cancellation")
+        if experiment.get("variableDimension") != "assignmentPolicy":
+            raise ValueError("Baseline experiment does not isolate assignmentPolicy")
+        if experiment.get("orderArrivalPlanHash"):
+            raise ValueError("Baseline registered arrival plan cannot yet be replayed from authoritative inputs")
+        if experiment.get("assignmentPolicy") == assignment_policy:
+            raise ValueError("Candidate assignmentPolicy must differ from baseline")
+        if replay.get("topologyId") != topology.get("id"):
+            raise ValueError("Baseline topology identity no longer matches")
+        if replay.get("topologyRevision") != topology_revision(topology):
+            raise ValueError("Baseline topology revision can no longer be restored")
+
+        source_contract = deepcopy(replay.get("algorithmExperimentContract"))
+        if not isinstance(source_contract, dict):
+            raise ValueError("Baseline Run lacks the original experiment request")
+        source_contract["assignmentPolicy"] = assignment_policy
+        source_contract["algorithmVersion"] = (
+            THROUGHPUT_AWARE_VERSION
+            if assignment_policy == "throughput_aware"
+            else "agv-routing-assignment-v1"
+        )
+        if assignment_policy != "throughput_aware":
+            source_contract.pop("throughputAwareWeights", None)
+        expected = {
+            key: str(experiment.get(key) or "")
+            for key in (
+                "scenarioSignature",
+                "initialInventoryHash",
+                "initialVehicleSnapshotHash",
+                "orderSnapshotHash",
+            )
+        }
+        if any(not value for value in expected.values()):
+            raise ValueError("Baseline Run initial scene evidence is incomplete")
+        return await self.start(
+            topology,
+            orders=deepcopy(replay.get("orders") or []),
+            transfers=deepcopy(replay.get("transfers") or []),
+            motion_physics_contract=deepcopy(replay.get("motionPhysicsContract")),
+            motion_speed_contract=deepcopy(replay.get("motionSpeedContract")),
+            algorithm_experiment_contract=source_contract,
+            expected_replay_evidence=expected,
+        )
+
+    @staticmethod
+    def _mark_experiment_workload_mutation(runtime: RunRuntime, reason: str) -> None:
+        replay = runtime.state.get("experimentReplayContract")
+        experiment = runtime.state.get("algorithmExperimentContract")
+        if not isinstance(replay, dict) or not isinstance(experiment, dict):
+            return
+        replay["workloadMutationCount"] = int(replay.get("workloadMutationCount") or 0) + 1
+        replay.setdefault("workloadMutationReasons", []).append(reason)
+        experiment["workloadMutationCount"] = replay["workloadMutationCount"]
+        experiment["workloadIntegrity"] = "MUTATED_AFTER_START"
+        if isinstance(runtime.config.get("algorithmExperimentContract"), dict):
+            runtime.config["algorithmExperimentContract"].update({
+                "workloadMutationCount": replay["workloadMutationCount"],
+                "workloadIntegrity": "MUTATED_AFTER_START",
+            })
 
     def pause(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
@@ -202,6 +459,8 @@ class SimulationService:
         runtime.stopped = True
         runtime.state["status"] = "stopped"
         runtime.state["stopReason"] = "user"
+        self._finalize_deadlock_observation(runtime, "user")
+        self._finalize_motion_observation(runtime, "user")
         self._persist(runtime)
         return {"runId": run_id, "status": "stopped"}
 
@@ -213,13 +472,21 @@ class SimulationService:
             raise ValueError("Stopped or completed Run speed cannot be changed; reset it first")
         runtime.speed_multiplier = multiplier
         runtime.state["speedMultiplier"] = multiplier
+        runtime.state["playbackMultiplier"] = multiplier
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["playbackTickIntervalSeconds"] = self._tick_delay(runtime)
         runtime.state["updatedAt"] = now_dt().isoformat()
         self._record_event(runtime, runtime.state["tick"], "simulation_speed_changed", {"multiplier": multiplier})
         self._persist(runtime)
         return {"runId": run_id, "status": runtime.state["status"], "speedMultiplier": multiplier}
 
-    async def add_order(self, run_id: str, order: dict[str, Any]) -> dict[str, Any]:
+    async def add_order(
+        self,
+        run_id: str,
+        order: dict[str, Any],
+        *,
+        registered_experiment_arrival: bool = False,
+    ) -> dict[str, Any]:
         """向当前 Run 插入一张订单，并立即完成库存预留和任务拆解。
 
         仿真时钟和 HTTP 请求共用同一 asyncio 事件循环；本方法在第一个
@@ -287,6 +554,8 @@ class SimulationService:
         runtime.state.setdefault("orders", []).append(order_state)
         runtime.state.setdefault("tasks", []).extend(tasks)
         runtime.state["orderDriven"] = True
+        if not registered_experiment_arrival:
+            self._mark_experiment_workload_mutation(runtime, f"ORDER_INSERTED:{order_id}")
         runtime.state["updatedAt"] = now_dt().isoformat()
         self._record_event(runtime, tick, "order_inserted", {"orderId": order_id})
         decomposition = order_state.get("decomposition") or {}
@@ -421,6 +690,7 @@ class SimulationService:
             order["cancelledTick"] = tick
         decomposition = order.setdefault("decomposition", {})
         decomposition["stage"] = "returning" if returning else "cancelled"
+        self._mark_experiment_workload_mutation(runtime, f"ORDER_CANCELLED:{order_id}")
         self._record_event(
             runtime,
             tick,
@@ -471,6 +741,7 @@ class SimulationService:
 
     async def reset(self, run_id: str) -> dict[str, Any]:
         runtime = self._require_runtime(run_id)
+        runtime.resetting = True
         runtime.stopped = True
         if runtime.task_handle and not runtime.task_handle.done():
             runtime.task_handle.cancel()
@@ -478,6 +749,11 @@ class SimulationService:
                 await runtime.task_handle
             except asyncio.CancelledError:
                 pass
+        self._finalize_deadlock_observation(runtime, "reset")
+        previous_observer = self._ensure_deadlock_observer(runtime)
+        self._finalize_motion_observation(runtime, "reset")
+        previous_motion_observer = runtime.motion_observer
+        previous_throughput_generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
         runtime.state = deepcopy(runtime.initial_state)
         runtime.metrics = deepcopy(runtime.initial_metrics)
         runtime.state["status"] = "paused"
@@ -491,7 +767,21 @@ class SimulationService:
         runtime.inventory_delta = []
         runtime.speed_multiplier = DEFAULT_SPEED_MULTIPLIER
         runtime.state["speedMultiplier"] = DEFAULT_SPEED_MULTIPLIER
+        runtime.state["playbackMultiplier"] = DEFAULT_SPEED_MULTIPLIER
         runtime.state["tickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["playbackTickIntervalSeconds"] = self._tick_delay(runtime)
+        runtime.state["throughputGeneration"] = previous_throughput_generation + 1
+        runtime.state["throughputDeliveryIds"] = []
+        runtime.state["throughputDeliverySignatures"] = {}
+        runtime.state["throughputCargoSequence"] = 0
+        runtime.wall_clock_started_monotonic = time.monotonic()
+        runtime.deadlock_observer = previous_observer.new_generation(runtime.topology)
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        if previous_motion_observer is not None:
+            runtime.motion_observer = previous_motion_observer.new_generation()
+            runtime.motion_observer.register_robots(runtime.state.get("robots", []))
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = runtime.motion_observer.diagnostics_payload()
+        runtime.resetting = False
         runtime.task_handle = asyncio.create_task(self._loop(runtime))
         self._record_event(runtime, 0, "simulation_reset", {"runId": run_id})
         self._persist(runtime)
@@ -585,7 +875,16 @@ class SimulationService:
         saved = self.repo.get_run(run_id)
         if not saved:
             raise KeyError(run_id)
-        return saved["payload"]
+        state = saved["payload"]
+        # 兼容旧运行（空托盘承载位上线前创建）：补默认的 5 个放置区空托盘，
+        # 否则前端放置区看不到任何托盘。
+        if "palletDocks" not in state:
+            state["palletDocks"] = {
+                str(row): {"count": DEFAULT_PALLET_DOCK_COUNT, "availableEmpty": DEFAULT_PALLET_DOCK_COUNT}
+                for row in PALLET_DOCK_PORT_ROWS
+            }
+        state.setdefault("palletConveyorItems", [])
+        return state
 
     def get_metrics(self, run_id: str) -> dict[str, Any]:
         runtime = self.runtimes.get(run_id)
@@ -601,6 +900,276 @@ class SimulationService:
         if not runtime:
             raise KeyError(run_id)
         return runtime
+
+    def _ensure_deadlock_observer(self, runtime: RunRuntime) -> DeadlockRuntimeObserver:
+        if runtime.deadlock_observer is not None:
+            return runtime.deadlock_observer
+        saved = runtime.state.get(DIAGNOSTICS_NAMESPACE) or {}
+        generation = max(1, int(saved.get("generation") or 1))
+        runtime.deadlock_observer = DeadlockRuntimeObserver(
+            runtime.run_id,
+            generation,
+            runtime.topology,
+            initial_tick=int(runtime.state.get("tick") or 0),
+        )
+        if saved.get("activeEpisodes") and not saved.get("ended"):
+            runtime.deadlock_observer.mark_incomplete_recovery(
+                saved,
+                int(runtime.state.get("tick") or 0),
+            )
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        return runtime.deadlock_observer
+
+    def _begin_deadlock_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.begin_tick(tick, runtime.state)
+
+    def _observe_robot_block(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        attempted_next_cell_id: str | None,
+        blocker_robot_id: str | None,
+        resource_type: ResourceType,
+        reason: str,
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.observe_block(
+            RuntimeBlockEvidence(
+                tick=int(runtime.state.get("tick") or 0),
+                robot_id=str(robot.get("id") or ""),
+                current_cell_id=robot.get("currentCellId"),
+                attempted_next_cell_id=attempted_next_cell_id,
+                blocker_robot_id=blocker_robot_id,
+                resource_type=resource_type,
+                reason=reason,
+                task_id=robot.get("currentTaskId"),
+                current_layer=int(robot.get("currentLayer") or 1),
+                current_floor=robot.get("currentFloor"),
+            )
+        )
+
+    def _observe_deadlock_mitigation(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        action: str,
+        details: str | None = None,
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        observer.observe_mitigation(
+            int(runtime.state.get("tick") or 0),
+            str(robot.get("id") or ""),
+            action,
+            details,
+        )
+
+    def _flush_deadlock_events(
+        self,
+        runtime: RunRuntime,
+        events: tuple[LifecycleEvent, ...],
+    ) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        for event in events:
+            try:
+                self._record_event(runtime, event.tick, event.event_type, event.payload)
+            except Exception:
+                logger.exception(
+                    "Failed to persist deadlock lifecycle event: run_id=%s transition=%s",
+                    runtime.run_id,
+                    event.transition_key,
+                )
+                break
+            observer.acknowledge_event(event.transition_key)
+        runtime.state[DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _advance_deadlock_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        try:
+            events = observer.process_tick(tick, runtime.state)
+        except Exception as error:
+            logger.exception(
+                "Deadlock diagnostics failed without stopping simulation: run_id=%s tick=%s",
+                runtime.run_id,
+                tick,
+            )
+            observer.record_failure(tick, error)
+            events = observer.pending_events()
+        self._flush_deadlock_events(runtime, events)
+
+    def _finalize_deadlock_observation(self, runtime: RunRuntime, reason: str) -> None:
+        observer = self._ensure_deadlock_observer(runtime)
+        try:
+            events = observer.finish(int(runtime.state.get("tick") or 0), reason)
+        except Exception as error:
+            logger.exception(
+                "Deadlock diagnostics finalization failed: run_id=%s reason=%s",
+                runtime.run_id,
+                reason,
+            )
+            observer.record_failure(int(runtime.state.get("tick") or 0), error)
+            events = observer.pending_events()
+        self._flush_deadlock_events(runtime, events)
+
+    def _ensure_motion_observer(self, runtime: RunRuntime) -> MotionRuntimeObserver | None:
+        if not runtime.motion_collection_enabled:
+            return None
+        if runtime.motion_observer is not None:
+            return runtime.motion_observer
+        saved = runtime.state.get(MOTION_DIAGNOSTICS_NAMESPACE)
+        deadlock_diagnostics = runtime.state.get(DIAGNOSTICS_NAMESPACE) or {}
+        generation = max(
+            1,
+            int(
+                (saved or {}).get("generation")
+                or deadlock_diagnostics.get("generation")
+                or 1
+            ),
+        )
+        physics_config = runtime.config
+        if physics_config.get("motionPhysicsContract") is None and isinstance(saved, dict):
+            frozen = saved.get("physicsContract")
+            if isinstance(frozen, dict):
+                physics_config = {**runtime.config, "motionPhysicsContract": frozen}
+        observer = MotionRuntimeObserver(
+            runtime.run_id,
+            generation,
+            physics_contract_from_config(physics_config),
+            initial_tick=int(runtime.state.get("tick") or 0),
+            recovered_diagnostics=saved if isinstance(saved, dict) else None,
+        )
+        observer.register_robots(runtime.state.get("robots", []))
+        runtime.motion_observer = observer
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+        return observer
+
+    def _begin_motion_observation(self, runtime: RunRuntime, tick: int) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        observer.begin_tick(tick)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _motion_position(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> RuntimePosition | None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return None
+        try:
+            return RuntimePosition.from_robot(robot)
+        except Exception as error:
+            observer.record_observation_failure(
+                int(runtime.state.get("tick") or 0),
+                str(robot.get("id") or "unknown"),
+                str(robot.get("type") or "unknown"),
+                error,
+            )
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+            logger.exception(
+                "Motion position snapshot failed without changing simulation: run_id=%s robot_id=%s",
+                runtime.run_id,
+                robot.get("id"),
+            )
+            return None
+
+    def _record_committed_motion(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        from_position: RuntimePosition | None,
+        movement_type: MovementType | None,
+        source: str,
+    ) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None or from_position is None:
+            return
+        try:
+            to_position = RuntimePosition.from_robot(robot)
+            if from_position != to_position:
+                robot["movementTicks"] = int(robot.get("movementTicks") or 0) + 1
+                counters = runtime.state.setdefault("performanceCounters", {})
+                counters["movementRobotTicks"] = int(counters.get("movementRobotTicks") or 0) + 1
+            resolved_type = movement_type
+            if resolved_type is None:
+                resolved_type = (
+                    MovementType.LIFT
+                    if from_position.layer != to_position.layer
+                    or from_position.floor != to_position.floor
+                    else MovementType.NORMAL
+                )
+            outcome = observer.capture_committed_move(
+                robot_id=str(robot.get("id") or "unknown"),
+                robot_type=str(robot.get("type") or "unknown"),
+                from_position=from_position,
+                to_position=to_position,
+                tick=int(runtime.state.get("tick") or 0),
+                movement_type=resolved_type,
+                source=source,
+                planned_path_id=robot.get("activePlanId"),
+                replan_id=robot.get("activeReplanId"),
+            )
+        except Exception as error:
+            observer.record_observation_failure(
+                int(runtime.state.get("tick") or 0),
+                str(robot.get("id") or "unknown"),
+                str(robot.get("type") or "unknown"),
+                error,
+            )
+            logger.exception(
+                "Motion observation failed without changing simulation: run_id=%s robot_id=%s",
+                runtime.run_id,
+                robot.get("id"),
+            )
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _flush_motion_events(self, runtime: RunRuntime) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        pending = observer.pending_events()
+        offset = 0
+        while offset < len(pending):
+            tick = pending[offset].tick
+            same_tick = []
+            while (
+                offset < len(pending)
+                and pending[offset].tick == tick
+                and len(same_tick) < MOTION_MAX_BATCH_SIZE
+            ):
+                same_tick.append(pending[offset])
+                offset += 1
+            batch = tuple(same_tick)
+            try:
+                self._record_event(
+                    runtime,
+                    tick,
+                    MOTION_EVENT_TYPE,
+                    observer.batch_payload(batch),
+                )
+            except Exception as error:
+                for event in batch:
+                    observer.record_persistence_failure(event, error)
+                logger.exception(
+                    "Motion event batch persistence failed without stopping simulation: run_id=%s tick=%s count=%s",
+                    runtime.run_id,
+                    tick,
+                    len(batch),
+                )
+            else:
+                for event in batch:
+                    observer.acknowledge_persistence(event)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
+
+    def _finalize_motion_observation(self, runtime: RunRuntime, reason: str) -> None:
+        observer = self._ensure_motion_observer(runtime)
+        if observer is None:
+            return
+        self._flush_motion_events(runtime)
+        observer.finish(int(runtime.state.get("tick") or 0), reason)
+        runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = observer.diagnostics_payload()
 
     def _create_runtime(
         self,
@@ -657,6 +1226,12 @@ class SimulationService:
                     "returningToStandby": False,
                     "handlingAction": None,
                     "waitTicks": 0,
+                    "motionCreditMeters": 0.0,
+                    "motionEdgeKey": None,
+                    "motionCreditTick": -1,
+                    "movementTicks": 0,
+                    "physicalTravelWaitTicks": 0,
+                    "blockedWaitTicks": 0,
                     "failed": False,
                     "phaseLabel": "待命",
                     "load": 0,
@@ -670,6 +1245,13 @@ class SimulationService:
         )
         existing_robot_ids = {robot["id"] for robot in robots}
         robots.extend(robot for robot in transfer_robots if robot["id"] not in existing_robot_ids)
+        for robot in robots:
+            robot.setdefault("motionCreditMeters", 0.0)
+            robot.setdefault("motionEdgeKey", None)
+            robot.setdefault("motionCreditTick", -1)
+            robot.setdefault("movementTicks", 0)
+            robot.setdefault("physicalTravelWaitTicks", 0)
+            robot.setdefault("blockedWaitTicks", 0)
 
         inventory = build_inventory(topology)
         # 四向车出货位设置（订单任务沿用 dock-02/03 自动分配，不再单独驱动搬运）。
@@ -697,15 +1279,61 @@ class SimulationService:
             "stopReason": None,
             "tick": 0,
             "speedMultiplier": DEFAULT_SPEED_MULTIPLIER,
+            "playbackMultiplier": DEFAULT_SPEED_MULTIPLIER,
             "tickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
+            "playbackTickIntervalSeconds": TICK_INTERVAL_SECONDS / DEFAULT_SPEED_MULTIPLIER,
+            "simulatedSeconds": 0.0,
+            "wallClockSeconds": 0.0,
             "eventCount": len(transfer_events),
             "topologyId": topology["id"],
+            "motionPhysicsContract": deepcopy(config.get("motionPhysicsContract")),
+            "motionSpeedContract": deepcopy(config.get("motionSpeedContract")),
+            "algorithmExperimentContract": deepcopy(config.get("algorithmExperimentContract")),
+            "experimentReplayContract": deepcopy(config.get("experimentReplayContract")),
+            "planningEvidence": [],
+            "planningEvidenceContractVersion": "planning-evidence-v1",
+            "planningSequence": 0,
+            "throughputAwareAssignmentEvidence": [],
+            "performanceCounters": {
+                "movementRobotTicks": 0,
+                "physicalTravelWaitRobotTicks": 0,
+                "blockedRobotTicks": 0,
+            },
+            "throughputContractVersion": THROUGHPUT_CONTRACT_VERSION,
+            "throughputGeneration": 1,
+            "throughputDeliveryIds": [],
+            "throughputDeliverySignatures": {},
+            "throughputCargoSequence": 0,
             "orderDriven": bool(orders or transfers),
             "robots": robots,
             "tasks": tasks,
             "orders": order_states,
             "inventory": inventory,
             "shuttleDocks": shuttle_docks,
+            # 空托盘在 (76,35) 地面输送线上的堆积层数（最多 6 层）。
+            "emptyPalletStack": {
+                "cellId": EMPTY_PALLET_RETURN_CELL_ID,
+                "count": 0,
+                "capacity": EMPTY_PALLET_STACK_CAPACITY,
+                "overflow": 0,
+            },
+            # 5 个出货口帽口的托盘承载位（默认各 1 个空托盘）。
+            # count = 托盘总数（视觉用，只增不减，表示这个帽口有几个托盘格位）
+            # availableEmpty = 当前可承载新货物的空托盘数（侧臂放货 -1、输送线补充 +1）
+            "palletDocks": {
+                str(row): {"count": DEFAULT_PALLET_DOCK_COUNT, "availableEmpty": DEFAULT_PALLET_DOCK_COUNT}
+                for row in PALLET_DOCK_PORT_ROWS
+            },
+            "palletArm": {
+                "armId": "picking-arm-02",
+                "status": "idle",
+                "stage": None,
+                "remainingTicks": 0,
+                "taskId": None,
+                "cargo": None,
+                "pendingQueue": [],
+            },
+            "palletConveyorItems": [],
             # 只持久化游标：箱/货道认领是运行时临时状态（键为元组，无法 JSON 序列化），
             # 后续插入订单时会依据在途任务重新推导。
             "shuttleBatch": {"cursor": int(shuttle_batch.get("cursor") or 0)},
@@ -736,6 +1364,59 @@ class SimulationService:
             "createdAt": now_dt().isoformat(),
             "updatedAt": now_dt().isoformat(),
         }
+        inventory_hash = hashlib.sha256(
+            json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if isinstance(state.get("algorithmExperimentContract"), dict):
+            state["algorithmExperimentContract"]["initialInventoryHash"] = inventory_hash
+            state["algorithmExperimentContract"]["orderSnapshotHash"] = hashlib.sha256(
+                json.dumps(orders or [], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            vehicle_snapshot = [
+                {
+                    "id": robot.get("id"),
+                    "type": robot.get("type"),
+                    "cellId": robot.get("currentCellId"),
+                    "layer": robot.get("currentLayer"),
+                    "capacity": robot.get("capacity"),
+                }
+                for robot in sorted(robots, key=lambda item: str(item.get("id")))
+            ]
+            state["algorithmExperimentContract"]["initialVehicleSnapshotHash"] = hashlib.sha256(
+                json.dumps(
+                    vehicle_snapshot,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            state["algorithmExperimentContract"]["scenarioSignature"] = hashlib.sha256(
+                json.dumps(
+                    {
+                        "baseScenarioSignature": state["algorithmExperimentContract"]["scenarioSignature"],
+                        "initialInventoryHash": inventory_hash,
+                        "initialVehicleSnapshotHash": state["algorithmExperimentContract"][
+                            "initialVehicleSnapshotHash"
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            config["algorithmExperimentContract"] = deepcopy(
+                state["algorithmExperimentContract"]
+            )
+            replay = state.get("experimentReplayContract")
+            if isinstance(replay, dict):
+                replay.update({
+                    "scenarioSignature": state["algorithmExperimentContract"]["scenarioSignature"],
+                    "initialInventoryHash": inventory_hash,
+                    "initialVehicleSnapshotHash": state["algorithmExperimentContract"][
+                        "initialVehicleSnapshotHash"
+                    ],
+                    "orderSnapshotHash": state["algorithmExperimentContract"]["orderSnapshotHash"],
+                })
         metrics = {
             "throughput": 0,
             "completedTasks": 0,
@@ -762,7 +1443,24 @@ class SimulationService:
             conveyor_graph=conveyor_graph,
             arm_handoff=arm_handoff,
             secondary_arms=secondary_arms,
+            motion_collection_enabled=bool(config.get("motionDistanceCollectionEnabled", True)),
         )
+        runtime.deadlock_observer = DeadlockRuntimeObserver(
+            run_id,
+            1,
+            runtime.topology,
+            initial_tick=0,
+        )
+        runtime.state[DIAGNOSTICS_NAMESPACE] = runtime.deadlock_observer.diagnostics_payload()
+        if runtime.motion_collection_enabled:
+            runtime.motion_observer = MotionRuntimeObserver(
+                run_id,
+                1,
+                physics_contract_from_config(config),
+                initial_tick=0,
+            )
+            runtime.motion_observer.register_robots(robots)
+            runtime.state[MOTION_DIAGNOSTICS_NAMESPACE] = runtime.motion_observer.diagnostics_payload()
         # Every WebSocket connection receives one complete snapshot. Normal
         # tick frames can therefore omit the potentially very large inventory.
         runtime.last_broadcast_inventory_size = len(inventory)
@@ -924,7 +1622,12 @@ class SimulationService:
                     )
                     if slot is not None:
                         used_slots.add((slot["nodeId"], int(slot.get("layer", 1))))
-                        allocated_lines.append({**dict(slot), "qty": case_cnt, "pickPieces": need_pieces})
+                        allocated_lines.append({
+                            **dict(slot),
+                            "qty": case_cnt,
+                            "pickPieces": need_pieces,
+                            "orderLineId": line_id,
+                        })
                         line_ctu_boxes += 1
                         continue
                     # CTU 无可用整箱：缺口转四向车（整箱出库，只按需求件数记账）。
@@ -1296,10 +1999,25 @@ class SimulationService:
                 return
             # place 完成：货箱落到放货点带面，四向车释放；任务转入独立的
             # 上层输送阶段，只有货箱到达输送线终点后才真正完成。
-            task["deliveredGoods"] = [dict(slot) for slot in (robot.get("carrying") or [])]
+            # 只交付订单要的那箱：托盘上的余货（pallet_goods）留在车上随托盘回库。
+            task["deliveredGoods"] = [
+                dict(slot)
+                for slot in (robot.get("carrying") or [])
+                if slot.get("kind") != "pallet_goods"
+            ]
             task["armPlacedCellId"] = target["dropoffCellId"]
             transport_started = self._start_arm_conveyor_delivery(runtime, task, target)
-            self._release_arm_handoff_robot(runtime, robot, task)
+            # 机械臂把货物取走后：空托盘 → 送 (76,35) 堆叠；托盘还有余货 →
+            # 余货随托盘回到原货位；两者都不成立（不留托盘的问题）才回待命位。
+            pallet_returning = False
+            if task.get("palletExtraBoxes"):
+                pallet_returning = self._send_pallet_back_to_lane(runtime, robot, task, target)
+            if not pallet_returning and bool(task.get("palletBecomesEmpty")):
+                pallet_returning = self._send_empty_pallet_to_stack(
+                    runtime, robot, task, target
+                )
+            if not pallet_returning:
+                self._release_arm_handoff_robot(runtime, robot, task)
             arm.update({"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None})
             self._record_event(
                 runtime,
@@ -1377,6 +2095,20 @@ class SimulationService:
                     )
                     continue
                 cargo = arm.get("cargo") or {}
+                # place 完成 → 消耗帽口的空托盘承载位（availableEmpty -1；
+                # count 保持不变，表示托盘本身还在那里，视觉上不会消失）。
+                port_row_key = str(arm.get("portRowKey") or "")
+                if port_row_key:
+                    docks = runtime.state.setdefault("palletDocks", {})
+                    dock = docks.setdefault(port_row_key, {"count": 0, "availableEmpty": 0})
+                    dock["count"] = int(dock.get("count") or 0)
+                    dock["availableEmpty"] = max(0, int(dock.get("availableEmpty") or 0) - 1)
+                    self._record_event(
+                        runtime, tick, "pallet_dock_consumed",
+                        {"portRow": port_row_key, "dockCount": dock["count"],
+                         "availableEmpty": dock["availableEmpty"],
+                         "armId": arm.get("armId"), "taskId": arm.get("taskId")},
+                    )
                 drop_boxes = runtime.state.setdefault("armDropBoxes", [])
                 drop_boxes.append({
                     **{
@@ -1406,6 +2138,15 @@ class SimulationService:
                         "cellId": arm.get("dropCellId"),
                     },
                 )
+                delivery_task = find_task(runtime.state.get("tasks", []), arm.get("taskId"))
+                if delivery_task is not None:
+                    self._record_outbound_delivery(
+                        runtime,
+                        delivery_task,
+                        tick,
+                        str(arm.get("dropCellId") or ""),
+                        cargo=cargo,
+                    )
                 arm.update({
                     "status": "idle",
                     "stage": None,
@@ -1418,19 +2159,31 @@ class SimulationService:
                 })
                 continue
             # 空闲：寻找停在本臂出货口帽口、尚未被搬走的货箱。
+            # 帽口必须有托盘（count > 0)才能取；一个托盘可以承载多箱，
+            # 侧臂逐箱码放到同一托盘上。availableEmpty 只用于前端区分
+            # “空托盘 / 已承载”，不能再当成一次性承载位——否则同一订单的
+            # 其余货箱会永远停在输送带上送不下去。
             port_cells = {str(port["cellId"]): port for port in config["ports"]}
-            claimed_index = next(
-                (
-                    index
-                    for index, box in enumerate(boxes)
-                    if str(box.get("cellId") or "") in port_cells
-                ),
-                None,
-            )
+            docks = runtime.state.get("palletDocks") or {}
+            claimed_index = None
+            claimed_port = None
+            for index, box in enumerate(boxes):
+                port = port_cells.get(str(box.get("cellId") or ""))
+                if port is None:
+                    continue
+                dock_row = str(int(port["row"]))
+                dock = docks.get(dock_row) or {}
+                if int(dock.get("count") or 0) <= 0:
+                    # 这个帽口没有托盘，等输送线补
+                    continue
+                claimed_index = index
+                claimed_port = port
+                break
             if claimed_index is None:
                 continue
             box = boxes.pop(claimed_index)
-            port = port_cells[str(box.get("cellId"))]
+            port = claimed_port
+            port_row_key = str(int(port["row"]))
             drop_row = int(port["row"])
             arm.update({
                 "status": "busy",
@@ -1439,6 +2192,7 @@ class SimulationService:
                 "taskId": box.get("taskId"),
                 "cargoToken": f"{arm.get('armId')}:{box.get('taskId') or 'box'}:{tick}",
                 "portCellId": str(box.get("cellId")),
+                "portRowKey": port_row_key,
                 "dropCellId": cell_id(drop_row, int(config.get("dropCol") or 67)),
                 "dropRow": drop_row,
                 "dropCol": int(config.get("dropCol") or 67),
@@ -1473,14 +2227,18 @@ class SimulationService:
         if not route:
             # 路径异常时保留货箱而不是让它消失，并明确把任务标为异常。
             box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
-            runtime.state.setdefault("armBeltBoxes", []).append({
-                **box,
-                "taskId": task.get("id"),
-                "cellId": target.get("dropoffCellId"),
-                "level": target.get("dropoffLevel", 2),
-                "beltHeight": target.get("dropoffBeltHeight", 3.0),
-                "placedTick": tick,
-            })
+            runtime.state.setdefault("armBeltBoxes", []).append(
+                self._outbound_cargo_snapshot(
+                    runtime,
+                    task,
+                    box,
+                    taskId=task.get("id"),
+                    cellId=target.get("dropoffCellId"),
+                    level=target.get("dropoffLevel", 2),
+                    beltHeight=target.get("dropoffBeltHeight", 3.0),
+                    placedTick=tick,
+                )
+            )
             task["status"] = "exception"
             task["phase"] = "arm_conveyor_blocked"
             task["phaseLabel"] = "机械臂放箱后输送路径不可用"
@@ -1644,6 +2402,135 @@ class SimulationService:
             if self._advance_conveyor_transport(runtime, None, task):
                 self._complete_detached_conveyor_task(runtime, task)
 
+    def _record_outbound_delivery(
+        self,
+        runtime: RunRuntime,
+        task: dict[str, Any],
+        tick: int,
+        endpoint_cell_id: str,
+        *,
+        cargo: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist SKU-piece evidence only after the side arm places cargo in drop_zone."""
+
+        if task.get("taskKind") not in {"shuttle_order_pick", "placed_goods_delivery"}:
+            return
+        order_id = task.get("orderId")
+        if not order_id:
+            return
+        goods = (
+            [cargo]
+            if isinstance(cargo, dict) and cargo.get("skuId")
+            else task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or []
+        )
+        pieces_by_line_and_sku: dict[tuple[str, str], dict[str, Any]] = {}
+        for good in goods:
+            if not isinstance(good, dict):
+                continue
+            sku_id = str(good.get("skuId") or "")
+            if not sku_id:
+                continue
+            order_line_id = str(good.get("orderLineId") or task.get("orderLineId") or "unknown-line")
+            quantity = max(0, int(good.get("qty") or 0))
+            if task.get("taskKind") == "shuttle_order_pick":
+                quantity = max(0, int(task.get("demandPieces") or quantity))
+            if quantity <= 0:
+                continue
+            item = pieces_by_line_and_sku.setdefault((order_line_id, sku_id), {
+                "skuId": sku_id,
+                "skuName": good.get("skuName"),
+                "orderLineId": order_line_id,
+                "quantityPieces": 0,
+            })
+            item["quantityPieces"] += quantity
+
+        parent = find_task(runtime.state.get("tasks", []), task.get("parentId"))
+        root = parent
+        while root and root.get("parentId"):
+            root = find_task(runtime.state.get("tasks", []), root.get("parentId"))
+        authoritative_box_count = 1 if (
+            task.get("taskKind") == "shuttle_order_pick"
+            or (parent or {}).get("taskKind") == "picking_box"
+        ) else None
+        generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
+        recorded_ids = runtime.state.setdefault("throughputDeliveryIds", [])
+        recorded_signatures = runtime.state.setdefault("throughputDeliverySignatures", {})
+        physical_cargo_id = str((cargo or {}).get("physicalCargoId") or "")
+        delivery_sequence = (cargo or {}).get("deliverySequence")
+        legacy_delivery_key = f"task:{task.get('id')}"
+        delivery_key = physical_cargo_id or legacy_delivery_key
+        for item_index, item in enumerate(pieces_by_line_and_sku.values()):
+            order_line_id = str(item.get("orderLineId") or "unknown-line")
+            delivery_id = (
+                f"{runtime.run_id}:g{generation}:{delivery_key}:{order_id}:"
+                f"{order_line_id}:{item['skuId']}"
+            )
+            payload = {
+                "contractVersion": DELIVERY_EVENT_VERSION,
+                "deliveryId": delivery_id,
+                "runId": runtime.run_id,
+                "generation": generation,
+                "orderId": order_id,
+                "orderLineId": None if order_line_id == "unknown-line" else order_line_id,
+                "taskId": task.get("id"),
+                "parentTaskId": task.get("parentId"),
+                "rootTaskId": (root or task).get("id"),
+                "taskKind": task.get("taskKind"),
+                "originRobotType": (root or task).get("robotType"),
+                "skuId": item["skuId"],
+                "skuName": item.get("skuName"),
+                "quantityPieces": int(item["quantityPieces"]),
+                # One physical cargo can theoretically contain more than one SKU.
+                # Count that box once, while every SKU line keeps its piece evidence.
+                "quantityBoxes": authoritative_box_count if item_index == 0 else 0,
+                "physicalCargoId": physical_cargo_id or None,
+                "deliverySequence": delivery_sequence,
+                "tick": tick,
+                "deliveryStage": "drop_zone_received",
+                "endpointCellId": endpoint_cell_id,
+                "outputPortBlockId": task.get("outputPortBlockId"),
+                "flowKind": "outbound_order",
+                "evidenceSource": "secondary_arm_dropzone_placed",
+            }
+            signature = hashlib.sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if delivery_id in recorded_ids:
+                previous_signature = recorded_signatures.get(delivery_id)
+                if previous_signature is None or previous_signature == signature:
+                    continue
+                # Persist contradictory evidence with the same deliveryId so
+                # the read-only aggregator can mark the metric INVALID.
+                self._record_event(runtime, tick, DELIVERY_EVENT_TYPE, payload)
+                continue
+            self._record_event(runtime, tick, DELIVERY_EVENT_TYPE, payload)
+            recorded_ids.append(delivery_id)
+            recorded_signatures[delivery_id] = signature
+
+    def _outbound_cargo_snapshot(
+        self,
+        runtime: RunRuntime,
+        task: dict[str, Any],
+        box: dict[str, Any],
+        **position: Any,
+    ) -> dict[str, Any]:
+        """Attach a stable, per-generation physical identity before a box reaches a side arm."""
+
+        sequence = max(0, int(runtime.state.get("throughputCargoSequence") or 0)) + 1
+        runtime.state["throughputCargoSequence"] = sequence
+        generation = max(1, int(runtime.state.get("throughputGeneration") or 1))
+        return {
+            **box,
+            **position,
+            "physicalCargoId": f"{runtime.run_id}:g{generation}:cargo-{sequence}",
+            "deliverySequence": sequence,
+        }
+
     def _complete_detached_conveyor_task(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
         """货箱到达机械臂输送路线终点后处理：回库子任务转等待 CTU 取回，其余完成任务。"""
         tick = int(runtime.state["tick"])
@@ -1675,14 +2562,18 @@ class SimulationService:
             str(final_node.get("floor") or "1F"),
         )
         box = dict((task.get("transitGoods") or task.get("deliveredGoods") or task.get("lines") or [{}])[0])
-        runtime.state.setdefault("armBeltBoxes", []).append({
-            **box,
-            "taskId": task.get("id"),
-            "cellId": final_cell,
-            "level": 2,
-            "beltHeight": 3.0,
-            "placedTick": tick,
-        })
+        runtime.state.setdefault("armBeltBoxes", []).append(
+            self._outbound_cargo_snapshot(
+                runtime,
+                task,
+                box,
+                taskId=task.get("id"),
+                cellId=final_cell,
+                level=2,
+                beltHeight=3.0,
+                placedTick=tick,
+            )
+        )
         task["armConveyorCompleted"] = True
         task["armConveyorEndCellId"] = final_cell
         task["conveyorTransport"] = None
@@ -1759,7 +2650,7 @@ class SimulationService:
             ports.append(
                 {
                     "id": str(zone.get("id") or entry),
-                    "label": str(zone.get("label") or zone.get("id") or entry),
+                    "label": restore_utf8_cjk_label(str(zone.get("label") or zone.get("id") or entry)),
                     "cellId": entry,
                 }
             )
@@ -2412,6 +3303,8 @@ class SimulationService:
             # 箱内件数：CTU 尾箱需要按整箱件数携带，拣货时再按需求件数扣减。
             if line.get("qty") is not None:
                 entry["qty"] = int(line["qty"])
+            if line.get("orderLineId") not in (None, ""):
+                entry["orderLineId"] = str(line["orderLineId"])
             for field in SKU_FIELDS:
                 if line.get(field) not in (None, ""):
                     entry[field] = line[field]
@@ -2459,13 +3352,25 @@ class SimulationService:
 
     async def _loop(self, runtime: RunRuntime) -> None:
         nominal_duration = max(1, int(runtime.config.get("durationTicks", 90)))
-        safety_limit = max(
-            MIN_SAFETY_TICKS,
-            nominal_duration * 20,
-            int(runtime.config.get("maxDurationTicks") or 0),
+        experiment = runtime.config.get("algorithmExperimentContract")
+        observation_ticks = (
+            int(experiment["observationTicks"])
+            if isinstance(experiment, dict) and experiment.get("observationTicks") is not None
+            else None
         )
+        if experiment is not None:
+            safety_limit = int(runtime.config["safetyLimitTicks"])
+        else:
+            safety_limit = max(
+                MIN_SAFETY_TICKS,
+                nominal_duration * 20,
+                int(runtime.config.get("maxDurationTicks") or 0),
+            )
         try:
-            while runtime.state["tick"] < safety_limit:
+            while (
+                runtime.state["tick"] < safety_limit
+                and (observation_ticks is None or runtime.state["tick"] < observation_ticks)
+            ):
                 if runtime.stopped:
                     break
                 if runtime.paused:
@@ -2486,6 +3391,16 @@ class SimulationService:
         except asyncio.CancelledError:
             # reset() intentionally cancels the old loop before restoring the
             # initial snapshot; it must not be reported as a runtime failure.
+            if not runtime.resetting:
+                self._finalize_deadlock_observation(runtime, "background_task_cancelled")
+                self._finalize_motion_observation(runtime, "background_task_cancelled")
+                try:
+                    self._persist(runtime)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist cancelled-run deadlock diagnostics: run_id=%s",
+                        runtime.run_id,
+                    )
             raise
         except Exception as error:
             await self._handle_loop_failure(runtime, error)
@@ -2512,6 +3427,18 @@ class SimulationService:
                 )
             else:
                 runtime.state["stopReason"] = None
+        elif observation_ticks is not None and runtime.state["tick"] >= observation_ticks:
+            runtime.state["status"] = "stopped"
+            runtime.state["stopReason"] = "observation_window_complete"
+            runtime.state["throughputObservation"] = {
+                "contractVersion": THROUGHPUT_CONTRACT_VERSION,
+                "observationTick": observation_ticks,
+                "observationSeconds": round(
+                    observation_ticks * self._sim_tick_seconds(runtime),
+                    9,
+                ),
+                "completedNaturally": False,
+            }
         else:
             runtime.state["status"] = "stopped"
             runtime.state["stopReason"] = "safety_limit"
@@ -2529,6 +3456,14 @@ class SimulationService:
                 },
                 suggestion="检查不可达任务、设备故障或持续交通阻塞。",
             )
+        self._finalize_deadlock_observation(
+            runtime,
+            str(runtime.state.get("stopReason") or runtime.state.get("status") or "completed"),
+        )
+        self._finalize_motion_observation(
+            runtime,
+            str(runtime.state.get("stopReason") or runtime.state.get("status") or "completed"),
+        )
         self._persist(runtime)
         await self.hub.broadcast(runtime.run_id, {"type": "simulation_completed", "tick": runtime.state["tick"], "payload": runtime.metrics})
 
@@ -2566,6 +3501,8 @@ class SimulationService:
             self._record_event(runtime, tick, "simulation_runtime_error", runtime.state["runtimeError"])
         except Exception:
             logger.exception("Failed to record simulation runtime error: run_id=%s", runtime.run_id)
+        self._finalize_deadlock_observation(runtime, "runtime_error")
+        self._finalize_motion_observation(runtime, "runtime_error")
         try:
             self._persist(runtime)
         except Exception:
@@ -2590,22 +3527,111 @@ class SimulationService:
         multiplier = runtime.speed_multiplier if runtime.speed_multiplier in SUPPORTED_SPEED_MULTIPLIERS else DEFAULT_SPEED_MULTIPLIER
         return TICK_INTERVAL_SECONDS / multiplier
 
+    def _sim_tick_seconds(self, runtime: RunRuntime) -> float:
+        return sim_tick_seconds(runtime.config, TICK_INTERVAL_SECONDS)
+
+    def _physical_movement_ready(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        next_cell_id: str,
+        next_layer: float,
+    ) -> bool:
+        """Accrue one logical tick of distance credit without claiming blockage.
+
+        Occupancy is still checked by the existing scheduler after this returns
+        true. Credit is consumed only after that check succeeds, so waiting at a
+        reserved cell cannot manufacture distance or repeated mileage.
+        """
+
+        speed_contract = runtime.config.get("motionSpeedContract")
+        physics_contract = runtime.config.get("motionPhysicsContract")
+        if not isinstance(speed_contract, dict) or not isinstance(physics_contract, dict):
+            return True
+        _floor, next_row, next_col = parse_cell_id(next_cell_id)
+        edge_key = f"{next_cell_id}@{float(next_layer):.9f}"
+        previous_key = robot.get("motionEdgeKey")
+        if previous_key is not None and previous_key != edge_key:
+            robot["motionCreditMeters"] = 0.0
+        robot["motionEdgeKey"] = edge_key
+        required = edge_distance_meters(
+            physics_contract,
+            int(robot.get("currentRow") or 0),
+            int(robot.get("currentCol") or 0),
+            float(robot.get("currentLayer") or 1),
+            int(next_row),
+            int(next_col),
+            float(next_layer),
+        )
+        robot["motionEdgeRequiredMeters"] = required
+        if required <= EPSILON_METERS:
+            return True
+        tick = int(runtime.state.get("tick") or 0)
+        current_credit = float(robot.get("motionCreditMeters") or 0.0)
+        if current_credit + EPSILON_METERS < required and int(robot.get("motionCreditTick", -1)) != tick:
+            speed = speed_for_edge(
+                speed_contract,
+                str(robot.get("type") or "ctu"),
+                float(robot.get("currentLayer") or 1),
+                float(next_layer),
+            )
+            robot["motionCreditMeters"] = current_credit + speed * self._sim_tick_seconds(runtime)
+            robot["motionCreditTick"] = tick
+        if float(robot.get("motionCreditMeters") or 0.0) + EPSILON_METERS < required:
+            robot["status"] = "moving"
+            robot["physicalTravelWaitTicks"] = int(robot.get("physicalTravelWaitTicks") or 0) + 1
+            counters = runtime.state.setdefault("performanceCounters", {})
+            counters["physicalTravelWaitRobotTicks"] = int(
+                counters.get("physicalTravelWaitRobotTicks") or 0
+            ) + 1
+            return False
+        return True
+
+    def _consume_motion_credit(self, robot: dict[str, Any]) -> None:
+        required = float(robot.get("motionEdgeRequiredMeters") or 0.0)
+        credit = float(robot.get("motionCreditMeters") or 0.0)
+        robot["motionCreditMeters"] = max(0.0, credit - required)
+        robot["motionEdgeKey"] = None
+        robot["motionEdgeRequiredMeters"] = 0.0
+
     def _step_runtime(self, runtime: RunRuntime, *, persist: bool) -> None:
         runtime.state["tick"] += 1
+        runtime.state["simulatedSeconds"] = round(
+            int(runtime.state["tick"]) * self._sim_tick_seconds(runtime),
+            9,
+        )
+        runtime.state["wallClockSeconds"] = round(
+            max(0.0, time.monotonic() - runtime.wall_clock_started_monotonic),
+            6,
+        )
         runtime.state["updatedAt"] = now_dt().isoformat()
         tick = runtime.state["tick"]
+        self._begin_deadlock_observation(runtime, tick)
+        self._begin_motion_observation(runtime, tick)
         self._inject_faults(runtime, tick)
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
         self._move_robots(runtime)
+        counters = runtime.state.setdefault("performanceCounters", {})
+        blocked_count = sum(
+            1 for robot in runtime.state.get("robots", []) if robot.get("status") == "blocked"
+        )
+        counters["blockedRobotTicks"] = int(counters.get("blockedRobotTicks") or 0) + blocked_count
+        for robot in runtime.state.get("robots", []):
+            if robot.get("status") == "blocked":
+                robot["blockedWaitTicks"] = int(robot.get("blockedWaitTicks") or 0) + 1
         self._advance_picking_arm(runtime)
         self._advance_picking_arms(runtime)
+        # picking-arm-02：空托盘从 (74,47) 放到 (84,58) 上层输送 → 滑向 5 个出货口帽口
+        self._advance_pallet_arm(runtime)
+        self._advance_pallet_conveyor(runtime)
         self._advance_detached_conveyor_tasks(runtime)
         self._advance_detached_picking_tasks(runtime)
         self._advance_feeding_parents(runtime)
         self._detect_contention(runtime)
         self._refresh_orders(runtime)
         self._refresh_metrics(runtime)
+        self._advance_deadlock_observation(runtime, tick)
         # 全量状态落库很重（任务含完整 plan，状态随历史增长）；常规 tick 降频为
         # 每 10 tick 一次，结束/控制操作仍即时落库（其余 _persist 调用点不变）。
         if persist and tick % 10 == 0:
@@ -2778,6 +3804,8 @@ class SimulationService:
             runtime.topology,
             runtime.config.get("pathPolicy", "astar"),
             failed_cells,
+            runtime_state=runtime.state,
+            runtime_config=runtime.config,
         )
         for robot_id, task_id in matches:
             robot = next(item for item in runtime.state["robots"] if item["id"] == robot_id)
@@ -2792,6 +3820,7 @@ class SimulationService:
                 task["sourceLayer"],
                 extra_blocked=failed_cells,
                 stop_adjacent=True,
+                task_id=task.get("id"),
             ):
                 self._fail_pending_task(runtime, task, "source_unreachable")
                 continue
@@ -2893,6 +3922,15 @@ class SimulationService:
                 robot["yieldTicks"] -= 1
                 robot["status"] = "blocked"
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 主动让行"
+                yield_path = robot.get("path") or []
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    yield_path[1] if len(yield_path) > 1 else None,
+                    None,
+                    ResourceType.OTHER,
+                    "ACTIVE_YIELD_WAIT",
+                )
                 continue
 
             path = robot["path"]
@@ -2906,6 +3944,9 @@ class SimulationService:
             next_cell_id = path[1]
             next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
             next_stage = path_stages[1] if len(path_stages) > 1 else task.get("phase", "moving")
+            if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
+                robot["phaseLabel"] = task["phaseLabel"]
+                continue
             occupied_cells.discard(current_cell_id)
 
             if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
@@ -2914,10 +3955,40 @@ class SimulationService:
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
                 occupied_cells.add(current_cell_id)
                 blocker = next((item for item in movable if item["currentCellId"] == next_cell_id), None)
+                observed_blocker = next(
+                    (
+                        item for item in runtime.state["robots"]
+                        if item.get("id") != robot.get("id")
+                        and item.get("currentCellId") == next_cell_id
+                    ),
+                    None,
+                )
+                block_resource = (
+                    ResourceType.ROBOT
+                    if observed_blocker is not None
+                    else ResourceType.RESERVATION
+                    if next_cell_id in reserved_targets
+                    else ResourceType.UNKNOWN_BLOCKER
+                )
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    observed_blocker.get("id") if observed_blocker else None,
+                    block_resource,
+                    (
+                        "NEXT_CELL_OCCUPIED"
+                        if observed_blocker is not None
+                        else "TARGET_RESERVED"
+                        if next_cell_id in reserved_targets
+                        else "UNKNOWN_BLOCKER"
+                    ),
+                )
                 # 连续等待后仍无法前进：CTU 先绕开其它设备重新寻路，绕不开再处理头对头死锁；
                 # 四向车同样先绕行（带面/巷道有并行道），头对头时退一格再绕。
                 if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_ctu(runtime, robot, occupied_cells):
+                        self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
@@ -2929,6 +4000,7 @@ class SimulationService:
                         self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
                 elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                     if self._reroute_shuttle(runtime, robot, occupied_cells):
+                        self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
@@ -2938,6 +4010,8 @@ class SimulationService:
                         robot["phaseLabel"] = task["phaseLabel"]
                 continue
 
+            motion_from = self._motion_position(runtime, robot)
+            self._consume_motion_credit(robot)
             robot["status"] = "moving"
             robot["lastCellId"] = current_cell_id
             robot["currentCellId"] = next_cell_id
@@ -2974,10 +4048,19 @@ class SimulationService:
                 robot["phaseLabel"] = task["phaseLabel"]
             occupied_cells.add(next_cell_id)
             reserved_targets.add(next_cell_id)
+            self._record_committed_motion(
+                runtime,
+                robot,
+                motion_from,
+                None,
+                "_move_robots",
+            )
             self._record_event(runtime, runtime.state["tick"], "robot_position", {"robotId": robot["id"], "cellId": robot["currentCellId"], "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]})
 
             if len(robot["path"]) <= 1:
                 self._advance_robot_phase(runtime, robot, task, occupied_cells)
+
+        self._flush_motion_events(runtime)
 
     def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
         """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
@@ -2990,6 +4073,7 @@ class SimulationService:
         last_cell = robot.get("lastCellId")
         if last_cell and last_cell != target:
             others.add(parse_cell_id(last_cell))
+        diagnostic: dict[str, Any] = {}
         path_cells = shortest_path(
             runtime.topology,
             robot["currentCellId"],
@@ -2997,6 +4081,7 @@ class SimulationService:
             runtime.config["pathPolicy"],
             avoid_storage=True,
             extra_blocked=others,
+            evidence=diagnostic,
         )
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         if task and task.get("phase") == "pickup_from_ctu" and len(path_cells) > 1:
@@ -3006,6 +4091,15 @@ class SimulationService:
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
         robot["targetCellId"] = target
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot["pathLayers"]),
+            "replan",
+            diagnostic,
+        )
         return True
 
     def _reroute_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
@@ -3031,6 +4125,7 @@ class SimulationService:
                 _floor, nr, nc = parse_cell_id(blocker_path[1])
                 others.add((nr, nc, layer))
         others.discard((int(robot["currentRow"]), int(robot["currentCol"]), current_layer))
+        diagnostic: dict[str, Any] = {}
         path3d = shortest_path_shuttle(
             runtime.topology,
             robot["currentCellId"],
@@ -3039,6 +4134,7 @@ class SimulationService:
             goal_layer,
             runtime.config["pathPolicy"],
             extra_blocked=others,
+            evidence=diagnostic,
         )
         if not path3d or len(path3d) <= 1:
             return False
@@ -3049,6 +4145,15 @@ class SimulationService:
         robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
         robot["pathLayers"] = [layer for _, _, layer in path3d]
         robot["pathStages"] = [stage] * len(robot["path"])
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot["pathLayers"]),
+            "replan",
+            diagnostic,
+        )
         return True
 
     def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str], reserved_targets: set[str]) -> bool:
@@ -3058,6 +4163,15 @@ class SimulationService:
         last = robot.get("lastCellId")
         if not last or last == robot["currentCellId"] or last in occupied_cells or last in reserved_targets:
             return False
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            last,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return False
+        motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         old_path = robot.get("path") or [robot["currentCellId"]]
         old_layers = robot.get("pathLayers") or [int(robot.get("currentLayer", 1))] * len(old_path)
         floor, row, col = parse_cell_id(last)
@@ -3070,6 +4184,14 @@ class SimulationService:
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         stage = task.get("phase", "moving") if task else "moving"
         robot["pathStages"] = [stage] * len(robot["path"])
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_back_off_shuttle",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "BACKTRACK", "shuttle_head_on")
         return True
 
     def _clear_shuttle_head_on(
@@ -3139,6 +4261,15 @@ class SimulationService:
         )
         if not path_cells or len(path_cells) <= 1:
             return False
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            last,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return False
+        motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         occupied_cells.discard(robot["currentCellId"])
         robot["lastCellId"] = robot["currentCellId"]
         robot["currentCellId"] = last
@@ -3150,6 +4281,14 @@ class SimulationService:
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
         occupied_cells.add(last)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_yield_one_cell",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "BACKTRACK", "ctu_head_on")
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -3195,6 +4334,15 @@ class SimulationService:
             robot["yieldTicks"] -= 1
             robot["status"] = "blocked"
             robot["phaseLabel"] = "返回待命位 / 主动让行"
+            yield_path = robot.get("path") or []
+            self._observe_robot_block(
+                runtime,
+                robot,
+                yield_path[1] if len(yield_path) > 1 else None,
+                None,
+                ResourceType.OTHER,
+                "ACTIVE_YIELD_WAIT",
+            )
             return
 
         path = robot.get("path") or [robot["currentCellId"]]
@@ -3206,14 +4354,49 @@ class SimulationService:
 
         current_cell_id = robot["currentCellId"]
         next_cell_id = path[1]
+        path_layers = robot.get("pathLayers") or [1] * len(path)
+        next_layer = path_layers[1] if len(path_layers) > 1 else 1
+        if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
+            robot["phaseLabel"] = "Returning to standby / physical travel"
+            return
         occupied_cells.discard(current_cell_id)
         if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
             occupied_cells.add(current_cell_id)
             robot["status"] = "blocked"
             robot["waitTicks"] += 1
             robot["phaseLabel"] = "返回待命位 / 等待让行"
+            observed_blocker = next(
+                (
+                    item for item in runtime.state["robots"]
+                    if item.get("id") != robot.get("id")
+                    and item.get("currentCellId") == next_cell_id
+                ),
+                None,
+            )
+            block_resource = (
+                ResourceType.ROBOT
+                if observed_blocker is not None
+                else ResourceType.RESERVATION
+                if next_cell_id in reserved_targets
+                else ResourceType.UNKNOWN_BLOCKER
+            )
+            self._observe_robot_block(
+                runtime,
+                robot,
+                next_cell_id,
+                observed_blocker.get("id") if observed_blocker else None,
+                block_resource,
+                (
+                    "NEXT_CELL_OCCUPIED"
+                    if observed_blocker is not None
+                    else "TARGET_RESERVED"
+                    if next_cell_id in reserved_targets
+                    else "UNKNOWN_BLOCKER"
+                ),
+            )
             if robot["type"] == "ctu" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                 if self._reroute_ctu(runtime, robot, occupied_cells):
+                    self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                     robot["waitTicks"] = 0
                     robot["status"] = "returning"
                     robot["phaseLabel"] = "返回待命位"
@@ -3221,13 +4404,14 @@ class SimulationService:
                     self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
             elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
                 if self._reroute_shuttle(runtime, robot, occupied_cells):
+                    self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                     robot["waitTicks"] = 0
                     robot["status"] = "returning"
                     robot["phaseLabel"] = "返回待命位"
             return
 
-        path_layers = robot.get("pathLayers") or [1] * len(path)
-        next_layer = path_layers[1] if len(path_layers) > 1 else 1
+        motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         robot["currentCellId"] = next_cell_id
         robot["currentNode"] = next_cell_id
         floor, row, col = parse_cell_id(next_cell_id)
@@ -3243,6 +4427,13 @@ class SimulationService:
         robot["phaseLabel"] = "返回待命位"
         occupied_cells.add(next_cell_id)
         reserved_targets.add(next_cell_id)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.RETURN_TO_STANDBY,
+            "_move_robot_to_standby",
+        )
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -3289,6 +4480,10 @@ class SimulationService:
         _, yield_cell_id, (_, yield_row, yield_col) = max(candidates, key=lambda item: (item[0], item[1]))
         previous_cell = robot["currentCellId"]
         target_cell = robot.get("targetCellId")
+        if not self._physical_movement_ready(runtime, robot, yield_cell_id, 1.0):
+            return False
+        motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         occupied_cells.discard(previous_cell)
         occupied_cells.add(yield_cell_id)
         reserved_targets.add(yield_cell_id)
@@ -3310,6 +4505,14 @@ class SimulationService:
                 robot.get("targetLayer", 1),
                 stop_adjacent=bool(task and task.get("phase") == "pickup_from_ctu"),
             )
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.YIELD,
+            "_yield_ctu",
+        )
+        self._observe_deadlock_mitigation(runtime, robot, "YIELD", "adjacent_free_cell")
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -3337,6 +4540,8 @@ class SimulationService:
                 carried = dict(slot)
                 if line.get("qty") is not None:
                     carried["qty"] = int(line["qty"])
+                if line.get("orderLineId") not in (None, ""):
+                    carried["orderLineId"] = str(line["orderLineId"])
                 robot.setdefault("carrying", []).append(carried)
                 del inventory[index]
                 runtime.inventory_delta.append({"op": "remove", "nodeId": node_id, "layer": layer})
@@ -3571,6 +4776,473 @@ class SimulationService:
             self._spawn_picking_box_tasks(runtime, robot, task, zone, occupied_cells)
         else:
             self._complete_task(runtime, robot, task, occupied_cells)
+
+    def _send_empty_pallet_to_stack(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        target: dict[str, Any],
+    ) -> bool:
+        """机械臂取走货物后托盘变空：四向车带着空托盘直接送到 (76,35) 堆叠。
+
+        空托盘只产生于交接处（货物被机械臂搬上输送线之后），不会回库位，
+        因此不新建「去货位取托盘」的路段，而是把托盘当作车载物直接开往目标格。
+        """
+        tick = int(runtime.state["tick"])
+        if not self._robot_path_to(runtime, robot, EMPTY_PALLET_RETURN_CELL_ID, 1):
+            self._record_event(
+                runtime,
+                tick,
+                "empty_pallet_unreachable",
+                {"taskId": task["id"], "robotId": robot["id"], "cellId": EMPTY_PALLET_RETURN_CELL_ID},
+            )
+            return False
+        return_task = self._build_task(
+            runtime.topology,
+            f"task-empty-pallet-{task['id']}-{tick}",
+            "shuttle",
+            "cross_zone",
+            [{"cellId": str(target.get("handoffCellId") or ""), "layer": 1}],
+            EMPTY_PALLET_RETURN_CELL_ID,
+            False,
+            3,
+            created_tick=tick,
+        )
+        return_task["taskKind"] = EMPTY_PALLET_TASK_KIND
+        return_task["status"] = "in_progress"
+        return_task["startedTick"] = tick
+        return_task["phase"] = "delivery_empty_pallet"
+        return_task["phaseLabel"] = "回收空托盘"
+        return_task["etaTicks"] = max(len(robot.get("path") or []) - 1, 1)
+        return_task["assignedRobotId"] = robot["id"]
+        return_task["palletSourceCellId"] = str(task.get("palletSourceCellId") or "")
+        return_task["palletSourceLayer"] = int(task.get("palletSourceLayer") or 1)
+        runtime.state["tasks"].append(return_task)
+
+        # 原订单任务转由输送线独立推进，四向车腾出来专门运空托盘。
+        task["assignedRobotId"] = None
+        robot["currentTaskId"] = return_task["id"]
+        robot["carrying"] = [{
+            "cellId": return_task["palletSourceCellId"],
+            "layer": return_task["palletSourceLayer"],
+            "kind": "empty_pallet",
+        }]
+        robot["load"] = 1
+        robot["handlingAction"] = None
+        robot["waitTicks"] = 0
+        robot["returningToStandby"] = False
+        robot["status"] = "moving"
+        robot["phaseLabel"] = "回收空托盘"
+        self._record_event(
+            runtime,
+            tick,
+            "empty_pallet_carry",
+            {
+                "taskId": return_task["id"],
+                "robotId": robot["id"],
+                "cellId": return_task["palletSourceCellId"],
+                "layer": return_task["palletSourceLayer"],
+            },
+        )
+        return True
+
+    def _deliver_empty_pallet(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[str] | None = None) -> None:
+        """空托盘送达 (76,35)：堆积计数（最多 6 层），满层时触发 shuttle 搬往 (74,47) 入主线。"""
+        tick = runtime.state["tick"]
+        stack = runtime.state.setdefault("emptyPalletStack", {})
+        count = int(stack.get("count") or 0)
+        source_cell = str(task.get("palletSourceCellId") or "")
+        source_layer = int(task.get("palletSourceLayer") or 1)
+        # 存来源信息：后续 reposition 任务需要知道搬的是哪一层。
+        stack.setdefault("stacks", []).append({
+            "sourceCellId": source_cell,
+            "sourceLayer": source_layer,
+        })
+        if count < EMPTY_PALLET_STACK_CAPACITY:
+            stack["count"] = count + 1
+        else:
+            stack["overflow"] = int(stack.get("overflow") or 0) + 1
+        task["palletReturnedTick"] = tick
+        self._record_event(
+            runtime,
+            tick,
+            "empty_pallet_returned",
+            {
+                "taskId": task["id"],
+                "cellId": source_cell,
+                "layer": source_layer,
+                "stackCount": int(stack.get("count") or 0),
+                "overflow": int(stack.get("overflow") or 0),
+            },
+        )
+        # 满层触发 reposition：搬一个托盘到 (74,47) 新机械臂入主线点。
+        if int(stack.get("count") or 0) >= EMPTY_PALLET_STACK_CAPACITY:
+            self._spawn_pallet_reposition(runtime)
+        robot["carrying"] = []
+        robot["load"] = 0
+        self._complete_task(runtime, robot, task, occupied_cells)
+
+    def _spawn_pallet_reposition(self, runtime: RunRuntime) -> None:
+        """(76,35) 满层时，分配空闲 shuttle 搬 1 层到 (74,47)。
+
+        单一事实来源：只在此处生成 reposition 任务（不做轮询扫描补偿）。
+        去重键 = 固定源/目标 + taskKind，防止满层后又触发同一搬运循环。
+
+        count 不在此处减——留给 reposition 任务真正送达 (74,47) 时再减，
+        这样 overflow 计数能正确反映"堆叠点实际满层但 reposition 还没拉走"的积压。
+        """
+        stack = runtime.state.get("emptyPalletStack") or {}
+        stacks = stack.get("stacks") or []
+        if not stacks:
+            return
+        # 去重：已有同 source/dest 的在途任务则不再生成。
+        for t in runtime.state.get("tasks", []):
+            if (
+                t.get("taskKind") == EMPTY_PALLET_COLLECT_TASK_KIND
+                and t.get("status") in {"pending", "in_progress"}
+            ):
+                return
+        robot = next(
+            (
+                r for r in runtime.state.get("robots", [])
+                if r.get("type") == "shuttle" and r.get("status") == "idle" and not r.get("currentTaskId")
+            ),
+            None,
+        )
+        if robot is None:
+            return
+        tick = int(runtime.state["tick"])
+        tray = stacks.pop(0)  # 最早堆叠的先搬（FIFO）；count 暂不减，等 reposition 完成时再扣
+        # 规划 shuttle 路径：从当前位置 → (76,35) → (74,47)。
+        # 先让 robot 走到 (76,35) pickup，再到 (74,47) dropoff。
+        pickup_cell = EMPTY_PALLET_RETURN_CELL_ID
+        if not self._robot_path_to(runtime, robot, pickup_cell, 1):
+            # 暂时拿不到路径，把 tray 放回去等下次 tick 重入。
+            stacks.insert(0, tray)
+            return
+        repo = runtime.topology
+        reposition = self._build_task(
+            repo,
+            f"task-pallet-reposition-{tick}-{tray.get('sourceCellId','').replace('cell-','').replace('-','_')}",
+            "shuttle",
+            "cross_zone",
+            [{"cellId": pickup_cell, "layer": 1, "sourceCellId": tray.get("sourceCellId"), "sourceLayer": tray.get("sourceLayer")}],
+            EMPTY_PALLET_COLLECT_CELL_ID,
+            False,
+            3,
+            created_tick=tick,
+        )
+        reposition["taskKind"] = EMPTY_PALLET_COLLECT_TASK_KIND
+        reposition["status"] = "in_progress"
+        reposition["startedTick"] = tick
+        reposition["phase"] = "pallet_pickup_from_stack"
+        reposition["phaseLabel"] = "搬空托盘到主线"
+        reposition["assignedRobotId"] = robot["id"]
+        reposition["palletSourceCellId"] = tray.get("sourceCellId")
+        reposition["palletSourceLayer"] = tray.get("sourceLayer")
+        reposition["etaTicks"] = max(len(robot.get("path") or []) + self._shuttle_path_len(runtime, EMPTY_PALLET_COLLECT_CELL_ID) - 1, 1)
+        robot["currentTaskId"] = reposition["id"]
+        robot["status"] = "moving"
+        robot["phaseLabel"] = reposition["phaseLabel"]
+        runtime.state["tasks"].append(reposition)
+        self._record_event(
+            runtime, tick, "pallet_reposition_started",
+            {"taskId": reposition["id"], "robotId": robot["id"], "traySource": tray},
+        )
+
+    def _shuttle_path_len(self, runtime: RunRuntime, cell_id: str) -> int:
+        """reposition eta 兜底：从 (76,35) 到 (74,47) 地面走约 3 格。"""
+        return 3
+
+    # ---- picking-arm-02：空托盘入主线 ---------------------------------
+    # picking-arm-02（row 78, col 47）从 (74,47) 取空托盘 → 放到 (84,58) 上层输送主干入口。
+    # 简化状态机：pick → place 两阶段计时，place 完托盘加入 palletConveyorItems 沿上层输送线
+    # 滑向 5 个出货口帽口（row 102/106/110/114/118, col 62）。
+
+    # 5 个出货口帽口 row（col 都是 62）。托盘按 FIFO 轮询分配。
+    PALLET_PORT_ROWS = [102, 106, 110, 114, 118]
+    PALLET_CONVEYOR_SPEED_TICKS = 3  # 每段输送（2 格）走 3 tick，与现有 delivery 节拍接近
+    PALLET_DOCK_MAX_LAYERS = 3  # 帽口处最多堆 3 层空托盘
+
+    def _start_pallet_arm_handoff(
+        self, runtime: RunRuntime, task: dict[str, Any]
+    ) -> None:
+        """shuttle 到达 (74,47) 后，触发 picking-arm-02 取托盘 → 放到 (84,58) 上层输送。
+
+        如果机械臂正在忙，托盘在 (74,47) 入口等待（堆叠计数）；但 reposition 任务已经完成，
+        shuttle 可以去接新活。托盘输送完全由机械臂计时 + palletConveyorItems 推进。
+        """
+        tick = int(runtime.state["tick"])
+        arm_state = runtime.state.setdefault("palletArm", {
+            "armId": "picking-arm-02",
+            "status": "idle",
+            "stage": None,
+            "remainingTicks": 0,
+            "pendingQueue": [],  # 等待机械臂空闲的托盘
+        })
+        # 如果机械臂正在忙，托盘排队等
+        if arm_state.get("status") != "idle":
+            arm_state.setdefault("pendingQueue", []).append({
+                "taskId": task.get("id"),
+                "acceptedTick": tick,
+            })
+            self._record_event(
+                runtime, tick, "pallet_arm_queue",
+                {"taskId": task["id"], "queueSize": len(arm_state.get("pendingQueue", []))},
+            )
+            return
+        # 启动 pick 阶段
+        arm_state["status"] = "busy"
+        arm_state["stage"] = "pick"
+        arm_state["remainingTicks"] = ARM_HANDOFF_PICK_TICKS
+        arm_state["taskId"] = task.get("id")
+        arm_state["cargo"] = {"kind": "empty_pallet", "acceptedTick": tick}
+        self._record_event(
+            runtime, tick, "pallet_arm_pick_start",
+            {"taskId": task["id"], "armId": arm_state.get("armId")},
+        )
+
+    def _advance_pallet_arm(self, runtime: RunRuntime) -> None:
+        """每个 tick 推进 picking-arm-02 的 pick→place 计时。place 完托盘入输送线。"""
+        arm_state = runtime.state.get("palletArm")
+        if not arm_state or arm_state.get("status") != "busy":
+            return
+        tick = int(runtime.state["tick"])
+        remaining = int(arm_state.get("remainingTicks", 0)) - 1
+        arm_state["remainingTicks"] = max(0, remaining)
+        if remaining > 0:
+            return
+        stage = arm_state.get("stage")
+        if stage == "pick":
+            # pick 完 → place 到 dropoff
+            arm_state["stage"] = "place"
+            arm_state["remainingTicks"] = ARM_HANDOFF_PLACE_TICKS
+            self._record_event(
+                runtime, tick, "pallet_arm_place_start",
+                {"taskId": arm_state.get("taskId"), "armId": arm_state.get("armId")},
+            )
+            return
+        if stage == "place":
+            # place 完 → 创建 pallet conveyor item
+            self._spawn_pallet_conveyor_item(runtime, arm_state)
+            # 重置 arm 状态
+            arm_state["status"] = "idle"
+            arm_state["stage"] = None
+            arm_state["remainingTicks"] = 0
+            arm_state["taskId"] = None
+            arm_state["cargo"] = None
+            # 处理排队
+            pending = arm_state.get("pendingQueue") or []
+            if pending:
+                next_task = pending.pop(0)
+                self._record_event(
+                    runtime, tick, "pallet_arm_dequeue",
+                    {"taskId": next_task.get("taskId")},
+                )
+                # 直接启动下一个 pick
+                arm_state["status"] = "busy"
+                arm_state["stage"] = "pick"
+                arm_state["remainingTicks"] = ARM_HANDOFF_PICK_TICKS
+                arm_state["taskId"] = next_task.get("taskId")
+                arm_state["cargo"] = {"kind": "empty_pallet", "acceptedTick": tick}
+
+    def _spawn_pallet_conveyor_item(self, runtime: RunRuntime, arm_state: dict[str, Any]) -> None:
+        """机械臂 place 完成 → 在 dropoff 点 (row 84, col 58) 生成一个 pallet conveyor item。
+
+        路径简化：从 dropoff node（upper）沿 col 60 upper 主干向南滑到目标帽口。
+        每个 item 有 row/col 位置，每 PALLET_CONVEYOR_SPEED_TICKS tick 向南移动 2 格（一个模块），
+        到目标帽口 col 62 后停留并被接收进 palletDocks。
+        """
+        tick = int(runtime.state["tick"])
+        docks = runtime.state.setdefault("palletDocks", {})
+        # FIFO 轮询分配帽口：按 dock count 最小的优先（最简单是 round-robin）
+        assigned_row = self.PALLET_PORT_ROWS[0]
+        for r in self.PALLET_PORT_ROWS:
+            dock = docks.get(str(r)) or {"count": 0}
+            if int(dock.get("count") or 0) < self.PALLET_DOCK_MAX_LAYERS:
+                assigned_row = r
+                break
+        item = {
+            "id": f"pallet-cv-{tick}-{arm_state.get('taskId','').replace('task-','')}",
+            "kind": "empty_pallet",
+            "currentRow": 84,
+            "currentCol": 58,
+            "deck": "upper",
+            "targetRow": assigned_row,
+            "targetCol": 62,
+            "speedTicks": self.PALLET_CONVEYOR_SPEED_TICKS,
+            "tickCounter": 0,
+            "acceptedTick": tick,
+            "status": "moving",
+        }
+        runtime.state.setdefault("palletConveyorItems", []).append(item)
+        self._record_event(
+            runtime, tick, "pallet_conveyor_spawned",
+            {"palletId": item["id"], "targetRow": assigned_row, "targetCol": 62},
+        )
+
+    def _advance_pallet_conveyor(self, runtime: RunRuntime) -> None:
+        """每个 tick 推进 palletConveyorItems：从 dropoff 向南滑向目标帽口，到点后入 palletDocks。"""
+        items = runtime.state.get("palletConveyorItems") or []
+        tick = int(runtime.state["tick"])
+        for item in items:
+            if item.get("status") != "moving":
+                continue
+            item["tickCounter"] = int(item.get("tickCounter", 0)) + 1
+            if int(item.get("tickCounter", 0)) < int(item.get("speedTicks", 0)):
+                continue
+            item["tickCounter"] = 0
+            cur_row = int(item["currentRow"])
+            cur_col = int(item["currentCol"])
+            target_row = int(item["targetRow"])
+            target_col = int(item["targetCol"])
+            # 还在主干上：沿 col 60 向南走（从 84:58 → 84:60 主干 → 向南逐段到 target_row）
+            if cur_row < target_row:
+                # 2 格一段（2×2 模块）
+                next_row = cur_row + 2
+                if next_row > target_row:
+                    next_row = target_row
+                item["currentRow"] = next_row
+                # 主干切换：从 col 58 到主干 col 60（只走一段就转 90 度向东）
+                if cur_col == 58 and next_row >= 86:
+                    item["currentCol"] = 60
+                self._record_event(
+                    runtime, tick, "pallet_conveyor_moved",
+                    {"palletId": item["id"], "row": next_row, "col": item["currentCol"]},
+                )
+                continue
+            if cur_row == target_row and cur_col < target_col:
+                # 到达目标 row，向东转向帽口 col 62
+                next_col = cur_col + 2
+                if next_col > target_col:
+                    next_col = target_col
+                item["currentCol"] = next_col
+                self._record_event(
+                    runtime, tick, "pallet_conveyor_moved",
+                    {"palletId": item["id"], "row": cur_row, "col": next_col},
+                )
+                continue
+            if cur_row == target_row and cur_col == target_col:
+                # 到达帽口：入 palletDocks
+                docks = runtime.state.setdefault("palletDocks", {})
+                dock = docks.setdefault(str(target_row), {"count": 0, "availableEmpty": 0})
+                dock["count"] = int(dock.get("count") or 0) + 1
+                dock["availableEmpty"] = int(dock.get("availableEmpty") or 0) + 1
+                item["status"] = "delivered"
+                self._record_event(
+                    runtime, tick, "pallet_dock_arrived",
+                    {"palletId": item["id"], "portRow": target_row, "portCol": target_col,
+                     "dockCount": dock["count"], "availableEmpty": dock["availableEmpty"]},
+                )
+        # 清理已送达的 item
+        runtime.state["palletConveyorItems"] = [
+            it for it in items if it.get("status") == "moving"
+        ]
+
+
+    def _send_pallet_back_to_lane(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        target: dict[str, Any],
+    ) -> bool:
+        """托盘上还有余货：余货随托盘回到原货位，不能留在车上回待命位。"""
+        extras = task.get("palletExtraBoxes") or []
+        source_cell = str(task.get("palletSourceCellId") or "")
+        source_layer = int(task.get("palletSourceLayer") or 1)
+        if not extras or not source_cell:
+            return False
+        tick = int(runtime.state["tick"])
+        if not self._robot_path_to(runtime, robot, source_cell, source_layer):
+            self._record_event(
+                runtime,
+                tick,
+                "pallet_return_unreachable",
+                {"taskId": task["id"], "robotId": robot["id"], "cellId": source_cell},
+            )
+            return False
+        return_task = self._build_task(
+            runtime.topology,
+            f"task-return-pallet-{task['id']}-{tick}",
+            "shuttle",
+            "cross_zone",
+            [{"cellId": str(target.get("handoffCellId") or ""), "layer": 1}],
+            source_cell,
+            False,
+            3,
+            created_tick=tick,
+        )
+        return_task["taskKind"] = PALLET_RETURN_TASK_KIND
+        return_task["status"] = "in_progress"
+        return_task["startedTick"] = tick
+        return_task["phase"] = "return_pallet_to_lane"
+        return_task["phaseLabel"] = "余货随托盘回库"
+        return_task["etaTicks"] = max(len(robot.get("path") or []) - 1, 1)
+        return_task["assignedRobotId"] = robot["id"]
+        return_task["palletSourceCellId"] = source_cell
+        return_task["palletSourceLayer"] = source_layer
+        return_task["palletExtraBoxes"] = [dict(box) for box in extras]
+        # 回库终点是原货位的原层：同步任务目标，避免界面显示成「同层任务」却在坐升降机。
+        return_task["targetCellId"] = source_cell
+        return_task["targetLayer"] = source_layer
+        runtime.state["tasks"].append(return_task)
+
+        # 原订单任务转由输送线独立推进，四向车腾出来把余货送回货位。
+        task["assignedRobotId"] = None
+        robot["currentTaskId"] = return_task["id"]
+        robot["carrying"] = [{**box, "kind": "pallet_goods"} for box in extras]
+        # 载货单元是「1 个托盘」，余箱数由 carrying 表达，避免 load/capacity 出现 3/1。
+        robot["load"] = 1
+        robot["handlingAction"] = None
+        robot["waitTicks"] = 0
+        robot["returningToStandby"] = False
+        robot["status"] = "moving"
+        robot["phaseLabel"] = "余货随托盘回库"
+        self._record_event(
+            runtime,
+            tick,
+            "pallet_return_started",
+            {
+                "taskId": return_task["id"],
+                "robotId": robot["id"],
+                "cellId": source_cell,
+                "layer": source_layer,
+                "extraBoxes": len(extras),
+            },
+        )
+        return True
+
+    def _deliver_pallet_back(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[str] | None = None) -> None:
+        """托盘回到原货位：把余货写回库存，托盘留在货位里。"""
+        tick = runtime.state["tick"]
+        cell_id = str(task.get("palletSourceCellId") or task.get("deliveryCellId") or "")
+        layer = int(task.get("palletSourceLayer") or 1)
+        inventory = runtime.state.setdefault("inventory", [])
+        restored = 0
+        for box in task.get("palletExtraBoxes") or robot.get("carrying") or []:
+            if cell_id and not any(
+                str(item.get("cellId")) == cell_id
+                and int(item.get("layer", 1)) == layer
+                and int(item.get("depth", 1)) == int(box.get("depth", 1))
+                for item in inventory
+            ):
+                record = {key: value for key, value in box.items() if key != "kind"}
+                record["cellId"] = cell_id
+                record["layer"] = layer
+                inventory.append(record)
+                restored += 1
+        task["palletRestoredTick"] = tick
+        self._record_event(
+            runtime,
+            tick,
+            "pallet_returned_to_lane",
+            {"taskId": task["id"], "cellId": cell_id, "layer": layer, "restored": restored},
+        )
+        robot["carrying"] = []
+        robot["load"] = 0
+        self._complete_task(runtime, robot, task, occupied_cells)
 
     def _complete_shuttle_relocate(
         self,
@@ -4005,6 +5677,7 @@ class SimulationService:
             "completedTick": None,
             "urgent": bool(parent_task.get("urgent")),
             "orderId": parent_task.get("orderId"),
+            "orderLineId": parent_task.get("orderLineId"),
         }
         child_task["pendingTransport"] = {
             "phase": "arm_conveyor_delivery",
@@ -4081,6 +5754,7 @@ class SimulationService:
                 "completedTick": None,
                 "urgent": bool(task.get("urgent")),
                 "orderId": task.get("orderId"),
+                "orderLineId": slot.get("orderLineId") or task.get("orderLineId"),
             }
             self._prepare_conveyor_transport(runtime, child, "conveyor_to_lift")
             transport = child.get("conveyorTransport")
@@ -4349,8 +6023,53 @@ class SimulationService:
     def _spawn_picking_return(self, runtime: RunRuntime, task: dict[str, Any]) -> None:
         """创建回库子任务：沿拣货台北侧回库支线滑回回库口，等待 CTU 取回并送回原库位。"""
         station_block = task.get("stationBlockId")
+        child_id = f"{task['id']}-return"
+        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
+            return
+        slot = (task.get("transitGoods") or [{}])[0]
         if not station_block:
-            return  # 旧拓扑没有回库支线：跳过回库子任务（任务链仍可完成）
+            # Legacy/non-explicit fixtures have no compiled branch identity.
+            # Preserve inventory conservation by exposing the box directly at
+            # the configured port for CTU pickup instead of silently dropping it.
+            tick = int(runtime.state["tick"])
+            child = {
+                "id": child_id,
+                "parentId": task["id"],
+                "taskKind": "picking_return",
+                "robotType": "none",
+                "status": "assigned",
+                "phase": "pickup_from_port",
+                "phaseLabel": self._phase_label("pickup_from_port"),
+                "lines": [dict(slot)],
+                "transitGoods": [dict(slot)],
+                "placedGoods": [],
+                "deliveredGoods": [],
+                "picked": 0,
+                "history": [{"tick": tick, "phase": "pickup_from_port", "status": "assigned"}],
+                "pickStationCellId": task.get("pickStationCellId"),
+                "assignedPortId": task.get("assignedPortId"),
+                "deliveryCellId": task.get("deliveryCellId"),
+                "createdTick": tick,
+                "startedTick": tick,
+                "completedTick": None,
+                "urgent": bool(task.get("urgent")),
+                "orderId": task.get("orderId"),
+                "orderLineId": slot.get("orderLineId") or task.get("orderLineId"),
+                "legacyReturnFallback": True,
+            }
+            runtime.state.setdefault("tasks", []).append(child)
+            self._record_event(
+                runtime,
+                tick,
+                "task_spawned",
+                {
+                    "taskId": child_id,
+                    "parentId": task["id"],
+                    "taskKind": "picking_return",
+                    "legacyReturnFallback": True,
+                },
+            )
+            return
         branch = route_from_block_branch(
             runtime.conveyor_graph,
             str(station_block),
@@ -4371,10 +6090,6 @@ class SimulationService:
             or int(last_parts[1]) >= int(parts[1])
         ):
             return
-        child_id = f"{task['id']}-return"
-        if any(t.get("id") == child_id for t in runtime.state.get("tasks", [])):
-            return
-        slot = (task.get("transitGoods") or [{}])[0]
         child: dict[str, Any] = {
             "id": child_id,
             "parentId": task["id"],
@@ -4572,7 +6287,9 @@ class SimulationService:
             # 拣货分裂的 fwd/回库子任务与拣货链路同线同速（1 块/tick），
             # 不走机械臂带面的固定慢速；dock 机械臂线保持原带速。
             seconds_per_block = ARM_CONVEYOR_BLOCK_DISTANCE / ARM_CONVEYOR_VISUAL_SPEED
-            progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._tick_delay(runtime)
+            # Conveyor physics advances on logical simulation time. Playback
+            # multiplier only changes wall-clock pacing of the outer loop.
+            progress_seconds = float(transport.get("travelProgressSeconds", 0.0)) + self._sim_tick_seconds(runtime)
             if progress_seconds + 1e-9 < seconds_per_block:
                 transport["travelProgressSeconds"] = progress_seconds
                 return False
@@ -4968,8 +6685,13 @@ class SimulationService:
             robot["returningToStandby"] = False
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
-        if not cancelled and not task.get("parentId"):
+        if (
+            not cancelled
+            and not task.get("parentId")
+            and task.get("taskKind") not in {EMPTY_PALLET_TASK_KIND, PALLET_RETURN_TASK_KIND}
+        ):
             # 子任务（拣货分裂）不重复累加指标：父任务完成时已计一次。
+            # 空托盘回收 / 余货随托盘回库属内部维护任务，不计入订单吞吐。
             runtime.metrics["completedTasks"] += 1
             runtime.metrics["throughput"] += 1
             if task.get("urgent"):
@@ -5079,24 +6801,117 @@ class SimulationService:
             line = (task.get("lines") or [{}])[0]
             if line.get("depth") is not None:
                 inventory = runtime.state.setdefault("inventory", [])
-                for index, item in enumerate(inventory):
-                    if (
-                        item.get("cellId") == line.get("cellId")
+                target_index = next(
+                    (
+                        index
+                        for index, item in enumerate(inventory)
+                        if item.get("cellId") == line.get("cellId")
                         and int(item.get("layer", 1)) == int(line.get("layer", 1))
                         and int(item.get("depth", 1)) == int(line["depth"])
-                    ):
-                        inventory.pop(index)
-                        break
+                    ),
+                    None,
+                )
+                if target_index is None:
+                    # 托盘已被同一货位的另一趟整托盘取货带走：等它回库后再取，
+                    # 不能凭空造出一个不存在的箱子。
+                    robot["status"] = "waiting"
+                    robot["phaseLabel"] = "等待同货位托盘回库"
+                    return
+                inventory.pop(target_index)
+                # 一货位一托盘：整托盘随车抬出。货位还有余箱时一并抬走，
+                # 机械臂只取订单要的那箱，其余随托盘回到原货位。
+                remaining = any(
+                    str(item.get("cellId")) == str(line.get("cellId"))
+                    and int(item.get("layer", 1)) == int(line.get("layer", 1))
+                    for item in inventory
+                )
+                if not remaining and not task.get("parentId") and task.get("taskKind") != "relocate":
+                    task["palletBecomesEmpty"] = True
+                    task["palletSourceCellId"] = str(line.get("cellId"))
+                    task["palletSourceLayer"] = int(line.get("layer", 1))
+                elif remaining and task.get("taskKind") != "relocate":
+                    lifted: list[dict[str, Any]] = []
+                    for item in list(inventory):
+                        if (
+                            str(item.get("cellId")) == str(line.get("cellId"))
+                            and int(item.get("layer", 1)) == int(line.get("layer", 1))
+                        ):
+                            lifted.append(dict(item))
+                            inventory.remove(item)
+                    if lifted:
+                        task["palletExtraBoxes"] = lifted
+                        task["palletSourceCellId"] = str(line.get("cellId"))
+                        task["palletSourceLayer"] = int(line.get("layer", 1))
             robot["load"] = min(robot.get("capacity", 1), robot.get("load", 0) + 1)
             task["picked"] = task.get("picked", 0) + 1
             # 记录车载货箱，交付动作才能把实载数据写进 deliveredGoods（前端按它渲染交付货箱）。
             robot["carrying"] = [dict(line_item) for line_item in (task.get("lines") or [])]
+            for box in task.get("palletExtraBoxes") or []:
+                robot["carrying"].append({**box, "kind": "pallet_goods"})
             # 倒库任务交付到库内目标货道（其层随目标货道）；出货任务交付到地面线（L1）。
             delivery_layer = int(task.get("targetLayer", 1)) if task.get("taskKind") == "relocate" else 1
             if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=delivery_layer):
                 task["phaseLabel"] = "倒库移位" if task.get("taskKind") == "relocate" else "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
+            return
+
+        if task["phase"] == "delivery_empty_pallet":
+            # 空托盘到达 (76,35)：堆到地面输送线上并计数，不进入拣货链路。
+            self._deliver_empty_pallet(runtime, robot, task, occupied_cells)
+            return
+
+        if task["phase"] == "pallet_pickup_from_stack":
+            """shuttle 到达 (76,35) → 从堆叠点取一个空托盘 → 再去 (74,47) 入主线点。
+
+            _spawn_pallet_reposition 已经让 shuttle 载着 path 到了这里；
+            现在"取托盘"只是一个逻辑动作（堆叠计数已预减），车载 carrying 标记一下。
+            """
+            robot["carrying"] = [{
+                "kind": "empty_pallet",
+                "sourceCellId": task.get("palletSourceCellId"),
+                "sourceLayer": int(task.get("palletSourceLayer") or 1),
+            }]
+            robot["load"] = 1
+            self._record_event(
+                runtime, tick, "pallet_picked_from_stack",
+                {"taskId": task["id"], "robotId": robot["id"]},
+            )
+            if self._robot_path_to(runtime, robot, EMPTY_PALLET_COLLECT_CELL_ID, 1):
+                task["phase"] = "delivery_to_collect"
+                task["phaseLabel"] = "送到机械臂入主线点"
+                task["etaTicks"] = max(len(robot.get("path") or []) - 1, 1)
+                robot["status"] = "moving"
+                robot["phaseLabel"] = task["phaseLabel"]
+                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+            else:
+                task["phaseLabel"] = "等待路径到入主线点"
+                robot["status"] = "waiting"
+            return
+
+        if task["phase"] == "delivery_to_collect":
+            """shuttle 到达 (74,47) → 把托盘交给 picking-arm-02 → 完成 reposition 任务。
+
+            在这里才真正从堆叠计数扣减（_spawn_pallet_reposition 里 pop tray 但不减 count，
+            让 overflow 能正确反映"堆叠点仍然满层"的积压）。
+            """
+            stack = runtime.state.setdefault("emptyPalletStack", {})
+            stack["count"] = max(0, int(stack.get("count") or 0) - 1)
+            self._record_event(
+                runtime, tick, "pallet_delivered_to_collect",
+                {"taskId": task["id"], "robotId": robot["id"], "cellId": EMPTY_PALLET_COLLECT_CELL_ID,
+                 "stackCount": stack["count"]},
+            )
+            # 触发机械臂-02：从 (74,47) 取托盘 → 放到 (84,58) 上层输送入口
+            self._start_pallet_arm_handoff(runtime, task)
+            robot["carrying"] = []
+            robot["load"] = 0
+            self._complete_task(runtime, robot, task, occupied_cells)
+            return
+
+        if task["phase"] == "return_pallet_to_lane":
+            # 托盘带余货回到原货位：余货写回库存，托盘留在货位里。
+            self._deliver_pallet_back(runtime, robot, task, occupied_cells)
             return
 
         if task["phase"] == "delivery_to_port":
@@ -5328,6 +7143,15 @@ class SimulationService:
             return
         if parse_cell_id(back) in build_occupied_lookup(runtime.topology):
             return
+        if not self._physical_movement_ready(
+            runtime,
+            robot,
+            back,
+            float(robot.get("currentLayer", 1)),
+        ):
+            return
+        motion_from = self._motion_position(runtime, robot)
+        self._consume_motion_credit(robot)
         robot["lastCellId"] = current
         robot["currentCellId"] = back
         robot["currentNode"] = back
@@ -5340,6 +7164,13 @@ class SimulationService:
         if occupied_cells is not None:
             occupied_cells.discard(current)
             occupied_cells.add(back)
+        self._record_committed_motion(
+            runtime,
+            robot,
+            motion_from,
+            MovementType.BACKOFF,
+            "_step_off_port",
+        )
         self._record_event(
             runtime,
             runtime.state["tick"],
@@ -5353,7 +7184,22 @@ class SimulationService:
         robot: dict[str, Any],
         task: dict[str, Any],
     ) -> None:
-        paths, layers, stages = build_playback_route(task["plan"], TICK_INTERVAL_SECONDS)
+        speed_contract = runtime.config.get("motionSpeedContract")
+        physics_contract = runtime.config.get("motionPhysicsContract")
+        paths, layers, stages = build_playback_route(
+            task["plan"],
+            self._sim_tick_seconds(runtime),
+            lift_speed_meters_per_second=(
+                float(speed_contract["liftSpeedMetersPerSecond"])
+                if isinstance(speed_contract, dict)
+                else None
+            ),
+            shuttle_level_height_meters=(
+                float(physics_contract["shuttleLevelHeightMeters"])
+                if isinstance(physics_contract, dict)
+                else None
+            ),
+        )
         if not paths:
             raise ValueError("Transfer plan contains no playback route")
         robot["path"] = paths
@@ -5367,6 +7213,75 @@ class SimulationService:
         task["phase"] = "moving_to_dropoff"
         task["phaseLabel"] = robot["phaseLabel"]
         task["etaTicks"] = max(1, len(paths) - 1)
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            task.get("id"),
+            paths,
+            layers,
+            "plan",
+            {
+                "planningDurationMs": task["plan"].get("planning_time_ms"),
+                "visitedStateCount": task["plan"].get("visited_states"),
+            },
+        )
+
+    def _record_planning_evidence(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task_id: str | None,
+        path: list[str],
+        layers: list[float | int],
+        kind: str,
+        diagnostic: dict[str, Any],
+    ) -> None:
+        if not isinstance(runtime.config.get("algorithmExperimentContract"), dict):
+            return
+        physics = runtime.config.get("motionPhysicsContract") or {}
+        horizontal = 0.0
+        vertical = 0.0
+        for index in range(1, len(path)):
+            _from_floor, from_row, from_col = parse_cell_id(path[index - 1])
+            _to_floor, to_row, to_col = parse_cell_id(path[index])
+            horizontal += (
+                ((to_row - from_row) ** 2 + (to_col - from_col) ** 2) ** 0.5
+                * float(physics.get("metersPerCell") or 0.0)
+            )
+            vertical += abs(float(layers[index]) - float(layers[index - 1])) * float(
+                physics.get("shuttleLevelHeightMeters") or 0.0
+            )
+        sequence = int(runtime.state.get("planningSequence") or 0) + 1
+        runtime.state["planningSequence"] = sequence
+        generation = int(
+            (runtime.state.get(MOTION_DIAGNOSTICS_NAMESPACE) or {}).get("generation") or 1
+        )
+        plan_id = f"{runtime.run_id}:g{generation}:plan:{sequence}"
+        replan_id = f"{runtime.run_id}:g{generation}:replan:{sequence}" if kind == "replan" else None
+        experiment = runtime.config["algorithmExperimentContract"]
+        record = {
+            "planId": plan_id,
+            "replanId": replan_id,
+            "planKind": kind,
+            "algorithm": runtime.config.get("pathPolicy", "astar"),
+            "algorithmVersion": experiment.get("algorithmVersion"),
+            "plannedPath": [
+                {"cellId": cell, "layer": float(layers[index])}
+                for index, cell in enumerate(path)
+            ],
+            "plannedDistanceMeters": round(horizontal, 9),
+            "plannedVerticalMeters": round(vertical, 9),
+            "planningDurationMs": diagnostic.get("planningDurationMs"),
+            "visitedStateCount": diagnostic.get("visitedStateCount"),
+            "taskId": task_id,
+            "robotId": robot.get("id"),
+            "generation": generation,
+            "topologyRevision": experiment.get("topologyRevision"),
+            "tick": int(runtime.state.get("tick") or 0),
+        }
+        runtime.state.setdefault("planningEvidence", []).append(record)
+        robot["activePlanId"] = plan_id
+        robot["activeReplanId"] = replan_id
 
     def _robot_path_to(
         self,
@@ -5377,8 +7292,11 @@ class SimulationService:
         *,
         extra_blocked: set[tuple[str, int, int]] | None = None,
         stop_adjacent: bool = False,
+        task_id: str | None = None,
+        evidence_kind: str = "plan",
     ) -> bool:
         """计算并写入 robot 的 path/pathLayers/target；CTU 走自由网格寻路，四向车走巷道+电梯寻路。"""
+        diagnostic: dict[str, Any] = {}
         if robot["type"] == "shuttle":
             layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
             path3d = shortest_path_shuttle(
@@ -5388,6 +7306,7 @@ class SimulationService:
                 target_cell_id,
                 layer,
                 runtime.config["pathPolicy"],
+                evidence=diagnostic,
             )
             if not path3d:
                 return False
@@ -5407,6 +7326,7 @@ class SimulationService:
                 runtime.config["pathPolicy"],
                 avoid_storage=True,
                 extra_blocked=extra_blocked,
+                evidence=diagnostic,
             )
             if not path_cells:
                 return False
@@ -5416,6 +7336,15 @@ class SimulationService:
             robot["pathLayers"] = [1] * len(robot["path"])
             robot["targetLayer"] = max(1, min(CTU_RACK_LAYERS, int(target_layer or 1)))
         robot["targetCellId"] = target_cell_id
+        self._record_planning_evidence(
+            runtime,
+            robot,
+            task_id or robot.get("currentTaskId"),
+            list(robot["path"]),
+            list(robot.get("pathLayers") or [1] * len(robot["path"])),
+            evidence_kind,
+            diagnostic,
+        )
         return True
 
     def _set_robot_leg(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], phase: str, target_cell_id: str | None, target_layer: int | None = None) -> bool:
@@ -5428,6 +7357,7 @@ class SimulationService:
             target_cell_id,
             target_layer,
             stop_adjacent=phase in {"pickup_from_ctu", "return_to_storage"},
+            task_id=task.get("id"),
         ):
             self._fail_active_task(runtime, robot, task, f"{phase}_unreachable")
             return False
@@ -5504,7 +7434,10 @@ class SimulationService:
         blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
         completed = [
             task for task in runtime.state["tasks"]
-            if task.get("completedTick") is not None and task.get("startedTick") is not None
+            if task.get("completedTick") is not None
+            and task.get("startedTick") is not None
+            # 空托盘回收是内部维护任务，不计入订单平均耗时。
+            and task.get("taskKind") != EMPTY_PALLET_TASK_KIND
         ]
         completed_durations = [
             int(task["completedTick"]) - int(task["startedTick"]) for task in completed

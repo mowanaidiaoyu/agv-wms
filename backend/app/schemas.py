@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from math import isfinite
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 ZoneType = Literal["ctu", "shuttle", "port", "pick_station", "drop_zone"]
@@ -179,10 +180,135 @@ class ShuttleTransferInput(BaseModel):
         return self
 
 
+class MotionPhysicsContractRequest(BaseModel):
+    """User-defined, unverified distance conversion frozen into one Run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    physicsContractVersion: str = Field(min_length=1)
+    coordinateContractVersion: str = Field(min_length=1)
+    metersPerCell: float
+    shuttleLevelHeightMeters: float
+    floorHeightMeters: float
+    source: Literal["USER_DEFINED_SIMULATION"] = "USER_DEFINED_SIMULATION"
+    calibrationStatus: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+    @field_validator("metersPerCell", "shuttleLevelHeightMeters", "floorHeightMeters", mode="before")
+    @classmethod
+    def validate_positive_finite_number(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite positive number")
+        result = float(value)
+        if not isfinite(result) or result <= 0:
+            raise ValueError("must be a finite positive number")
+        return result
+
+
+class MotionSpeedContractRequest(BaseModel):
+    """User-defined, unverified physical speed contract frozen into one Run."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    speedContractVersion: Literal["motion-speed-v1"]
+    simTickSeconds: float
+    ctuSpeedMetersPerSecond: float
+    shuttleSpeedMetersPerSecond: float
+    liftSpeedMetersPerSecond: float
+    source: Literal["USER_DEFINED_SIMULATION"] = "USER_DEFINED_SIMULATION"
+    calibrationStatus: Literal["UNVERIFIED"] = "UNVERIFIED"
+
+    @field_validator(
+        "simTickSeconds",
+        "ctuSpeedMetersPerSecond",
+        "shuttleSpeedMetersPerSecond",
+        "liftSpeedMetersPerSecond",
+        mode="before",
+    )
+    @classmethod
+    def validate_positive_finite_number(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite positive number")
+        result = float(value)
+        if not isfinite(result) or result <= 0:
+            raise ValueError("must be a finite positive number")
+        return result
+
+
+class ThroughputAwareWeightsRequest(BaseModel):
+    """Frozen, bounded scoring weights for throughput-aware-v1."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    contractVersion: Literal["throughput-aware-v1"] = "throughput-aware-v1"
+    travelTimeWeight: float = Field(default=1.0, ge=0.0, le=10.0)
+    congestionWeight: float = Field(default=0.65, ge=0.0, le=10.0)
+    ageWeight: float = Field(default=0.20, ge=0.0, le=10.0)
+    returnWeight: float = Field(default=0.25, ge=0.0, le=10.0)
+    handlingTicks: float = Field(default=2.0, ge=0.0, le=1_000.0)
+    maxCongestionPenaltyTicks: float = Field(default=30.0, ge=0.0, le=1_000.0)
+    maxAgeBonusTicks: float = Field(default=60.0, ge=0.0, le=1_000.0)
+
+    @field_validator(
+        "travelTimeWeight",
+        "congestionWeight",
+        "ageWeight",
+        "returnWeight",
+        "handlingTicks",
+        "maxCongestionPenaltyTicks",
+        "maxAgeBonusTicks",
+        mode="before",
+    )
+    @classmethod
+    def validate_finite_weight(cls, value: object) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("must be a finite number")
+        result = float(value)
+        if not isfinite(result):
+            raise ValueError("must be a finite number")
+        return result
+
+
+class AlgorithmExperimentContractRequest(BaseModel):
+    """Versioned, reproducible Run experiment selection."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    experimentContractVersion: Literal["algorithm-experiment-v1"]
+    scenarioId: str = Field(min_length=1)
+    scenarioVersion: str = Field(min_length=1)
+    seed: int = Field(ge=0)
+    topologyRevision: str = Field(min_length=1)
+    safetyLimitTicks: int = Field(ge=1, le=100_000)
+    observationTicks: int | None = Field(default=None, ge=1, le=100_000)
+    pathPolicy: Literal["astar", "dijkstra"] = "astar"
+    assignmentPolicy: Literal["greedy", "hungarian", "throughput_aware"] = "greedy"
+    variableDimension: Literal["pathPolicy", "assignmentPolicy"]
+    algorithmVersion: str = Field(min_length=1)
+    throughputAwareWeights: ThroughputAwareWeightsRequest | None = None
+    orderArrivalPlanHash: str | None = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_observation_window(self):
+        if self.observationTicks is not None and self.observationTicks > self.safetyLimitTicks:
+            raise ValueError("observationTicks must not exceed safetyLimitTicks")
+        return self
+
+
 class SimulationStartRequest(BaseModel):
     topologyId: str
     orders: list[SimulationOrderInput] = Field(default_factory=list)
     transfers: list[ShuttleTransferInput] = Field(default_factory=list)
+    motionPhysicsContract: MotionPhysicsContractRequest | None = None
+    motionSpeedContract: MotionSpeedContractRequest | None = None
+    algorithmExperimentContract: AlgorithmExperimentContractRequest | None = None
+
+
+class AlgorithmExperimentCandidateRequest(BaseModel):
+    """Create a paired experiment by changing only the assignment policy."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    assignmentPolicy: Literal["greedy", "hungarian", "throughput_aware"]
 
 
 class ShuttleDockSettingsRequest(BaseModel):

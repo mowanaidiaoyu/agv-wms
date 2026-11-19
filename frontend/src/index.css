@@ -2192,6 +2192,32 @@ select {
   width: 240px;
 }
 
+.topo-name-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 240px;
+}
+
+.topo-name-row input {
+  width: 100%;
+}
+
+.topo-rename-button {
+  padding: 0 9px;
+  height: 32px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  gap: 4px;
+  border-radius: 6px;
+}
+
+.topo-rename-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .topo-record-field select {
   width: 280px;
 }
@@ -3576,11 +3602,333 @@ select {
 /* 仿真工作台：场景为主体，诊断信息按需从右侧打开 */
 .simulation-workbench {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   height: calc(100vh - 82px);
   min-height: 640px;
 }
+
+.simulation-physics-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid rgba(14, 116, 144, 0.16);
+  border-radius: 14px;
+  background: rgba(240, 249, 255, 0.84);
+}
+
+.simulation-speed-heading {
+  flex: 1 0 100%;
+  grid-template-columns: minmax(150px, auto) minmax(280px, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(14, 116, 144, 0.12);
+}
+
+.simulation-physics-heading {
+  display: grid;
+  min-width: 250px;
+}
+
+.simulation-physics-heading strong,
+.simulation-physics-frozen strong {
+  font-size: 0.76rem;
+}
+
+.simulation-physics-heading span,
+.simulation-physics-frozen span {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.simulation-physics-panel > label:not(.simulation-physics-toggle) {
+  display: grid;
+  grid-template-columns: minmax(86px, auto) 74px auto;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+}
+
+.simulation-physics-panel input[type='number'] {
+  width: 74px;
+  min-height: 30px;
+  padding: 4px 6px;
+}
+
+.simulation-physics-panel input:not([type]),
+.simulation-physics-panel select {
+  min-height: 30px;
+  min-width: 110px;
+  padding: 4px 6px;
+}
+
+.simulation-physics-panel small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.simulation-physics-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.simulation-physics-frozen {
+  display: grid;
+  margin-left: auto;
+  min-width: 210px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(14, 116, 144, 0.18);
+}
+
+.simulation-config-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid rgba(14, 116, 144, 0.14);
+  border-radius: 13px;
+  background: linear-gradient(90deg, rgba(240, 249, 255, 0.92), rgba(248, 250, 252, 0.92));
+}
+
+.simulation-config-summary > div {
+  display: grid;
+  gap: 1px;
+  min-width: 116px;
+  padding: 2px 9px;
+  border-right: 1px solid rgba(100, 116, 139, 0.13);
+}
+
+.simulation-config-summary span,
+.simulation-config-summary > small {
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.simulation-config-summary strong {
+  overflow: hidden;
+  color: #164e63;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.simulation-config-summary > small {
+  margin-left: auto;
+}
+
+.simulation-config-summary > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-height: 34px;
+}
+
+.simulation-run-config-drawer {
+  position: fixed;
+  z-index: 50;
+  top: 82px;
+  right: 14px;
+  bottom: 14px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(520px, calc(100vw - 28px));
+  overflow: hidden;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  border-radius: 18px;
+  background: rgba(248, 250, 252, 0.99);
+  box-shadow: 0 28px 80px rgba(2, 6, 23, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(100% + 28px));
+  transition: transform 200ms ease, opacity 180ms ease;
+}
+
+.simulation-run-config-drawer.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.simulation-run-config-header,
+.simulation-run-config-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 15px;
+  border-bottom: 1px solid rgba(100, 116, 139, 0.13);
+}
+
+.simulation-run-config-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.simulation-run-config-header strong { font-size: 0.95rem; }
+.simulation-run-config-header span,
+.simulation-run-config-footer span { color: var(--muted); font-size: 0.68rem; }
+
+.simulation-run-config-header > button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  border-radius: 10px;
+  color: var(--muted);
+  background: #fff;
+}
+
+.simulation-run-config-body {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 0;
+  padding: 15px;
+  overflow-y: auto;
+}
+
+.simulation-config-scope {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(8, 145, 178, 0.18);
+  border-radius: 11px;
+  color: #155e75;
+  background: #ecfeff;
+}
+
+.simulation-config-scope.is-frozen { color: #475569; background: #f1f5f9; border-color: #dbe3eb; }
+.simulation-config-scope b { font-size: 0.72rem; }
+.simulation-config-scope span { font-size: 0.64rem; line-height: 1.5; }
+
+.simulation-config-card {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid rgba(100, 116, 139, 0.15);
+  border-radius: 14px;
+  background: #fff;
+}
+
+.simulation-config-card-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.simulation-config-card-title > span {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 9px;
+  color: #0e7490;
+  background: #ecfeff;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.simulation-config-card-title > div { display: grid; gap: 2px; }
+.simulation-config-card-title strong { font-size: 0.78rem; }
+.simulation-config-card-title small { color: var(--muted); font-size: 0.6rem; }
+
+.simulation-config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #334155;
+  font-size: 0.7rem;
+}
+
+.simulation-config-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.simulation-config-fields label,
+.simulation-config-text-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.simulation-config-fields label > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+}
+
+.simulation-config-fields input,
+.simulation-config-text-field input,
+.simulation-config-text-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid rgba(100, 116, 139, 0.2);
+  border-radius: 9px;
+}
+
+.simulation-config-fields small { white-space: nowrap; font-size: 0.58rem; }
+.simulation-config-contract-note { margin: 0; padding: 8px 9px; border-radius: 8px; color: #52677b; background: #f1f5f9; font-size: 0.63rem; line-height: 1.55; }
+
+.simulation-algorithm-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.simulation-algorithm-fieldset legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.simulation-algorithm-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.simulation-algorithm-cards button {
+  display: grid;
+  gap: 4px;
+  min-height: 62px;
+  padding: 9px 10px;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  border-radius: 11px;
+  color: #334155;
+  background: #f8fafc;
+  text-align: left;
+}
+
+.simulation-algorithm-cards button.active {
+  border-color: rgba(8, 145, 178, 0.45);
+  color: #0e7490;
+  background: #ecfeff;
+  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.08);
+}
+
+.simulation-algorithm-cards b { font-size: 0.72rem; }
+.simulation-algorithm-cards small { color: var(--muted); font-size: 0.6rem; line-height: 1.4; }
+.simulation-run-config-footer { border-top: 1px solid rgba(100, 116, 139, 0.13); border-bottom: 0; }
+.simulation-run-config-footer button { min-height: 36px; }
 
 .simulation-command-bar {
   position: relative;
@@ -3696,6 +4044,80 @@ select {
 .simulation-actions .simulation-speed-control button.active {
   color: #fff;
   background: #0f766e;
+}
+
+.simulation-new-run-button {
+  border: 1px solid rgba(8, 145, 178, 0.34);
+  color: #0e7490;
+  background: rgba(236, 254, 255, 0.92);
+  box-shadow: 0 5px 14px rgba(8, 145, 178, 0.1);
+}
+
+.simulation-new-run-button:hover:not(:disabled) {
+  border-color: rgba(8, 145, 178, 0.52);
+  background: #cffafe;
+}
+
+.simulation-new-run-dialog-backdrop {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.simulation-new-run-dialog {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  width: min(540px, 100%);
+  padding: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.24);
+}
+
+.simulation-new-run-dialog-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 13px;
+  color: #0e7490;
+  background: #ecfeff;
+}
+
+.simulation-new-run-dialog h2 {
+  margin: 0 0 7px;
+  color: #0f172a;
+  font-size: 1rem;
+}
+
+.simulation-new-run-dialog p {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+
+.simulation-new-run-dialog .simulation-new-run-draft-warning {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  color: #9a3412;
+  background: #fff7ed;
+}
+
+.simulation-new-run-dialog-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .simulation-details-button b,
@@ -3985,6 +4407,12 @@ select {
   color: #fff;
   border-color: rgba(249, 115, 22, 0.7);
   background: rgba(249, 115, 22, 0.82);
+}
+
+/* 演示环境不展示：楼层/库存/接驳布局/机械臂预览开关行，以及跨层运输入口 */
+.simulation-floor-switcher,
+.simulation-transfer-tab {
+  display: none;
 }
 
 .simulation-layout-preview-panel {
@@ -4380,9 +4808,8 @@ select {
   z-index: 11;
   top: 10px;
   left: 10px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  width: 306px;
+  display: flex;
+  gap: 4px;
   padding: 4px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 13px;
@@ -4392,12 +4819,13 @@ select {
 
 .simulation-workspace-tabs button {
   min-width: 0;
-  padding: 7px 5px;
+  padding: 7px 12px;
   border: 0;
   border-radius: 9px;
   color: #94a3b8;
   background: transparent;
   font-size: 0.72rem;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -4648,7 +5076,7 @@ select {
 
 .simulation-order-counts {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 5px;
   padding: 8px 9px;
 }
@@ -5001,13 +5429,14 @@ select {
 
 .simulation-order-task-map {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(225px, 100%), 1fr));
   gap: 6px;
   overflow-y: auto;
 }
 
 .simulation-order-task-map button {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(54px, auto) 12px minmax(0, 1fr);
   gap: 6px;
   min-width: 0;
   min-height: 44px;
@@ -5028,6 +5457,44 @@ select {
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+.simulation-order-task-map .simulation-order-task-sequence {
+  max-width: 92px;
+}
+
+.simulation-order-task-map .simulation-order-task-assignment {
+  overflow: hidden;
+}
+
+.simulation-order-task-map .simulation-order-task-destination {
+  display: grid;
+  grid-template-columns: max-content auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  font-family: inherit;
+}
+
+.simulation-order-task-map .simulation-order-task-destination span {
+  display: block;
+  min-width: 0;
+}
+
+.simulation-order-task-map .simulation-order-task-robot {
+  font-family: 'Fira Code', monospace;
+  white-space: nowrap;
+}
+
+.simulation-order-task-map .simulation-order-task-separator {
+  color: #64748b;
+}
+
+.simulation-order-task-map .simulation-order-task-port {
+  overflow: hidden;
+  font-family: Inter, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .simulation-order-task-map button b {
@@ -5221,6 +5688,29 @@ select {
   display: grid;
   gap: 10px;
 }
+
+.simulation-order-run-settings {
+  border: 1px solid rgba(8, 145, 178, 0.16);
+  border-radius: 12px;
+  background: rgba(236, 254, 255, 0.55);
+}
+
+.simulation-order-run-settings summary {
+  padding: 10px 12px;
+  color: #155e75;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.simulation-order-run-settings > div {
+  display: grid;
+  gap: 9px;
+  padding: 0 12px 12px;
+}
+
+.simulation-order-run-settings span { color: var(--muted); font-size: 0.64rem; line-height: 1.55; }
+.simulation-order-run-settings button { min-height: 34px; border: 1px solid rgba(8,145,178,.24); border-radius: 9px; color: #0e7490; background: #fff; }
 
 .simulation-order-composer-body h3 {
   margin: 0;
@@ -6012,6 +6502,16 @@ select {
     order: 3;
     width: 100%;
   }
+
+  .simulation-physics-panel {
+    flex-wrap: wrap;
+  }
+
+  .simulation-physics-frozen {
+    margin-left: 0;
+  }
+
+  .simulation-config-summary > small { display: none; }
 }
 
 @media (max-width: 900px) {
@@ -6041,6 +6541,23 @@ select {
   .simulation-detail-drawer {
     width: calc(100% - 20px);
   }
+
+  .simulation-order-orchestration,
+  .simulation-orders-collapsed .simulation-order-orchestration {
+    right: 10px;
+    left: 10px;
+    width: auto;
+  }
+
+  .simulation-config-summary { overflow-x: auto; }
+  .simulation-config-summary > div { flex: 0 0 112px; }
+  .simulation-config-summary > button { position: sticky; right: 0; background: #fff; }
+  .simulation-run-config-drawer { top: 76px; right: 8px; bottom: 8px; width: min(520px, calc(100vw - 16px)); }
+}
+
+@media (max-width: 600px) {
+  .simulation-config-fields,
+  .simulation-speed-fields { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {

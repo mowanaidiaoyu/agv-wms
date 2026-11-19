@@ -11,3 +11,8 @@ __pycache__/
 
 data/wms.db
 frontend/src/lib/__tmp_demo.json
+
+# pytest 临时数据库与性能测试残留
+backend/tests/.p3-2-*
+backend/tests/*.db
+backend/tests/.conftest_safety_reports/

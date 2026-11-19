@@ -101,7 +101,8 @@ def _minimal_handoff_topology() -> dict:
 
 def test_real_topology_id_and_revision(topology: dict, audit) -> None:
     assert audit.topologyId == "topology-6ceb4920"
-    assert audit.topologyRevision == "2.0.0:1ec8cf4490635105"
+    # 拓扑编辑（新增机械臂等）会推进 revision；断言只校验"与当前正式拓扑一致"，
+    # 不要钉死某个历史版本，否则每次编辑拓扑测试都会红。
     assert audit.topologyRevision == topology_revision(topology)
 
 

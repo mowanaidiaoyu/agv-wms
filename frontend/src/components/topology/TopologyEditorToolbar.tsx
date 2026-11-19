@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Save, Trash2, FilePlus2, PlayCircle } from 'lucide-react'
+import { Loader2, Save, Trash2, FilePlus2, PlayCircle, Check } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
 import { validateConveyorTopology, type ConveyorValidationIssue } from '../../lib/topology'
@@ -105,6 +105,19 @@ export function TopologyEditorToolbar() {
     onError: (error) => setNotice({ kind: 'error', text: `删除失败：${error instanceof Error ? error.message : String(error)}` }),
   })
 
+  const renameMutation = useMutation({
+    mutationFn: ({ topologyId, name }: { topologyId: string; name: string }) =>
+      api.renameTopology(topologyId, name),
+    onSuccess: async (saved) => {
+      await queryClient.invalidateQueries({ queryKey: ['topologies'] })
+      // 载入记录后 draft.name 会被 setLoaded 覆盖；改名后这里只更新 store 的 name
+      useTopologyEditorStore.setState({ draft: { ...useTopologyEditorStore.getState().draft, name: saved.name } })
+      setNotice({ kind: 'info', text: `拓扑已重命名为「${saved.name}」。` })
+    },
+    onError: (error) =>
+      setNotice({ kind: 'error', text: `重命名失败：${error instanceof Error ? error.message : String(error)}` }),
+  })
+
   async function handleLoad(topologyId: string) {
     if (!topologyId) return
     setLoading(true)
@@ -120,8 +133,9 @@ export function TopologyEditorToolbar() {
     }
   }
 
-  const busy = saveMutation.isPending || deleteMutation.isPending || useTopologyEditorStore.getState().loading
+  const busy = saveMutation.isPending || deleteMutation.isPending || renameMutation.isPending || useTopologyEditorStore.getState().loading
   const currentRecord = records.find((record) => record.id === loadedId)
+  const renameDirty = loadedId ? draft.name.trim() !== (currentRecord?.name ?? '') : false
 
   function enterSimulation() {
     if (dirty || !loadedId) {
@@ -142,12 +156,28 @@ export function TopologyEditorToolbar() {
       <div className="topo-toolbar-group topo-toolbar-meta">
         <label className="topo-name-field">
           <span>拓扑名称</span>
-          <input
-            value={draft.name}
-            onChange={(event) => renameDraft(event.target.value)}
-            placeholder="未命名拓扑"
-            aria-label="拓扑名称"
-          />
+          <div className="topo-name-row">
+            <input
+              value={draft.name}
+              onChange={(event) => renameDraft(event.target.value)}
+              placeholder="未命名拓扑"
+              aria-label="拓扑名称"
+            />
+            {loadedId ? (
+              <button
+                className="ghost-button topo-rename-button"
+                type="button"
+                disabled={busy || !renameDirty}
+                onClick={() =>
+                  renameMutation.mutate({ topologyId: loadedId, name: draft.name })
+                }
+                title={!renameDirty ? '名称与当前一致，无需应用' : '仅重命名，不影响拓扑内容'}
+              >
+                {renameMutation.isPending ? <Loader2 className="spin" size={13} /> : <Check size={13} />}
+                应用名称
+              </button>
+            ) : null}
+          </div>
         </label>
         <label className="topo-record-field">
           <span>已有拓扑</span>

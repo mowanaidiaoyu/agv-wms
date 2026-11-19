@@ -8,6 +8,8 @@ vi.mock('./pages/TopologyPage', () => ({
   TopologyPage: () => <div>topology-page</div>,
 }))
 
+vi.mock('./pages/AnalyticsPage', () => ({ AnalyticsPage: () => <div>analytics-performance-page</div> }))
+
 vi.mock('./pages/SimulationPage', () => ({
   SimulationPage: () => <div>unified-simulation-page</div>,
 }))
@@ -23,6 +25,11 @@ function renderRoute(path: string) {
 }
 
 describe('simulation routes', () => {
+  it('opens the dedicated performance page', () => {
+    renderRoute('/simulation/analytics?runId=run-test')
+    expect(screen.getByText('analytics-performance-page')).toBeInTheDocument()
+  })
+
   it.each(['/simulation', '/simulation/orders'])(
     'uses the unified simulation workbench for %s',
     (path) => {

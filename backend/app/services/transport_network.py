@@ -896,7 +896,14 @@ def audit_transport_network(topology: dict[str, Any]) -> TransportNetworkAuditRe
     dock = docks[0] if docks else None
     dock_id = f"facility:{dock['id']}" if dock else "MISSING:shuttle_dock"
     sources = shuttle_rack_slots(topology)
-    default_sources = sources[1:3]
+    # 同一槽位现在会展开多个仓储层，抽样必须落到不同槽位，才能代表不同货架位置
+    default_sources: list[tuple[str, int]] = []
+    for source_cell, source_level in sources:
+        if all(source_cell != cell for cell, _level in default_sources):
+            default_sources.append((source_cell, source_level))
+        if len(default_sources) == 3:
+            break
+    default_sources = default_sources[1:]
     shuttle_robots = [node for node in nodes if node.get("type") == "shuttle_robot"]
     robot = shuttle_robots[0] if shuttle_robots else None
     for source_cell, source_level in default_sources:

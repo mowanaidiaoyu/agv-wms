@@ -6,6 +6,8 @@ import type { GoodsSlot } from '../../types'
 
 const GOODS_COLOR = '#fde047'
 const GOODS_EMISSIVE = '#ca8a04'
+// 空托盘回收：车上载的是托盘而不是货物，渲染成扁平棕色托盘（与 (76,35) 堆叠一致）。
+const PALLET_COLOR = '#b45309'
 
 /** 拓扑编辑器与仿真工作台共用的工业四向车模型。 */
 export function ShuttleCartModel({
@@ -21,6 +23,9 @@ export function ShuttleCartModel({
 }) {
   const platformRef = useRef<Group>(null)
   const invalidate = useThree((state) => state.invalidate)
+  const carryingPallet = Boolean(carrying?.some((item) => item.kind === 'empty_pallet'))
+  // 托盘上的余货：机械臂只取走订单要的箱，剩下的货随托盘回库，必须仍然可见。
+  const palletGoods = (carrying ?? []).filter((item) => item.kind === 'pallet_goods')
   const loaded = load > 0 || Boolean(carrying?.length)
   const targetPlatformY = loaded ? 0.61 : 0.48
   const platformY = useRef(targetPlatformY)
@@ -91,9 +96,35 @@ export function ShuttleCartModel({
           <meshStandardMaterial color="#cbd5e1" roughness={0.32} metalness={0.72} />
         </RoundedBox>
         {loaded ? (
-          <RoundedBox args={[0.88, 0.48, 0.82]} radius={0.07} smoothness={3} position={[0, 0.3, 0]} castShadow>
-            <meshStandardMaterial color={GOODS_COLOR} emissive={GOODS_EMISSIVE} emissiveIntensity={0.22} roughness={0.52} />
-          </RoundedBox>
+          carryingPallet ? (
+            <mesh position={[0, 0.1, 0]} castShadow>
+              <boxGeometry args={[1.1, 0.14, 1.1]} />
+              <meshStandardMaterial color={PALLET_COLOR} roughness={0.72} metalness={0.16} />
+            </mesh>
+          ) : palletGoods.length > 0 ? (
+            <group>
+              <mesh position={[0, 0.1, 0]} castShadow>
+                <boxGeometry args={[1.1, 0.14, 1.1]} />
+                <meshStandardMaterial color={PALLET_COLOR} roughness={0.72} metalness={0.16} />
+              </mesh>
+              {palletGoods.map((item, index) => (
+                <RoundedBox
+                  key={`pallet-goods-${item.cellId ?? 'x'}-${item.depth ?? index}-${index}`}
+                  args={[0.8, 0.3, 0.76]}
+                  radius={0.05}
+                  smoothness={3}
+                  position={[0, 0.32 + index * 0.32, 0]}
+                  castShadow
+                >
+                  <meshStandardMaterial color={GOODS_COLOR} emissive={GOODS_EMISSIVE} emissiveIntensity={0.22} roughness={0.52} />
+                </RoundedBox>
+              ))}
+            </group>
+          ) : (
+            <RoundedBox args={[0.88, 0.48, 0.82]} radius={0.07} smoothness={3} position={[0, 0.3, 0]} castShadow>
+              <meshStandardMaterial color={GOODS_COLOR} emissive={GOODS_EMISSIVE} emissiveIntensity={0.22} roughness={0.52} />
+            </RoundedBox>
+          )
         ) : null}
       </group>
 

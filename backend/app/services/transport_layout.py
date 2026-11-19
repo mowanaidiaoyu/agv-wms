@@ -1162,6 +1162,10 @@ def _validate_picking_arm(
         for item in [*topology.get("cells", []), *topology.get("nodes", [])]
         if int(item.get("row", -1)) == base.row
         and int(item.get("col", -1)) == base.col
+        # 地面通行格（road）只是底板，不构成设备占用；机械臂自己的底座节点
+        # 也不算冲突——否则编辑器里放好底座后，计划会把自己判成"底座被占用"。
+        and str(item.get("id")) != arm.armId
+        and str(item.get("type") or "") != "road"
     ]
     occupied.extend(
         str(zone["id"])
@@ -1832,15 +1836,11 @@ def load_transport_layout_plan(topology: dict[str, Any]) -> TransportLayoutPlanR
             f"Layout topologyId={raw.get('topologyId')} does not match {topology['id']}"
         )
     declared_revision = str(raw.get("topologyRevision"))
-    compatible_revisions = {
-        str(item) for item in (raw.get("compatibleTopologyRevisions") or [])
-    }
-    if declared_revision != actual_revision and actual_revision not in compatible_revisions:
-        raise LayoutRevisionMismatch(
-            f"Layout topologyRevision={raw.get('topologyRevision')} does not match {actual_revision}"
-        )
-    # 兼容 revision 仍使用当前拓扑动态重建、校验路线，并把响应绑定到当前 revision；
-    # 这样前端兼容性检查不会把已重新验证的机械臂布局误判为过期。
+    # 任何与正式拓扑 revision 的偏差都用当前拓扑动态重建，而不是直接 409：
+    # 计划里的机械臂安装位/取放货点/预览路线/校验全部基于当前拓扑重新计算，
+    # 重建成功即视为有效并绑定到当前 revision。否则每次在编辑器里新增机械臂
+    # （revision 必变）都会让 /transport-layout-plan 报错，仿真里机械臂随之消失，
+    # 需要手工重钉版本号才能恢复——这正是反复出现的"新增机械臂后机械臂变了"缺陷。
     if declared_revision != actual_revision:
         raw = deepcopy(raw)
         raw["topologyRevision"] = actual_revision

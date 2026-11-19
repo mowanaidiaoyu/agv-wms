@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from ..core.config import API_PREFIX
 from ..schemas import (
+    AlgorithmExperimentCandidateRequest,
     ShuttleDockSettingsRequest,
     ShuttlePlanRequest,
     ShuttleTransferFailRequest,
@@ -27,6 +28,11 @@ from ..services.shuttle_topology import topology_revision
 from ..services.transport_layout import LayoutRevisionMismatch, load_transport_layout_plan
 from ..services.transport_network import audit_transport_network
 from ..services.unified_transfer import plan_transfer, shuttle_contract
+from ..analytics.algorithm_experiment_metrics import (
+    build_run_performance_metrics,
+    compare_algorithm_experiment_runs,
+)
+from ..analytics.throughput_metrics import compare_throughput_metrics
 
 router = APIRouter(prefix=API_PREFIX)
 ws_router = APIRouter()
@@ -99,6 +105,18 @@ def get_transport_layout_plan(topology_id: str):
         raise HTTPException(status_code=404, detail="Transport layout plan not found") from error
     except LayoutRevisionMismatch as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.patch("/topologies/{topology_id}")
+async def rename_topology(topology_id: str, request: Request):
+    raw = await request.json()
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=422, detail="name must be a non-empty string")
+    topology = repo.update_topology_name(topology_id, name.strip())
+    if not topology:
+        raise HTTPException(status_code=404, detail="Topology not found")
+    return topology
 
 
 @router.delete("/topologies/{topology_id}")
@@ -185,6 +203,13 @@ async def start_simulation(payload: SimulationStartRequest):
             topology["payload"],
             [order.model_dump() for order in payload.orders],
             [transfer.model_dump() for transfer in payload.transfers],
+            payload.motionPhysicsContract.model_dump() if payload.motionPhysicsContract else None,
+            payload.motionSpeedContract.model_dump() if payload.motionSpeedContract else None,
+            (
+                payload.algorithmExperimentContract.model_dump()
+                if payload.algorithmExperimentContract
+                else None
+            ),
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -342,6 +367,147 @@ def get_simulation_metrics(run_id: str):
         return simulation_service.get_metrics(run_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Run not found")
+
+
+@router.get("/simulations/{run_id}/metrics/tasks")
+def get_simulation_task_metric_summary(run_id: str):
+    summary = repo.get_task_metric_summary(run_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return summary
+
+
+@router.get("/simulations/{run_id}/metrics/history/quality")
+def get_simulation_metrics_history_quality(run_id: str, max_points: int = 240):
+    if not 20 <= max_points <= 1000:
+        raise HTTPException(status_code=422, detail="max_points must be between 20 and 1000")
+    history = repo.get_metrics_history_quality(run_id, max_points=max_points)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return history
+
+
+@router.get("/simulations/{run_id}/metrics/ctu-contention")
+def get_simulation_assignment_contention_metrics(run_id: str):
+    metrics = repo.get_assignment_contention_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/path-planning")
+def get_simulation_path_planning_metrics(run_id: str):
+    metrics = repo.get_path_planning_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/conveyor-coordination")
+def get_simulation_conveyor_coordination_metrics(run_id: str):
+    metrics = repo.get_conveyor_coordination_metrics(run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/deadlock-lifecycle")
+def get_simulation_deadlock_lifecycle_metrics(
+    run_id: str,
+    generation: int | None = None,
+):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_deadlock_lifecycle_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/motion-distance")
+def get_simulation_motion_distance_metrics(
+    run_id: str,
+    generation: int | None = None,
+):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_motion_distance_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/run-performance")
+def get_simulation_run_performance_metrics(run_id: str):
+    metrics = build_run_performance_metrics(repo, run_id)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/simulations/{run_id}/metrics/throughput")
+def get_simulation_throughput_metrics(run_id: str, generation: int | None = None):
+    if generation is not None and generation < 1:
+        raise HTTPException(status_code=422, detail="generation must be a positive integer")
+    metrics = repo.get_throughput_metrics(run_id, generation=generation)
+    if metrics is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return metrics
+
+
+@router.get("/algorithm-experiments")
+def list_algorithm_experiments():
+    return {
+        "contractVersion": "algorithm-experiment-list-v1",
+        "sourceScope": "CURRENT_BACKEND_DATABASE",
+        "sourceDescription": "实验 Run 来自当前后端数据库；不同 SQLite 不会自动合并。",
+        "runs": repo.list_algorithm_experiment_runs(),
+    }
+
+
+@router.post("/algorithm-experiments/{baseline_run_id}/candidates", response_model=SimulationControlResponse)
+async def create_algorithm_experiment_candidate(
+    baseline_run_id: str,
+    payload: AlgorithmExperimentCandidateRequest,
+):
+    baseline = repo.get_run_read_only(baseline_run_id)
+    if baseline is None:
+        raise HTTPException(status_code=404, detail="Baseline experiment Run not found")
+    topology_id = baseline.get("topology_id")
+    topology = repo.get_topology(topology_id) if topology_id else None
+    if topology is None:
+        raise HTTPException(status_code=409, detail="Baseline topology is no longer available")
+    try:
+        return await simulation_service.create_assignment_candidate(
+            baseline_run_id,
+            payload.assignmentPolicy,
+            topology["payload"],
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Baseline experiment Run not found") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get("/algorithm-experiments/compare")
+def compare_algorithm_experiments(baselineRunId: str, candidateRunId: str):
+    if baselineRunId == candidateRunId:
+        raise HTTPException(status_code=422, detail="Select two different experiment Runs")
+    result = compare_algorithm_experiment_runs(repo, baselineRunId, candidateRunId)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Experiment Run not found")
+    return result
+
+
+@router.get("/algorithm-experiments/throughput-compare")
+def compare_algorithm_throughput(baselineRunId: str, candidateRunId: str):
+    if baselineRunId == candidateRunId:
+        raise HTTPException(status_code=422, detail="Select two different experiment Runs")
+    baseline = repo.get_throughput_metrics(baselineRunId)
+    candidate = repo.get_throughput_metrics(candidateRunId)
+    if baseline is None or candidate is None:
+        raise HTTPException(status_code=404, detail="Experiment Run not found")
+    return compare_throughput_metrics(baseline, candidate)
 
 
 @ws_router.websocket("/ws/simulation/{run_id}")

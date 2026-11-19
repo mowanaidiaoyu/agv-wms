@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from app.services.transport_layout import LayoutRevisionMismatch, load_transport_layout_plan
+from app.services.transport_layout import (
+    LayoutRevisionMismatch,
+    load_transport_layout_plan,
+    topology_revision,
+)
 
 
 TOPOLOGY_PATH = Path(__file__).resolve().parents[2] / "data" / "topology_666.json"
@@ -20,9 +24,10 @@ def plan(topology: dict):
     return load_transport_layout_plan(topology)
 
 
-def test_plan_is_bound_to_real_topology_and_revision(plan) -> None:
+def test_plan_is_bound_to_real_topology_and_revision(plan, topology) -> None:
     assert plan.topologyId == "topology-6ceb4920"
-    assert plan.topologyRevision == "2.0.0:1ec8cf4490635105"
+    # 计划随当前拓扑动态重建，revision 必须绑定到当前拓扑，而不是手工钉死的旧值。
+    assert plan.topologyRevision == topology_revision(topology)
     assert plan.overallStatus == "PARTIAL"
     assert plan.summary["formalTopologyMutated"] is False
 
@@ -170,8 +175,11 @@ def test_picking_arm_uses_user_confirmed_installation_and_row84_dropoff(
         int(cell["row"]) == 91 and int(cell["col"]) == 54
         for cell in topology["cells"]
     )
+    # 底座位置只允许被机械臂自己的节点占用；其它设备节点或格子都不能压住底座。
     assert not any(
-        int(node["row"]) == 91 and int(node["col"]) == 54
+        int(node["row"]) == 91
+        and int(node["col"]) == 54
+        and node.get("type") != "picking_arm"
         for node in topology["nodes"]
     )
     drop_cell = next(cell for cell in topology["cells"] if cell["id"] == arm.dropoff.topologyCellId)
@@ -223,6 +231,7 @@ def test_enlarged_arm_covers_both_endpoints_without_occupying_formal_equipment(p
         assert planar_reach <= arm.workRadius
     assert arm.kinematics.upperArmLength + arm.kinematics.forearmLength >= arm.workRadius
     issue_codes = {issue.code for issue in plan.issues}
+    # 机械臂底座节点与地面 road 格不计入占用，自身共位不应再被判成底座被占用。
     assert "PICKING_ARM_BASE_OCCUPIED" not in issue_codes
     assert "PICKING_ARM_BASE_CLEARANCE_INSUFFICIENT" not in issue_codes
     assert "PICKING_ARM_ENDPOINT_OUT_OF_REACH" not in issue_codes
@@ -250,11 +259,28 @@ def topology_fixture():
     return json.loads(TOPOLOGY_PATH.read_text(encoding="utf-8"))
 
 
-def test_revision_mismatch_refuses_the_plan(topology: dict) -> None:
-    mismatched = deepcopy(topology)
-    mismatched["meta"]["version"] = "2.0.1"
-    with pytest.raises(LayoutRevisionMismatch, match="topologyRevision"):
-        load_transport_layout_plan(mismatched)
+def test_revision_drift_is_revalidated_instead_of_refused(topology: dict) -> None:
+    """新增节点（例如机械臂底座）会改变 revision，计划必须动态重建而不是 409。
+
+    这是"每次新增机械臂后仿真里机械臂就变（消失）"的回归测试。
+    """
+    drifted = deepcopy(topology)
+    drifted["meta"]["version"] = "2.0.1"
+    drifted["nodes"].append(
+        {
+            "id": "picking-arm-regression",
+            "type": "picking_arm",
+            "floor": "1F",
+            "row": 78,
+            "col": 47,
+            "zoneId": None,
+            "capacity": 1,
+            "label": "机械臂 99",
+        }
+    )
+    plan = load_transport_layout_plan(drifted)
+    assert plan.topologyId == topology["id"]
+    assert plan.topologyRevision == topology_revision(drifted)
 
 
 def test_all_candidates_remain_proposed_and_scheme_b_stays_blocked(plan) -> None:

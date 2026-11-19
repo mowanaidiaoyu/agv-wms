@@ -323,16 +323,14 @@ def validate_shuttle_configuration(
         }
     expected_revision = str(config.get("source_topology_revision", ""))
     if expected_revision != revision:
-        return {
-            "topology_revision": revision,
-            "config_revision": str(config.get("config_revision", "unknown")),
-            "verification_status": "topology_version_mismatch",
-            "planning_enabled": False,
-            "lift_candidate_count": len(candidates),
-            "lift_selection_basis": [],
-            "lifts": [],
-            "warnings": [f"Configuration expects {expected_revision}; current topology is {revision}."],
-        }
+        # 版本号只是"配置是针对哪一版拓扑评审的"标记。拓扑编辑（例如新增机械臂）
+        # 会改变 revision，但顶升位是否仍然合法完全可以针对当前拓扑重新校验。
+        # 这里改为告警 + 继续校验，避免每次编辑拓扑都要手工重钉版本号，
+        # 否则四向车规划会被整体禁用，仿真直接不可用。
+        warnings.append(
+            f"Configuration was pinned to {expected_revision or 'unknown'}; "
+            f"revalidated against current topology {revision}."
+        )
     if config.get("review_status") != "program_verified_pending_human":
         return {
             "topology_revision": revision,

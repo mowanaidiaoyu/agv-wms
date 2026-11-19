@@ -146,7 +146,31 @@ def assign_tasks(
     topology: dict[str, Any],
     path_policy: str,
     extra_blocked: set[tuple[str, int, int]] | None = None,
+    *,
+    runtime_state: dict[str, Any] | None = None,
+    runtime_config: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     if policy == "hungarian":
         return hungarian_assign(robots, tasks, topology, path_policy, extra_blocked)
-    return greedy_assign(robots, tasks, topology, path_policy, extra_blocked)
+    if policy == "greedy":
+        return greedy_assign(robots, tasks, topology, path_policy, extra_blocked)
+    if policy == "throughput_aware":
+        if runtime_state is None or runtime_config is None:
+            raise ValueError("throughput_aware assignment requires frozen runtime state and config")
+        from .throughput_aware_assignment import throughput_aware_assign
+
+        matches, evidence = throughput_aware_assign(
+            robots,
+            tasks,
+            topology,
+            path_policy,
+            runtime_state,
+            runtime_config,
+            extra_blocked,
+        )
+        stored_evidence = runtime_state.setdefault("throughputAwareAssignmentEvidence", [])
+        stored_evidence.extend(evidence)
+        if len(stored_evidence) > 4096:
+            del stored_evidence[:-4096]
+        return matches
+    raise ValueError(f"Unsupported assignment policy: {policy}")

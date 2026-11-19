@@ -1,12 +1,11 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Bot, Truck } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { ShuttleDockState, SimulationRobot, SimulationTask, TopologyNode } from '../../types'
 
 /**
- * 四向车搬运工作台：展示并运行时调整出货位设置（取什么货物/取多少/优先级/指定车辆/
- * 循环搬运/启停），以及各出货位的搬运任务进度。设置保存在 Run 状态里，不改拓扑。
+ * 四向车搬运工作台：出货位只作为交付点标记，展示各出货位的搬运任务进度，
+ * 并支持运行时调整优先级/指定车辆/循环搬运/启停。设置保存在 Run 状态里，不改拓扑。
  */
 
 /**
@@ -40,8 +39,6 @@ function mergeShuttleDocks(dockNodes: TopologyNode[], runDocks: ShuttleDockState
 }
 
 type DockDraft = {
-  skuId: string
-  quantity: number
   priority: 'normal' | 'urgent'
   vehicleId: string
   loop: boolean
@@ -50,8 +47,6 @@ type DockDraft = {
 
 function draftOf(dock: ShuttleDockState): DockDraft {
   return {
-    skuId: dock.skuId ?? '',
-    quantity: dock.quantity,
     priority: dock.priority ?? 'normal',
     vehicleId: dock.vehicleId ?? '',
     loop: Boolean(dock.loop),
@@ -72,8 +67,6 @@ function DockCard({
   robots: SimulationRobot[]
   onChanged: () => void
 }) {
-  const catalogQuery = useQuery({ queryKey: ['goods', 'catalog'], queryFn: () => api.getGoodsCatalog() })
-  const skus = catalogQuery.data?.skus ?? []
   const [draft, setDraft] = useState<DockDraft>(() => draftOf(dock))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -81,11 +74,9 @@ function DockCard({
   useEffect(() => {
     setDraft(draftOf(dock))
     // 出货位设置来自运行状态，状态刷新时同步回表单。
-  }, [dock.skuId, dock.quantity, dock.priority, dock.vehicleId, dock.loop, dock.enabled])
+  }, [dock.priority, dock.vehicleId, dock.loop, dock.enabled])
 
   const dirty =
-    draft.skuId !== (dock.skuId ?? '') ||
-    draft.quantity !== dock.quantity ||
     draft.priority !== (dock.priority ?? 'normal') ||
     draft.vehicleId !== (dock.vehicleId ?? '') ||
     draft.loop !== Boolean(dock.loop) ||
@@ -98,10 +89,10 @@ function DockCard({
     setError('')
     try {
       await api.updateShuttleDock(runId, dock.dockId, {
-        skuId: draft.skuId || null,
-        skuName: skus.find((item) => item.skuId === draft.skuId)?.name ?? null,
-        largeCategory: skus.find((item) => item.skuId === draft.skuId)?.largeCategory ?? null,
-        quantity: draft.quantity,
+        skuId: null,
+        skuName: null,
+        largeCategory: null,
+        quantity: 1,
         priority: draft.priority,
         vehicleId: draft.vehicleId || null,
         loop: draft.loop,
@@ -124,26 +115,6 @@ function DockCard({
         </span>
       </div>
       <div className="shuttle-dock-form">
-        <label>
-          <span>取什么货物</span>
-          <select value={draft.skuId} onChange={(event) => setDraft({ ...draft, skuId: event.target.value })}>
-            <option value="">（未设置）</option>
-            {skus.map((sku) => (
-              <option key={sku.skuId} value={sku.skuId}>
-                {sku.name}（{sku.skuId}）
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span>取多少（箱）</span>
-          <input
-            type="number"
-            min={1}
-            value={draft.quantity}
-            onChange={(event) => setDraft({ ...draft, quantity: Math.max(1, Math.floor(Number(event.target.value) || 1)) })}
-          />
-        </label>
         <label>
           <span>优先级</span>
           <select
@@ -297,8 +268,8 @@ export function ShuttleDeliveryPanel({
         <div className="shuttle-dock-card">
           <p className="muted-copy">
             拓扑中还没有「四向车出货位」：到拓扑编辑器用「出货位」工具放在地面输送线上（只能放在地面线，
-            四向车仅沿巷道、升降通道和地面输送线移动），点击「保存拓扑」后无需重启仿真，出货位会立即出现在这里；
-            在卡片上设置取什么货物、取多少并保存，即自动生成搬运任务。
+            四向车仅沿巷道、升降通道和地面输送线移动），点击「保存拓扑」后无需重启仿真，出货位会立即出现在这里。
+            出货位只标记交付位置，取什么货物、取多少由订单调度决定。
           </p>
         </div>
       )}

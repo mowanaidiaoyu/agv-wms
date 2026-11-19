@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../lib/api'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { SimulationTask, TopologyPayload, TransportLayoutPlan } from '../types'
+import type { SimulationState, SimulationTask, TopologyPayload, TransportLayoutPlan } from '../types'
 import { SimulationPage } from './SimulationPage'
 
 const sceneMock = vi.hoisted(() => ({
@@ -152,6 +152,28 @@ function taskFixture(id: string, orderId: string, phase: string): SimulationTask
   }
 }
 
+function simulationStateFixture(id: string, topologyId = topology.id): SimulationState {
+  return {
+    id,
+    status: 'running',
+    tick: 12,
+    topologyId,
+    robots: [],
+    tasks: [],
+    orders: [],
+    inventory: [],
+    alerts: [],
+    queues: { conveyor: [], station: [], buffer: [] },
+    createdAt: '2026-10-28T00:00:00Z',
+    updatedAt: '2026-10-28T00:00:12Z',
+  }
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="location-probe">{location.pathname}{location.search}</output>
+}
+
 vi.mock('../lib/api', () => ({
   api: {
     listTopologies: vi.fn(async () => [{ id: topology.id, name: topology.name, payload: topology }]),
@@ -212,8 +234,20 @@ vi.mock('../components/topology/Simulation3DScene', () => ({
   },
 }))
 
+function renderSimulationPage(entry = '/simulation?topologyId=topology-test') {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[entry]}>
+        <SimulationPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}
+
 describe('SimulationPage', () => {
   beforeEach(() => {
+    window.sessionStorage.clear()
     sceneMock.error = null
     sceneMock.lastProps = null
     usePlatformStore.setState({
@@ -287,6 +321,238 @@ describe('SimulationPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '关闭运行详情' }))
     expect(screen.queryByRole('heading', { name: '设备状态' })).not.toBeInTheDocument()
+  })
+
+  it('replaces the inventory primary entry with analytics and passes only topologyId without a verified run', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    expect(screen.queryByRole('button', { name: '库存详情' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test'))
+    expect(screen.getByTestId('location-probe')).not.toHaveTextContent(/runId=(?:undefined|null)?(?:&|$)/)
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+    expect(api.insertSimulationOrder).not.toHaveBeenCalled()
+    expect(api.cancelSimulationOrder).not.toHaveBeenCalled()
+    expect(api.pauseSimulation).not.toHaveBeenCalled()
+    expect(api.resumeSimulation).not.toHaveBeenCalled()
+    expect(api.stopSimulation).not.toHaveBeenCalled()
+  })
+
+  it('passes a runId only after the authoritative state confirms the selected run and topology', async () => {
+    const state = simulationStateFixture('run-verified')
+    usePlatformStore.setState({ selectedRunId: state.id, liveState: state })
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    // 等待权威 Run 状态返回后再点击，避免在状态未就绪时导航导致 runId 缺失。
+    await waitFor(() => expect(api.getSimulationState).toHaveBeenCalledWith('run-verified'))
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test&runId=run-verified'))
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+  })
+
+  it('restores a persisted Run ID from URL and reloads authoritative backend state', async () => {
+    const state = simulationStateFixture('run-restored')
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+    const first = renderSimulationPage('/simulation?topologyId=topology-test&runId=run-restored')
+    await waitFor(() => expect(api.getSimulationState).toHaveBeenCalledWith('run-restored'))
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-restored'))
+    first.unmount()
+    usePlatformStore.getState().resetRun()
+    vi.mocked(api.getSimulationState).mockClear()
+    renderSimulationPage('/simulation?topologyId=topology-test&runId=run-restored')
+    await waitFor(() => expect(api.getSimulationState).toHaveBeenCalledWith('run-restored'))
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-restored'))
+  })
+
+  it('exits a completed Run view into a blank editable draft without mutating the historical Run', async () => {
+    const state = {
+      ...simulationStateFixture('run-history'),
+      status: 'completed' as const,
+      orders: [{
+        id: 'ORD-HISTORY-KEEP',
+        priority: 'normal' as const,
+        dispatchMode: 'balanced' as const,
+        maxParallelCtu: 1,
+        targetStation: '出库口 01',
+        createdAt: '2026-11-17T00:00:00Z',
+        lines: [{ id: 'line-history', skuId: 'sku-1', skuName: '六角螺栓 M8', quantity: 1 }],
+        status: 'completed' as const,
+        statusLabel: '已完成',
+        taskIds: [],
+        totalTasks: 1,
+        completedTasks: 1,
+        progress: 100,
+      }],
+    }
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+    vi.mocked(api.resetSimulation).mockClear()
+    vi.mocked(api.stopSimulation).mockClear()
+    vi.mocked(api.cancelSimulationOrder).mockClear()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test&runId=run-history']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect((await screen.findAllByText('ORD-HISTORY-KEEP')).length).toBeGreaterThan(0)
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-history'))
+    fireEvent.click(screen.getByRole('button', { name: '新建仿真' }))
+
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe(''))
+    expect(screen.getByTestId('location-probe')).not.toHaveTextContent('runId=')
+    expect(window.sessionStorage.getItem('agv-wms:selected-run:topology-test')).toBeNull()
+    expect(screen.queryByText('ORD-HISTORY-KEEP')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('下次新建 Run 启用米制模拟')).toBeEnabled()
+    expect(document.querySelector('.simulation-run-config-drawer')).toHaveClass('open')
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+    expect(api.stopSimulation).not.toHaveBeenCalled()
+    expect(api.cancelSimulationOrder).not.toHaveBeenCalled()
+  })
+
+  it('warns that leaving an active Run view does not stop the backend Run', async () => {
+    const state = simulationStateFixture('run-active-view')
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+    vi.mocked(api.resetSimulation).mockClear()
+    vi.mocked(api.stopSimulation).mockClear()
+    vi.mocked(api.cancelSimulationOrder).mockClear()
+    renderSimulationPage('/simulation?topologyId=topology-test&runId=run-active-view')
+
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-active-view'))
+    await screen.findByText('run-active-view')
+    fireEvent.click(screen.getByRole('button', { name: '新建仿真' }))
+    const dialog = screen.getByRole('dialog', { name: '进入新 Run 草稿' })
+    expect(dialog).toHaveTextContent('仅退出当前 Run 视图，后台 Run 不受影响')
+    expect(dialog).toHaveTextContent('不会停止 Run，也不会取消正在执行的订单')
+    fireEvent.click(within(dialog).getByRole('button', { name: '退出视图并新建' }))
+
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe(''))
+    expect(api.resetSimulation).not.toHaveBeenCalled()
+    expect(api.stopSimulation).not.toHaveBeenCalled()
+    expect(api.cancelSimulationOrder).not.toHaveBeenCalled()
+  })
+
+  it('requires an explicit draft choice and starts a fresh Run with the retained submitted configuration', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-fresh', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...simulationStateFixture('run-fresh'),
+      motionPhysicsContract: {
+        physicsContractVersion: 'motion-physics-v1',
+        coordinateContractVersion: 'topology-grid-v1',
+        metersPerCell: 1.1,
+        shuttleLevelHeightMeters: 3,
+        floorHeightMeters: 4,
+        source: 'USER_DEFINED_SIMULATION',
+        calibrationStatus: 'UNVERIFIED',
+      },
+    })
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value: '1.1' } })
+    fireEvent.click(screen.getByRole('button', { name: '新建仿真' }))
+    const dialog = screen.getByRole('dialog', { name: '进入新 Run 草稿' })
+    expect(dialog).toHaveTextContent('检测到未提交的订单、跨层任务或运行配置草稿')
+    fireEvent.click(within(dialog).getByRole('button', { name: '保留草稿并新建' }))
+
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    expect(screen.getByLabelText('每格水平长度')).toHaveValue(1.1)
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalledWith(
+      topology.id,
+      expect.arrayContaining([expect.objectContaining({ id: 'ORD-DEMO-001' })]),
+      [],
+      expect.objectContaining({ metersPerCell: 1.1 }),
+      undefined,
+      undefined,
+    ))
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-fresh'))
+  })
+
+  it('discards a pending draft only after explicit confirmation and does not restore it', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-after-discard', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-after-discard'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '新建仿真' }))
+    const dialog = screen.getByRole('dialog', { name: '进入新 Run 草稿' })
+    fireEvent.click(within(dialog).getByRole('button', { name: '放弃草稿并新建' }))
+    await waitFor(() => expect(screen.queryByText('ORD-DEMO-001')).not.toBeInTheDocument())
+    expect(screen.getByText('还没有订单')).toBeInTheDocument()
+    expect(window.sessionStorage.getItem('agv-wms:selected-run:topology-test')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
+    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
+    const newDraftId = vi.mocked(api.startSimulation).mock.calls.length
+    expect(newDraftId).toBe(0)
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalledWith(
+      topology.id,
+      expect.arrayContaining([expect.objectContaining({ id: expect.stringMatching(/^ORD-/) })]),
+      [],
+      undefined,
+      undefined,
+      undefined,
+    ))
+    await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-after-discard'))
+  })
+
+  it('shows an explicit error when a URL Run cannot be restored', async () => {
+    vi.mocked(api.getSimulationState).mockRejectedValue(new Error('Run not found'))
+    renderSimulationPage('/simulation?topologyId=topology-test&runId=missing-run')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Run missing-run 不存在或无法从当前后端数据库读取')
+    expect(usePlatformStore.getState().liveState).toBeNull()
+  })
+
+  it('does not leak a stale runId from another topology into analytics navigation', async () => {
+    const staleState = simulationStateFixture('run-stale', 'topology-other')
+    usePlatformStore.setState({ selectedRunId: staleState.id, liveState: staleState })
+    vi.mocked(api.getSimulationState).mockResolvedValue(staleState)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation?topologyId=topology-test']}>
+          <SimulationPage />
+          <LocationProbe />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '性能分析' }))
+    await waitFor(() => expect(screen.getByTestId('location-probe')).toHaveTextContent('/simulation/analytics?topologyId=topology-test'))
+    expect(screen.getByTestId('location-probe')).not.toHaveTextContent('run-stale')
+    expect(api.startSimulation).not.toHaveBeenCalled()
+    expect(api.resetSimulation).not.toHaveBeenCalled()
   })
 
   it('inserts a new order into the active run and refreshes the authoritative queue', async () => {
@@ -488,7 +754,7 @@ describe('SimulationPage', () => {
     confirm.mockRestore()
   })
 
-  it('keeps one 3D scene mounted while transfer and inventory tabs render distinct content', async () => {
+  it('keeps one 3D scene mounted while the transfer area opens and returns from its inventory panel', async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     render(
       <QueryClientProvider client={queryClient}>
@@ -506,13 +772,81 @@ describe('SimulationPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '跨层运输' }))
     expect(screen.getByLabelText('跨层运输')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '规划路径' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看库存' })).toBeInTheDocument()
     expect(screen.getByTestId('simulation-3d')).toBe(scene)
 
-    fireEvent.click(screen.getByRole('button', { name: '库存详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '查看库存' }))
     expect(screen.getByLabelText('库存详情')).toBeInTheDocument()
     expect(screen.getByText(/此处不生成或猜测 WMS 库存/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '规划路径' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '返回跨层运输' })).toBeInTheDocument()
     expect(screen.getByTestId('simulation-3d')).toBe(scene)
+
+    fireEvent.click(screen.getByRole('button', { name: '返回跨层运输' }))
+    expect(screen.getByLabelText('跨层运输')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看库存' })).toBeInTheDocument()
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+
+    fireEvent.click(screen.getByRole('button', { name: '订单调度' }))
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    expect(screen.getByTestId('simulation-3d')).toBe(scene)
+  })
+
+  it('preserves pending transfer and order drafts across transfer and inventory workspace switches', async () => {
+    vi.mocked(api.getShuttleContract).mockResolvedValueOnce({
+      topologyId: topology.id,
+      topologyRevision: 'test',
+      configRevision: 'test',
+      coordinateContractRevision: 'shuttle-internal-levels-v1',
+      verificationStatus: 'program_verified_pending_human',
+      planningEnabled: true,
+      warnings: [],
+      lifts: [],
+      tracks: [
+        { topology_id: topology.id, zone_id: 'zone-1', track_node_id: 'L1-r100-c7', shuttle_level: 1, row: 100, col: 7, world_x: 0, world_y: 0, world_z: 0, track_type: 'straight', traversable: true, neighbors: [] },
+        { topology_id: topology.id, zone_id: 'zone-4', track_node_id: 'L4-r100-c51', shuttle_level: 4, row: 100, col: 51, world_x: 10, world_y: 4, world_z: 0, track_type: 'straight', traversable: true, neighbors: [] },
+      ],
+    })
+    vi.mocked(api.planShuttleTransfer).mockResolvedValueOnce({
+      topologyId: topology.id,
+      topologyRevision: 'test',
+      configRevision: 'test',
+      coordinateContractRevision: 'shuttle-internal-levels-v1',
+      algorithm: 'astar',
+      chosen_lift: null,
+      path_nodes: [],
+      path_edges: [],
+      lift_transitions: [],
+      estimated_duration_seconds: 10,
+      result_status: 'success',
+      timing_source: 'synthetic_demo',
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/simulation/orders?topologyId=topology-test']}>
+          <SimulationPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    await screen.findByTestId('simulation-3d')
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: '跨层运输' }))
+    const planButton = await screen.findByRole('button', { name: '规划路径' })
+    await waitFor(() => expect(planButton).toBeEnabled())
+    fireEvent.click(planButton)
+    await screen.findByText(/ASTAR · 0 节点/)
+    fireEvent.click(screen.getByRole('button', { name: '加入仿真' }))
+    expect(screen.getByText('SKU-001 · 2 箱')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看库存' }))
+    expect(screen.getByLabelText('库存详情')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '返回跨层运输' }))
+    expect(screen.getByText('SKU-001 · 2 箱')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '订单调度' }))
+    expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
   })
 
   it('toggles the isolated handoff layout preview without changing topology or simulation state', async () => {
@@ -735,7 +1069,201 @@ describe('SimulationPage', () => {
         maxParallelCtu: 7,
       })]),
       [],
+      undefined,
+      undefined,
+      undefined,
     )
     expect(within(screen.getByLabelText('仿真运行状态')).getByText('运行中')).toBeInTheDocument()
+  })
+
+  it('keeps metric distance disabled by default and exposes editable example values', async () => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    expect(screen.getByLabelText('下次新建 Run 启用米制模拟')).not.toBeChecked()
+    expect(screen.getByLabelText('每格水平长度')).toHaveValue(0.8)
+    expect(screen.getByLabelText('Shuttle层高')).toHaveValue(3)
+    expect(screen.getByLabelText('仓库楼层高度')).toHaveValue(4)
+    expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
+  })
+
+  it('keeps the next-Run draft when the shared run configuration drawer closes', async () => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    const summary = screen.getByLabelText('当前Run冻结配置摘要')
+    expect(within(summary).getAllByText('未冻结')).toHaveLength(4)
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(document.querySelector('.simulation-run-config-drawer')).toHaveClass('open')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value: '1.1' } })
+    fireEvent.click(screen.getByRole('button', { name: '关闭运行配置' }))
+    expect(document.querySelector('.simulation-run-config-drawer')).not.toHaveClass('open')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(screen.getByLabelText('每格水平长度')).toHaveValue(1.1)
+    expect(within(summary).queryByText(/1.1 m\/格/)).not.toBeInTheDocument()
+  })
+
+  it('sends the complete user-defined physics contract and displays the frozen Run values', async () => {
+    const frozen = {
+      physicsContractVersion: 'motion-physics-v1',
+      coordinateContractVersion: 'topology-grid-v1',
+      metersPerCell: 0.8,
+      shuttleLevelHeightMeters: 3,
+      floorHeightMeters: 4,
+      source: 'USER_DEFINED_SIMULATION' as const,
+      calibrationStatus: 'UNVERIFIED' as const,
+    }
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-physics', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...simulationStateFixture('run-physics'),
+      motionPhysicsContract: frozen,
+    })
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalledWith(
+      topology.id,
+      expect.any(Array),
+      [],
+      frozen,
+      undefined,
+      undefined,
+    ))
+    expect(await screen.findByText(/冻结值：0.8 m\/格 · Shuttle 3 m\/层 · 楼层 4 m\/层/)).toBeInTheDocument()
+    expect(screen.getByLabelText('每格水平长度')).toBeDisabled()
+    expect(screen.getByText(/冻结合同不会被添加订单或播放倍率修改/)).toBeInTheDocument()
+  })
+
+  it('freezes vehicle speed separately from playback and sends the experiment selection', async () => {
+    const speed = {
+      speedContractVersion: 'motion-speed-v1',
+      simTickSeconds: 0.6,
+      ctuSpeedMetersPerSecond: 1,
+      shuttleSpeedMetersPerSecond: 1.2,
+      liftSpeedMetersPerSecond: 0.5,
+      source: 'USER_DEFINED_SIMULATION' as const,
+      calibrationStatus: 'UNVERIFIED' as const,
+    }
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-speed', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...simulationStateFixture('run-speed'),
+      motionPhysicsContract: {
+        physicsContractVersion: 'motion-physics-v1',
+        coordinateContractVersion: 'topology-grid-v1',
+        metersPerCell: 0.8,
+        shuttleLevelHeightMeters: 3,
+        floorHeightMeters: 4,
+        source: 'USER_DEFINED_SIMULATION',
+        calibrationStatus: 'UNVERIFIED',
+      },
+      motionSpeedContract: speed,
+    })
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    const call = vi.mocked(api.startSimulation).mock.calls.at(-1)
+    expect(call?.[4]).toEqual(speed)
+    expect(call?.[5]).toBeUndefined()
+    expect(await screen.findByText(/冻结速度：CTU 1 m\/s/)).toBeInTheDocument()
+    expect(screen.queryByText(/播放倍率不代表车辆 m\/s/)).not.toBeInTheDocument()
+  })
+
+  it('uses the algorithm selection cards only for the next Run experiment contract', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-algorithm', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-algorithm'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByLabelText('将下次 Run 标记为可复现实验'))
+    fireEvent.click(within(screen.getByRole('group', { name: '路径算法' })).getByRole('button', { name: /Dijkstra/ }))
+    fireEvent.click(within(screen.getByRole('group', { name: '分配算法' })).getByRole('button', { name: /Hungarian/ }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).toMatchObject({
+      scenarioId: 'p5-comparison-01',
+      topologyRevision: '2.0.0:test',
+      pathPolicy: 'dijkstra',
+      assignmentPolicy: 'hungarian',
+      variableDimension: 'pathPolicy',
+    })
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).not.toHaveProperty('observationTicks')
+  })
+
+  it('offers throughput-aware assignment as an explicit next-Run policy', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-throughput-aware', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-throughput-aware'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByLabelText('将下次 Run 标记为可复现实验'))
+    fireEvent.click(within(screen.getByRole('group', { name: '分配算法' })).getByRole('button', { name: /吞吐量感知调度/ }))
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).toMatchObject({
+      assignmentPolicy: 'throughput_aware',
+      pathPolicy: 'astar',
+      algorithmVersion: 'throughput-aware-v1',
+    })
+  })
+
+  it('freezes an explicit throughput observation window without changing ordinary P5 experiments', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-throughput-window', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-throughput-window'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用物理速度模拟'))
+    fireEvent.click(screen.getByLabelText('将下次 Run 标记为可复现实验'))
+    fireEvent.click(screen.getByLabelText('启用固定吞吐观察窗口'))
+    fireEvent.change(screen.getByLabelText('吞吐观察窗口Tick'), { target: { value: '600' } })
+    fireEvent.click(screen.getByRole('button', { name: '完成' }))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    await waitFor(() => expect(api.startSimulation).toHaveBeenCalled())
+    expect(vi.mocked(api.startSimulation).mock.calls.at(-1)?.[5]).toMatchObject({ observationTicks: 600 })
+  })
+
+  it.each(['0', '-0.1', ''])('blocks Run creation for invalid metersPerCell %s', async (value) => {
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.change(screen.getByLabelText('每格水平长度'), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+    expect(await screen.findByText('每格水平长度必须是有限正数。')).toBeInTheDocument()
+    expect(api.startSimulation).not.toHaveBeenCalled()
+  })
+
+  it('states that a legacy Run without a frozen contract is unaffected by the next-Run draft', async () => {
+    const state = simulationStateFixture('run-legacy')
+    state.status = 'completed'
+    usePlatformStore.setState({ selectedRunId: state.id, liveState: state })
+    vi.mocked(api.getSimulationState).mockResolvedValue(state)
+
+    renderSimulationPage()
+
+    fireEvent.click(screen.getByRole('button', { name: '运行配置' }))
+    expect(await screen.findByText('当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。')).toBeInTheDocument()
+    expect(screen.getAllByText('历史 Run：只能查看历史冻结配置')).toHaveLength(2)
+  })
+
+  it('reports a backend contract-loss error instead of claiming the new Run is metric-enabled', async () => {
+    vi.mocked(api.startSimulation).mockResolvedValue({ runId: 'run-contract-lost', status: 'running' })
+    vi.mocked(api.getSimulationState).mockResolvedValue(simulationStateFixture('run-contract-lost'))
+    renderSimulationPage()
+    await screen.findByTestId('simulation-3d')
+    fireEvent.click(screen.getByLabelText('下次新建 Run 启用米制模拟'))
+    fireEvent.click(screen.getByRole('button', { name: '启动' }))
+
+    expect(await screen.findByText(/当前后端未冻结已提交的米制合同/)).toBeInTheDocument()
+    expect(screen.getByText('当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。')).toBeInTheDocument()
   })
 })

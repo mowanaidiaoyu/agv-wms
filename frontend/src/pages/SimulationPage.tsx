@@ -8,12 +8,14 @@ import {
   CheckCircle2,
   ClipboardList,
   Gauge,
+  FilePlus2,
   Loader2,
   LocateFixed,
   PanelRightOpen,
   Pause,
   Play,
   RotateCcw,
+  Settings2,
   Square,
   X,
   Zap,
@@ -31,10 +33,19 @@ import { SimulationSceneBoundary } from '../components/simulation/SimulationScen
 import { TransferInventoryPanel } from '../components/simulation/TransferInventoryPanel'
 import { selectSimulationStateSource, useSimulationSocket } from '../hooks/useSimulationSocket'
 import { api } from '../lib/api'
+import { restoreUtf8CjkLabel } from '../lib/displayText'
 import { createDemoOrders } from '../lib/orders'
 import { findLayoutPreviewItem } from '../lib/transportLayout'
 import { usePlatformStore } from '../store/usePlatformStore'
-import type { ShuttleTransferInput, SimulationAlert, SimulationOrder, SimulationOrderInput } from '../types'
+import type {
+  AlgorithmExperimentContractInput,
+  MotionPhysicsContractInput,
+  MotionSpeedContractInput,
+  ShuttleTransferInput,
+  SimulationAlert,
+  SimulationOrder,
+  SimulationOrderInput,
+} from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
 
@@ -49,9 +60,56 @@ const robotTypeLabels = {
   shuttle: '四向车',
 }
 
+/** 放置区 5 个出货口默认各 1 个空托盘（未启动仿真时也按此展示物理现场）。 */
+const DEFAULT_PALLET_DOCKS: Record<string, { count: number }> = {
+  '102': { count: 1 },
+  '106': { count: 1 },
+  '110': { count: 1 },
+  '114': { count: 1 },
+  '118': { count: 1 },
+}
+
 type DetailTab = 'metrics' | 'devices' | 'tasks' | 'alerts'
 type WorkspaceTab = 'orders' | 'transfer' | 'inventory'
 type RunControlAction = 'pause' | 'resume' | 'stop' | 'reset'
+
+const DEFAULT_MOTION_PHYSICS_DRAFT = {
+  metersPerCell: '0.8',
+  shuttleLevelHeightMeters: '3.0',
+  floorHeightMeters: '4.0',
+}
+
+const DEFAULT_MOTION_SPEED_DRAFT = {
+  simTickSeconds: '0.6',
+  ctuSpeedMetersPerSecond: '1.0',
+  shuttleSpeedMetersPerSecond: '1.2',
+  liftSpeedMetersPerSecond: '0.5',
+}
+
+function isPageReload(): boolean {
+  try {
+    const [entry] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[]
+    return entry?.type === 'reload'
+  } catch {
+    return false
+  }
+}
+
+function positiveFiniteDraftValue(label: string, value: string): number {
+  const parsed = Number(value)
+  if (!value.trim() || !Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${label}必须是有限正数。`)
+  }
+  return parsed
+}
+
+function positiveIntegerDraftValue(label: string, value: string): number {
+  const parsed = Number(value)
+  if (!value.trim() || !Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label}必须是正整数。`)
+  }
+  return parsed
+}
 
 const runControlProgressLabels: Record<RunControlAction, string> = {
   pause: '暂停中…',
@@ -81,8 +139,9 @@ function LiveEventCount({ persistedCount }: { persistedCount?: number }) {
 
 export function SimulationPage() {
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const requestedTopologyId = searchParams.get('topologyId') ?? ''
+  const requestedRunId = searchParams.get('runId') ?? ''
   const queryClient = useQueryClient()
   const selectedTopologyId = usePlatformStore((state) => state.selectedTopologyId)
   const selectedRunId = usePlatformStore((state) => state.selectedRunId)
@@ -95,13 +154,27 @@ export function SimulationPage() {
   const clearLiveEvents = usePlatformStore((state) => state.clearLiveEvents)
   const [activeFloor, setActiveFloor] = useState('1F')
   const [startError, setStartError] = useState('')
+  const [runRestoreError, setRunRestoreError] = useState('')
   const [starting, setStarting] = useState(false)
+  const [motionPhysicsEnabled, setMotionPhysicsEnabled] = useState(false)
+  const [motionPhysicsDraft, setMotionPhysicsDraft] = useState(DEFAULT_MOTION_PHYSICS_DRAFT)
+  const [motionSpeedEnabled, setMotionSpeedEnabled] = useState(false)
+  const [motionSpeedDraft, setMotionSpeedDraft] = useState(DEFAULT_MOTION_SPEED_DRAFT)
+  const [algorithmExperimentEnabled, setAlgorithmExperimentEnabled] = useState(false)
+  const [experimentScenarioId, setExperimentScenarioId] = useState('p5-comparison-01')
+  const [experimentPathPolicy, setExperimentPathPolicy] = useState<'astar' | 'dijkstra'>('astar')
+  const [experimentAssignmentPolicy, setExperimentAssignmentPolicy] = useState<'greedy' | 'hungarian' | 'throughput_aware'>('greedy')
+  const [experimentVariableDimension, setExperimentVariableDimension] = useState<'pathPolicy' | 'assignmentPolicy'>('pathPolicy')
+  const [throughputObservationEnabled, setThroughputObservationEnabled] = useState(false)
+  const [throughputObservationTicks, setThroughputObservationTicks] = useState('600')
   const [controlAction, setControlAction] = useState<RunControlAction | null>(null)
   const [controlNotice, setControlNotice] = useState('')
   const [completingPicking, setCompletingPicking] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('metrics')
   const [orderComposerOpen, setOrderComposerOpen] = useState(false)
+  const [runConfigOpen, setRunConfigOpen] = useState(false)
+  const [newSimulationPromptOpen, setNewSimulationPromptOpen] = useState(false)
   const [ordersCollapsed, setOrdersCollapsed] = useState(false)
   const [localOrders, setLocalOrders] = useState<SimulationOrderInput[]>([])
   const [removingOrderId, setRemovingOrderId] = useState('')
@@ -128,6 +201,8 @@ export function SimulationPage() {
   } | null>(null)
   const seededOrdersRef = useRef(false)
   const observedPickedRef = useRef(new Map<string, number>())
+  const restoredRunSourceRef = useRef('')
+  const skipRunRestoreRef = useRef(false)
 
   const topologiesQuery = useQuery({
     queryKey: ['topologies'],
@@ -143,6 +218,7 @@ export function SimulationPage() {
     queryKey: ['simulation-state', selectedRunId],
     queryFn: () => api.getSimulationState(selectedRunId),
     enabled: Boolean(selectedRunId),
+    retry: false,
     // 即使 WebSocket 显示已连接，也定期核对权威状态；浏览器休眠或网络
     // 切换时连接可能保持 OPEN，却已经漏掉货箱逐模块位置帧。
     refetchInterval: selectedRunId ? 1500 : false,
@@ -188,8 +264,38 @@ export function SimulationPage() {
     }
   }, [resolvedTopologyId, selectedTopologyId, setSelectedTopologyId])
 
+  useEffect(() => {
+    if (!resolvedTopologyId) return
+    if (skipRunRestoreRef.current) {
+      if (!requestedRunId) {
+        skipRunRestoreRef.current = false
+        restoredRunSourceRef.current = `${resolvedTopologyId}:`
+      }
+      return
+    }
+    // 浏览器刷新（F5）永远是全新仿真：忽略并清除地址栏里残留的 runId。
+    // 正常导航（如从性能分析页带 runId 返回）时保留参数并恢复该 Run。
+    const reloaded = isPageReload()
+    if (reloaded && requestedRunId) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('runId')
+      setSearchParams(next, { replace: true })
+    }
+    const restoredRunId = reloaded ? '' : requestedRunId
+    const sourceKey = `${resolvedTopologyId}:${restoredRunId}`
+    if (restoredRunSourceRef.current === sourceKey) return
+    restoredRunSourceRef.current = sourceKey
+    if (restoredRunId && restoredRunId !== selectedRunId) setSelectedRunId(restoredRunId)
+  }, [requestedRunId, resolvedTopologyId, searchParams, selectedRunId, setSearchParams, setSelectedRunId])
+
+  // 运行中的 Run 不写回 URL：刷新页面必须是全新仿真，只有显式 ?runId= 才恢复。
+  // 进入性能分析时由 openPerformanceAnalytics 单独携带 runId。
+
   const candidateState = selectSimulationStateSource(liveState, stateQuery.data, socketConnected)
-  const currentState = candidateState?.topologyId === resolvedTopologyId ? candidateState : undefined
+  const currentState = candidateState?.topologyId === resolvedTopologyId
+    && candidateState.id === selectedRunId
+    ? candidateState
+    : undefined
   const simulationActive = currentState?.status === 'running' || currentState?.status === 'paused'
   const currentMetrics = currentState
     ? (socketConnected ? (liveMetrics ?? metricsQuery.data) : (metricsQuery.data ?? liveMetrics))
@@ -200,6 +306,23 @@ export function SimulationPage() {
     ? findLayoutPreviewItem(transportLayoutQuery.data, selectedLayoutItemId)
     : undefined
 
+  function openPerformanceAnalytics() {
+    const params = new URLSearchParams()
+    if (resolvedTopologyId) params.set('topologyId', resolvedTopologyId)
+    // 只有权威状态（实时帧或 HTTP 查询）确认了 Run 与拓扑的归属，才把 runId 带过去。
+    // 直接读 queryClient，避免点击瞬间闭包里的 stateQuery.data 尚未刷新。
+    const queriedState = queryClient.getQueryData<SimulationState>(['simulation-state', selectedRunId])
+    const verifiedState = currentState
+      ?? (queriedState?.id === selectedRunId && queriedState.topologyId === resolvedTopologyId
+        ? queriedState
+        : undefined)
+    if (selectedRunId && verifiedState) {
+      params.set('runId', selectedRunId)
+    }
+    const query = params.toString()
+    navigate(`/simulation/analytics${query ? `?${query}` : ''}`)
+  }
+
   useEffect(() => {
     if (candidateState?.topologyId && resolvedTopologyId && candidateState.topologyId !== resolvedTopologyId) {
       resetRun()
@@ -209,6 +332,18 @@ export function SimulationPage() {
   useEffect(() => {
     if (!socketConnected && stateQuery.data) setLiveState(stateQuery.data)
   }, [setLiveState, socketConnected, stateQuery.data])
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      setRunRestoreError('')
+      return
+    }
+    if (stateQuery.isError && !currentState) {
+      setRunRestoreError(`Run ${selectedRunId} 不存在或无法从当前后端数据库读取；未使用前端缓存替代。`)
+    } else if (stateQuery.data?.id === selectedRunId) {
+      setRunRestoreError('')
+    }
+  }, [currentState, selectedRunId, stateQuery.data?.id, stateQuery.isError])
 
   useEffect(() => {
     observedPickedRef.current.clear()
@@ -237,14 +372,31 @@ export function SimulationPage() {
       if (task.picked > previous && task.orderId === selectedOrderId) {
         const pickedLine = task.lines[Math.max(0, task.picked - 1)]
         const assignedRobot = currentState.robots.find((robot) => robot.id === task.assignedRobotId)
-        const actualSlot = assignedRobot?.carrying?.[Math.max(0, (assignedRobot.carrying?.length ?? 1) - 1)]
+        // shuttle（四向车）的 carrying 是整个 task.lines 的拷贝，没有实际 slot 位置；
+        // 只有 CTU 的 carrying 是逐个 append 的实际 slot 盒子。
+        // 所以 shuttle 任务直接用 pickedLine 自身校验（lines 和 carrying 同源，skuId 必然一致），
+        // 不显示 nodeId/layer 等 CTU 专属位置字段。
+        const isShuttle = assignedRobot?.type === 'shuttle'
+        let actualSkuName: string
+        let verified: boolean
+        let location: string
+        if (isShuttle) {
+          actualSkuName = pickedLine?.skuName || pickedLine?.skuId || '已装入载箱位'
+          verified = true
+          location = pickedLine ? `${pickedLine.nodeId || pickedLine.cellId || ''} · 第 ${pickedLine.layer ?? '?'} 层` : (task.sourceCellId || '四向车载箱位')
+        } else {
+          const actualSlot = assignedRobot?.carrying?.[Math.max(0, (assignedRobot.carrying?.length ?? 1) - 1)]
+          actualSkuName = actualSlot?.skuName || actualSlot?.skuId || '未检测到载货'
+          verified = Boolean(actualSlot?.skuId && pickedLine?.skuId && actualSlot.skuId === pickedLine.skuId)
+          location = pickedLine ? `${pickedLine.nodeId || pickedLine.cellId} · 第 ${pickedLine.layer} 层` : (task.sourceCellId || '货道')
+        }
         setPickupNotice({
           id: `${task.id}-${task.picked}`,
           expectedSkuName: pickedLine?.skuName || pickedLine?.skuId || '指定货物',
-          actualSkuName: actualSlot?.skuName || actualSlot?.skuId || '未检测到载货',
-          location: pickedLine ? `${pickedLine.nodeId} · 第 ${pickedLine.layer} 层` : task.sourceCellId,
-          robotId: task.assignedRobotId || 'CTU',
-          verified: Boolean(actualSlot?.skuId && actualSlot.skuId === pickedLine?.skuId),
+          actualSkuName,
+          location,
+          robotId: task.assignedRobotId || (isShuttle ? '四向车' : 'CTU'),
+          verified,
         })
       }
       observedPickedRef.current.set(task.id, task.picked)
@@ -278,12 +430,12 @@ export function SimulationPage() {
   }
 
   useEffect(() => {
-    if (seededOrdersRef.current || selectedRunId || !catalogQuery.data?.skus.length) return
+    if (seededOrdersRef.current || selectedRunId || requestedRunId || !catalogQuery.data?.skus.length) return
     seededOrdersRef.current = true
     const demoOrders = createDemoOrders(catalogQuery.data.skus)
     setLocalOrders(demoOrders)
     setSelectedOrderId(demoOrders[0]?.id ?? '')
-  }, [catalogQuery.data, selectedRunId])
+  }, [catalogQuery.data, requestedRunId, resolvedTopologyId, selectedRunId])
 
   const displayedOrders = useMemo(() => {
     const runtimeOrders = currentState?.orders ?? []
@@ -318,16 +470,76 @@ export function SimulationPage() {
         setStartError('请先新建订单或加入跨层运输任务，再启动统一仿真。')
         return
       }
+      const motionPhysicsContract: MotionPhysicsContractInput | undefined = motionPhysicsEnabled
+        ? {
+            physicsContractVersion: 'motion-physics-v1',
+            coordinateContractVersion: 'topology-grid-v1',
+            metersPerCell: positiveFiniteDraftValue('每格水平长度', motionPhysicsDraft.metersPerCell),
+            shuttleLevelHeightMeters: positiveFiniteDraftValue('Shuttle层高', motionPhysicsDraft.shuttleLevelHeightMeters),
+            floorHeightMeters: positiveFiniteDraftValue('仓库楼层高度', motionPhysicsDraft.floorHeightMeters),
+            source: 'USER_DEFINED_SIMULATION',
+            calibrationStatus: 'UNVERIFIED',
+          }
+        : undefined
+      const motionSpeedContract: MotionSpeedContractInput | undefined = motionSpeedEnabled
+        ? {
+            speedContractVersion: 'motion-speed-v1',
+            simTickSeconds: positiveFiniteDraftValue('仿真时间步长', motionSpeedDraft.simTickSeconds),
+            ctuSpeedMetersPerSecond: positiveFiniteDraftValue('CTU速度', motionSpeedDraft.ctuSpeedMetersPerSecond),
+            shuttleSpeedMetersPerSecond: positiveFiniteDraftValue('Shuttle速度', motionSpeedDraft.shuttleSpeedMetersPerSecond),
+            liftSpeedMetersPerSecond: positiveFiniteDraftValue('Lift速度', motionSpeedDraft.liftSpeedMetersPerSecond),
+            source: 'USER_DEFINED_SIMULATION',
+            calibrationStatus: 'UNVERIFIED',
+          }
+        : undefined
+      if (motionSpeedContract && !motionPhysicsContract) {
+        throw new Error('车辆物理速度需要同时启用米制物理距离合同。')
+      }
+      const algorithmExperimentContract: AlgorithmExperimentContractInput | undefined = algorithmExperimentEnabled
+        ? {
+            experimentContractVersion: 'algorithm-experiment-v1',
+            scenarioId: experimentScenarioId.trim(),
+            scenarioVersion: '1',
+            seed: 42,
+            topologyRevision: transportLayoutQuery.data?.topologyRevision ?? '',
+            safetyLimitTicks: 10000,
+            ...(throughputObservationEnabled
+              ? { observationTicks: positiveIntegerDraftValue('吞吐观察窗口', throughputObservationTicks) }
+              : {}),
+            pathPolicy: experimentPathPolicy,
+            assignmentPolicy: experimentAssignmentPolicy,
+            variableDimension: experimentVariableDimension,
+            algorithmVersion: experimentAssignmentPolicy === 'throughput_aware'
+              ? 'throughput-aware-v1'
+              : 'agv-routing-assignment-v1',
+          }
+        : undefined
+      if (algorithmExperimentContract && (!motionPhysicsContract || !motionSpeedContract || !algorithmExperimentContract.topologyRevision)) {
+        throw new Error('算法实验需要米制、速度合同以及已加载的Topology Revision。')
+      }
       setShowPickingArmPreview(false)
       setPickingArmResetRequest((request) => request + 1)
       resetRun()
-      const result = await api.startSimulation(resolvedTopologyId, localOrders, localTransfers)
+      const result = await api.startSimulation(
+        resolvedTopologyId,
+        localOrders,
+        localTransfers,
+        motionPhysicsContract,
+        motionSpeedContract,
+        algorithmExperimentContract,
+      )
       if (!result.runId || result.status !== 'running') {
         throw new Error('后端未返回有效的运行实例。')
       }
       setSelectedRunId(result.runId)
       const nextState = await api.getSimulationState(result.runId)
       setLiveState(nextState)
+      if (motionPhysicsContract && !nextState.motionPhysicsContract) {
+        setStartError('当前后端未冻结已提交的米制合同；此 Run 不采用米制参数。请保留该 Run，并在人工确认后端版本后再新建 Run。')
+      }
+      if (motionSpeedContract && !nextState.motionSpeedContract) {
+        setStartError('当前后端未冻结已提交的速度合同；此 Run 不采用物理速度参数。')
+      }
       setLocalOrders([])
       setLocalTransfers([])
       await queryClient.invalidateQueries({ queryKey: ['runs'] })
@@ -443,6 +655,57 @@ export function SimulationPage() {
     }
   }
 
+  function resetNewRunDraft() {
+    setLocalOrders([])
+    setLocalTransfers([])
+    setSelectedOrderId('')
+    setMotionPhysicsEnabled(false)
+    setMotionPhysicsDraft(DEFAULT_MOTION_PHYSICS_DRAFT)
+    setMotionSpeedEnabled(false)
+    setMotionSpeedDraft(DEFAULT_MOTION_SPEED_DRAFT)
+    setAlgorithmExperimentEnabled(false)
+    setExperimentScenarioId('p5-comparison-01')
+    setExperimentPathPolicy('astar')
+    setExperimentAssignmentPolicy('greedy')
+    setExperimentVariableDimension('pathPolicy')
+    setThroughputObservationEnabled(false)
+    setThroughputObservationTicks('600')
+  }
+
+  function enterNewSimulationDraft(preserveDraft: boolean) {
+    const exitedRunWasActive = isRunActive
+    skipRunRestoreRef.current = true
+    const next = new URLSearchParams(searchParams)
+    next.delete('runId')
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true })
+
+    resetRun()
+    if (!preserveDraft) resetNewRunDraft()
+    seededOrdersRef.current = true
+    observedPickedRef.current.clear()
+    setStartError('')
+    setRunRestoreError('')
+    setDetailsOpen(false)
+    setOrderComposerOpen(false)
+    setRunConfigOpen(true)
+    setWorkspaceTab('orders')
+    setSelectedRobotId('')
+    setFollowSelectedRobot(false)
+    setPickupNotice(null)
+    setNewSimulationPromptOpen(false)
+    setControlNotice(exitedRunWasActive
+      ? '已退出当前 Run 视图并进入新 Run 草稿；后台 Run 不受影响。'
+      : '已进入新 Run 草稿；历史 Run 仍完整保留。')
+  }
+
+  function requestNewSimulation() {
+    if (isRunActive || hasUnsavedRunDraft) {
+      setNewSimulationPromptOpen(true)
+      return
+    }
+    enterNewSimulationDraft(false)
+  }
+
   const sortedTasks = useMemo(() => [...(currentState?.tasks ?? [])].sort((left, right) => {
     const leftWeight = left.status === 'completed' ? 1 : 0
     const rightWeight = right.status === 'completed' ? 1 : 0
@@ -454,6 +717,35 @@ export function SimulationPage() {
   const robots = currentState?.robots ?? []
   const isRunning = currentState?.status === 'running'
   const isRunActive = ['running', 'paused'].includes(currentState?.status ?? '')
+  const frozenMotionPhysicsContract = currentState?.motionPhysicsContract
+  const frozenMotionSpeedContract = currentState?.motionSpeedContract
+  const frozenAlgorithmContract = currentState?.algorithmExperimentContract
+  const runConfigReadOnly = Boolean(selectedRunId && currentState)
+  const configScopeLabel = !runConfigReadOnly
+    ? '下次新 Run：可编辑草稿'
+    : isRunActive
+      ? '当前运行中 Run：只能查看冻结配置'
+      : '历史 Run：只能查看历史冻结配置'
+  const displayedPhysicsEnabled = runConfigReadOnly ? Boolean(frozenMotionPhysicsContract) : motionPhysicsEnabled
+  const displayedSpeedEnabled = runConfigReadOnly ? Boolean(frozenMotionSpeedContract) : motionSpeedEnabled
+  const displayedExperimentEnabled = runConfigReadOnly ? Boolean(frozenAlgorithmContract) : algorithmExperimentEnabled
+  const hasCustomizedRunConfigDraft = motionPhysicsEnabled
+    || motionSpeedEnabled
+    || algorithmExperimentEnabled
+    || throughputObservationEnabled
+    || motionPhysicsDraft.metersPerCell !== DEFAULT_MOTION_PHYSICS_DRAFT.metersPerCell
+    || motionPhysicsDraft.shuttleLevelHeightMeters !== DEFAULT_MOTION_PHYSICS_DRAFT.shuttleLevelHeightMeters
+    || motionPhysicsDraft.floorHeightMeters !== DEFAULT_MOTION_PHYSICS_DRAFT.floorHeightMeters
+    || motionSpeedDraft.simTickSeconds !== DEFAULT_MOTION_SPEED_DRAFT.simTickSeconds
+    || motionSpeedDraft.ctuSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.ctuSpeedMetersPerSecond
+    || motionSpeedDraft.shuttleSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.shuttleSpeedMetersPerSecond
+    || motionSpeedDraft.liftSpeedMetersPerSecond !== DEFAULT_MOTION_SPEED_DRAFT.liftSpeedMetersPerSecond
+    || experimentScenarioId !== 'p5-comparison-01'
+    || experimentPathPolicy !== 'astar'
+    || experimentAssignmentPolicy !== 'greedy'
+    || experimentVariableDimension !== 'pathPolicy'
+    || throughputObservationTicks !== '600'
+  const hasUnsavedRunDraft = localOrders.length > 0 || localTransfers.length > 0 || hasCustomizedRunConfigDraft
   const sceneTasks = useMemo(() => workspaceTab === 'orders'
     ? (selectedOrder ? sortedTasks.filter((task) => task.orderId === selectedOrder.id) : sortedTasks)
     : sortedTasks.filter((task) => task.mode === 'shuttle_transfer'),
@@ -489,7 +781,7 @@ export function SimulationPage() {
     : focusTask?.mode === 'shuttle_transfer'
       ? `${focusTask.destinationLocationId ?? focusTask.deliveryCellId} · L${focusTask.targetLayer}`
       : focusTask
-        ? `${focusTask.assignedPortLabel ?? '出库交付点'} · ${focusTask.deliveryCellId}`
+        ? `${restoreUtf8CjkLabel(focusTask.assignedPortLabel ?? '出库交付点')} · ${focusTask.deliveryCellId}`
         : ''
   const runStatusLabel = starting
     ? '启动中…'
@@ -530,12 +822,27 @@ export function SimulationPage() {
           </span>
           <span><small>Tick</small><strong>{currentState?.tick ?? 0}</strong></span>
           <span><small>事件</small><LiveEventCount persistedCount={currentState?.eventCount} /></span>
+          <span title="四向车库货位取空后的空托盘，堆叠在 (76,35) 输送线上">
+            <small>空托盘</small>
+            <strong>
+              {currentState?.emptyPalletStack?.count ?? 0}/{currentState?.emptyPalletStack?.capacity ?? 6}
+            </strong>
+          </span>
         </div>
 
         <div className="simulation-actions">
           <button className="ghost-button" onClick={() => navigate('/topology')} type="button">
             <ArrowLeft size={16} />
             返回编辑
+          </button>
+          <button
+            className="simulation-new-run-button"
+            onClick={requestNewSimulation}
+            disabled={starting || Boolean(controlAction)}
+            type="button"
+          >
+            <FilePlus2 size={16} />
+            新建仿真
           </button>
           {pickingTask ? (
             <button className="ghost-button" onClick={() => void completePicking()} disabled={completingPicking} type="button">
@@ -590,11 +897,105 @@ export function SimulationPage() {
         </div>
       </header>
 
+      {newSimulationPromptOpen ? (
+        <div className="simulation-new-run-dialog-backdrop" role="presentation">
+          <section
+            className="simulation-new-run-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="simulation-new-run-title"
+            aria-describedby="simulation-new-run-description"
+          >
+            <div className="simulation-new-run-dialog-icon"><FilePlus2 size={22} /></div>
+            <div>
+              <h2 id="simulation-new-run-title">进入新 Run 草稿</h2>
+              <p id="simulation-new-run-description">
+                {isRunActive
+                  ? '仅退出当前 Run 视图，后台 Run 不受影响；不会停止 Run，也不会取消正在执行的订单。'
+                  : '当前历史 Run 会完整保留，可稍后重新查询；此操作不会调用重置、停止或删除接口。'}
+              </p>
+              {hasUnsavedRunDraft ? (
+                <p className="simulation-new-run-draft-warning">
+                  检测到未提交的订单、跨层任务或运行配置草稿，请选择保留或放弃。
+                </p>
+              ) : null}
+            </div>
+            <div className="simulation-new-run-dialog-actions">
+              <button className="ghost-button" type="button" onClick={() => setNewSimulationPromptOpen(false)}>取消</button>
+              {hasUnsavedRunDraft ? (
+                <>
+                  <button className="ghost-button" type="button" onClick={() => enterNewSimulationDraft(false)}>放弃草稿并新建</button>
+                  <button className="accent-button" type="button" onClick={() => enterNewSimulationDraft(true)}>保留草稿并新建</button>
+                </>
+              ) : (
+                <button className="accent-button" type="button" onClick={() => enterNewSimulationDraft(false)}>退出视图并新建</button>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      <section className="simulation-config-summary" aria-label="当前Run冻结配置摘要">
+        <div><span>米制比例</span><strong>{frozenMotionPhysicsContract ? `${frozenMotionPhysicsContract.metersPerCell} m/格` : '未冻结'}</strong></div>
+        <div><span>CTU 速度</span><strong>{frozenMotionSpeedContract ? `${frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s` : '未冻结'}</strong></div>
+        <div><span>Shuttle 速度</span><strong>{frozenMotionSpeedContract ? `${frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s` : '未冻结'}</strong></div>
+        <div><span>路径算法</span><strong>{frozenAlgorithmContract ? frozenAlgorithmContract.pathPolicy.toUpperCase() : '未冻结'}</strong></div>
+        <small>{selectedRunId ? '以上为当前所选 Run 的真实冻结值' : '尚无当前 Run；草稿请在运行配置中查看'}</small>
+        <button className="ghost-button" type="button" onClick={() => setRunConfigOpen(true)} aria-expanded={runConfigOpen}><Settings2 size={16} />运行配置</button>
+      </section>
+
+      <aside className={`simulation-run-config-drawer ${runConfigOpen ? 'open' : ''}`} aria-hidden={!runConfigOpen} aria-label="运行配置">
+        <div className="simulation-run-config-header">
+          <div><strong>运行配置</strong><span>{configScopeLabel}</span></div>
+          <button type="button" onClick={() => setRunConfigOpen(false)} aria-label="关闭运行配置"><X size={18} /></button>
+        </div>
+        <div className="simulation-run-config-body">
+          <div className={`simulation-config-scope ${runConfigReadOnly ? 'is-frozen' : ''}`}><b>{configScopeLabel}</b><span>{runConfigReadOnly ? '冻结合同不会被添加订单或播放倍率修改。' : '关闭抽屉不会丢失草稿；仅在启动新 Run 时提交。'}</span></div>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>A</span><div><strong>物理尺寸设置</strong><small>用户定义模拟参数，不代表正式 CAD 标定</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="下次新建 Run 启用米制模拟" type="checkbox" checked={displayedPhysicsEnabled} disabled={runConfigReadOnly} onChange={(event) => setMotionPhysicsEnabled(event.target.checked)} />启用米制模拟</label>
+            <div className="simulation-config-fields">
+              {([['每格水平长度', 'metersPerCell', 'm/格'], ['Shuttle层高', 'shuttleLevelHeightMeters', 'm/层'], ['仓库楼层高度', 'floorHeightMeters', 'm/层']] as const).map(([label, key, unit]) => <label key={key}><span>{label}</span><div><input aria-label={label} type="number" min="0" step="0.1" value={runConfigReadOnly ? frozenMotionPhysicsContract?.[key] ?? '' : motionPhysicsDraft[key]} disabled={!displayedPhysicsEnabled || runConfigReadOnly} onChange={(event) => setMotionPhysicsDraft((value) => ({ ...value, [key]: event.target.value }))} /><small>{unit}</small></div></label>)}
+            </div>
+            {runConfigReadOnly ? <p className="simulation-config-contract-note">{frozenMotionPhysicsContract ? `冻结值：${frozenMotionPhysicsContract.metersPerCell} m/格 · Shuttle ${frozenMotionPhysicsContract.shuttleLevelHeightMeters} m/层 · 楼层 ${frozenMotionPhysicsContract.floorHeightMeters} m/层` : '当前 Run 未采用米制合同；下一次启动草稿不会改写此 Run。'}</p> : null}
+          </section>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>B</span><div><strong>车辆速度设置</strong><small>物理推进独立于 1× / 2× / 4× 播放倍率</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="下次新建 Run 启用物理速度模拟" type="checkbox" checked={displayedSpeedEnabled} disabled={runConfigReadOnly} onChange={(event) => setMotionSpeedEnabled(event.target.checked)} />启用物理速度模拟</label>
+            <div className="simulation-config-fields simulation-speed-fields">
+              {([['CTU速度', 'ctuSpeedMetersPerSecond', 'm/s'], ['Shuttle速度', 'shuttleSpeedMetersPerSecond', 'm/s'], ['Lift速度', 'liftSpeedMetersPerSecond', 'm/s'], ['仿真时间步长', 'simTickSeconds', 's/Tick']] as const).map(([label, key, unit]) => <label key={key}><span>{label}</span><div><input aria-label={label} type="number" min="0" step="0.1" value={runConfigReadOnly ? frozenMotionSpeedContract?.[key] ?? '' : motionSpeedDraft[key]} disabled={!displayedSpeedEnabled || runConfigReadOnly} onChange={(event) => setMotionSpeedDraft((value) => ({ ...value, [key]: event.target.value }))} /><small>{unit}</small></div></label>)}
+            </div>
+            {runConfigReadOnly ? <p className="simulation-config-contract-note">{frozenMotionSpeedContract ? `冻结速度：CTU ${frozenMotionSpeedContract.ctuSpeedMetersPerSecond} m/s · Shuttle ${frozenMotionSpeedContract.shuttleSpeedMetersPerSecond} m/s · Lift ${frozenMotionSpeedContract.liftSpeedMetersPerSecond} m/s · ${frozenMotionSpeedContract.simTickSeconds} s/Tick` : '当前 Run 未启用物理速度合同；播放倍率不代表车辆 m/s。'}</p> : null}
+          </section>
+          <section className="simulation-config-card">
+            <div className="simulation-config-card-title"><span>C</span><div><strong>算法实验设置</strong><small>这里选择的是下一次 Run 使用的算法，不是算法效果对比结果。</small></div></div>
+            <label className="simulation-config-toggle"><input aria-label="将下次 Run 标记为可复现实验" type="checkbox" checked={displayedExperimentEnabled} disabled={runConfigReadOnly} onChange={(event) => setAlgorithmExperimentEnabled(event.target.checked)} />标记为可复现实验</label>
+            <label className="simulation-config-text-field"><span>scenarioId</span><input value={runConfigReadOnly ? frozenAlgorithmContract?.scenarioId ?? '' : experimentScenarioId} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentScenarioId(event.target.value)} /></label>
+            <fieldset className="simulation-algorithm-fieldset" disabled={!displayedExperimentEnabled || runConfigReadOnly}><legend>路径算法</legend><div className="simulation-algorithm-cards">
+              {([['astar', 'A*', '启发式搜索，通常访问更少状态'], ['dijkstra', 'Dijkstra', '无启发式的最短路径基线']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.pathPolicy : experimentPathPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentPathPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
+            </div></fieldset>
+            <fieldset className="simulation-algorithm-fieldset" disabled={!displayedExperimentEnabled || runConfigReadOnly}><legend>分配算法</legend><div className="simulation-algorithm-cards">
+              {([['greedy', 'Greedy', '逐任务选择当前最优车辆'], ['hungarian', 'Hungarian', '批量求解全局匹配成本'], ['throughput_aware', '吞吐量感知调度', '综合预计交付耗时、当前道路拥堵和任务等待年龄进行任务分配。']] as const).map(([value, name, description]) => { const selected = (runConfigReadOnly ? frozenAlgorithmContract?.assignmentPolicy : experimentAssignmentPolicy) === value; return <button className={selected ? 'active' : ''} type="button" key={value} aria-pressed={selected} onClick={() => setExperimentAssignmentPolicy(value)}><b>{name}</b><small>{description}</small></button> })}
+            </div></fieldset>
+            <label className="simulation-config-text-field"><span>本组唯一变量</span><select value={runConfigReadOnly ? frozenAlgorithmContract?.variableDimension ?? experimentVariableDimension : experimentVariableDimension} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setExperimentVariableDimension(event.target.value as 'pathPolicy' | 'assignmentPolicy')}><option value="pathPolicy">路径算法</option><option value="assignmentPolicy">分配算法</option></select></label>
+            <label className="simulation-config-toggle"><input aria-label="启用固定吞吐观察窗口" type="checkbox" checked={runConfigReadOnly ? frozenAlgorithmContract?.observationTicks !== undefined && frozenAlgorithmContract?.observationTicks !== null : throughputObservationEnabled} disabled={!displayedExperimentEnabled || runConfigReadOnly} onChange={(event) => setThroughputObservationEnabled(event.target.checked)} />启用固定吞吐观察窗口</label>
+            <label className="simulation-config-text-field"><span>吞吐观察窗口</span><div><input aria-label="吞吐观察窗口Tick" type="number" min="1" step="1" value={runConfigReadOnly ? frozenAlgorithmContract?.observationTicks ?? '' : throughputObservationTicks} disabled={!displayedExperimentEnabled || runConfigReadOnly || !throughputObservationEnabled} onChange={(event) => setThroughputObservationTicks(event.target.value)} /><small>Tick</small></div></label>
+            <p className="simulation-config-contract-note">开启后，Run 在指定 Tick 以 observation_window_complete 正常截止；用于比较相同仿真时间内的真实交付件数。</p>
+          </section>
+        </div>
+        <div className="simulation-run-config-footer"><span>{runConfigReadOnly ? '只读冻结配置' : '草稿已保留在当前页面'}</span><button type="button" className="accent-button" onClick={() => setRunConfigOpen(false)}>完成</button></div>
+      </aside>
+
       <main className={`simulation-scene-stage ${workspaceTab === 'orders' && ordersCollapsed ? 'simulation-orders-collapsed' : 'simulation-orders-expanded'}`}>
-        <div className="simulation-workspace-tabs" role="tablist" aria-label="工作台功能">
-          <button className={workspaceTab === 'orders' ? 'active' : ''} onClick={() => setWorkspaceTab('orders')} type="button">订单调度</button>
-          <button className={workspaceTab === 'transfer' ? 'active' : ''} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
-          <button className={workspaceTab === 'inventory' ? 'active' : ''} onClick={() => setWorkspaceTab('inventory')} type="button">库存详情</button>
+        <div className="simulation-workspace-tabs" role="navigation" aria-label="工作台功能">
+          <button className={workspaceTab === 'orders' ? 'active' : ''} aria-pressed={workspaceTab === 'orders'} onClick={() => setWorkspaceTab('orders')} type="button">订单调度</button>
+          <button className={`simulation-transfer-tab ${workspaceTab === 'transfer' ? 'active' : ''}`} aria-pressed={workspaceTab === 'transfer'} onClick={() => setWorkspaceTab('transfer')} type="button">跨层运输</button>
+          <button onClick={openPerformanceAnalytics} type="button">性能分析</button>
+          {workspaceTab === 'transfer' ? (
+            <button onClick={() => setWorkspaceTab('inventory')} type="button">查看库存</button>
+          ) : workspaceTab === 'inventory' ? (
+            <button className="active" aria-pressed={true} onClick={() => setWorkspaceTab('transfer')} type="button">返回跨层运输</button>
+          ) : null}
         </div>
         {workspaceTab === 'orders' ? (
           <OrderRail
@@ -627,9 +1028,10 @@ export function SimulationPage() {
         ) : (
           <TransferInventoryPanel simulation={currentState} />
         )}
-        {startError || controlNotice || safetyStopMessage || runtimeErrorMessage || taskFailureMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
+        {startError || runRestoreError || controlNotice || safetyStopMessage || runtimeErrorMessage || taskFailureMessage || (!topologiesQuery.isLoading && requestedTopologyId && !requestedTopologyExists) ? (
           <div className="simulation-message-stack">
             {startError ? <p className="form-error">{startError}</p> : null}
+            {runRestoreError ? <p className="form-error" role="alert">{runRestoreError}</p> : null}
             {controlNotice ? <p className="simulation-control-notice" role="status">{controlNotice}</p> : null}
             {safetyStopMessage ? <p className="form-error">{safetyStopMessage}</p> : null}
             {runtimeErrorMessage ? <p className="form-error" role="alert">{runtimeErrorMessage}</p> : null}
@@ -864,6 +1266,8 @@ export function SimulationPage() {
                     pickingArmResetRequest={pickingArmResetRequest}
                     armRuntime={currentState?.pickingArm ?? null}
                     armBeltBoxes={currentState?.armBeltBoxes ?? []}
+                    emptyPalletStack={currentState?.emptyPalletStack ?? null}
+                    palletDocks={currentState?.palletDocks ?? DEFAULT_PALLET_DOCKS}
                     armSecondaryRuntime={currentState?.pickingArms ?? []}
                     armDropBoxes={currentState?.armDropBoxes ?? []}
                     simulationActive={simulationActive}
@@ -984,7 +1388,7 @@ export function SimulationPage() {
                             <td>{task.status}</td>
                             <td>{task.phaseLabel}</td>
                             <td>{task.sourceCellId}<br /><span className="muted-copy">{task.lines?.length ?? 1} 项 · 已取 {task.picked ?? 0}</span></td>
-                            <td>{task.assignedPortLabel ?? task.targetCellId}<br /><span className="muted-copy">{task.deliveryCellId}{task.portQueuePosition ? ` · 队列 ${task.portQueuePosition}` : ''}</span></td>
+                            <td>{restoreUtf8CjkLabel(task.assignedPortLabel ?? task.targetCellId)}<br /><span className="muted-copy">{task.deliveryCellId}{task.portQueuePosition ? ` · 队列 ${task.portQueuePosition}` : ''}</span></td>
                             <td>{task.assignedRobotId ?? '-'}</td>
                           </tr>
                         ))}
@@ -1036,6 +1440,11 @@ export function SimulationPage() {
         ) : null}
         <OrderComposer
           open={orderComposerOpen}
+          runActive={isRunActive}
+          onOpenRunConfig={() => {
+            setOrderComposerOpen(false)
+            setRunConfigOpen(true)
+          }}
           catalog={catalogQuery.data?.skus ?? []}
           catalogError={catalogQuery.isError
             ? (catalogQuery.error instanceof Error ? catalogQuery.error.message : '未知错误')
