@@ -3903,8 +3903,13 @@ class SimulationService:
     def _move_robots(self, runtime: RunRuntime) -> None:
         movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle", "exception"}]
         movable.sort(key=lambda item: item["id"])
-        occupied_cells = {robot["currentCellId"] for robot in runtime.state["robots"]}
-        reserved_targets: set[str] = set()
+        # occupied_cells: (cell-id, layer) tuple —— 同 2D 位置不同层是不同 entry，
+        # discard 只释放当前车的那一层，不会误伤其他层的车。
+        occupied_cells: set[tuple[str, float]] = {
+            (robot["currentCellId"], float(robot.get("currentLayer", 1)))
+            for robot in runtime.state["robots"]
+        }
+        reserved_targets: set[tuple[str, float]] = set()
 
         for robot in movable:
             task = find_task(runtime.state["tasks"], robot["currentTaskId"])
@@ -3947,19 +3952,41 @@ class SimulationService:
             if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
                 robot["phaseLabel"] = task["phaseLabel"]
                 continue
-            occupied_cells.discard(current_cell_id)
 
-            if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
+            # 碰撞检查：目标格(含 layer)不是自己当前位置 且 被其他车/预占占用
+            # 关键：保持 occupied_cells 完整，不 discard 当前车自己的 entry。
+            # 只有在真正移动成功时才 discard 旧格 + add 新格。
+            current_entry = (current_cell_id, float(robot.get("currentLayer", 1)))
+            next_entry = (next_cell_id, float(next_layer))
+            if next_entry != current_entry and (next_entry in occupied_cells or next_entry in reserved_targets):
                 robot["status"] = "blocked"
                 robot["waitTicks"] += 1
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
-                occupied_cells.add(current_cell_id)
-                blocker = next((item for item in movable if item["currentCellId"] == next_cell_id), None)
+                floor, row, col = parse_cell_id(robot["currentCellId"])
+                self._record_event(
+                    runtime,
+                    runtime.state["tick"],
+                    "robot_position",
+                    {
+                        "robotId": robot["id"],
+                        "cellId": robot["currentCellId"],
+                        "floor": floor,
+                        "row": row,
+                        "col": col,
+                        "layer": float(robot.get("currentLayer", 1)),
+                        "status": "blocked",
+                    },
+                )
+                blocker = next(
+                    (item for item in movable if (item["currentCellId"], float(item.get("currentLayer", 1))) == next_entry),
+                    None,
+                )
                 observed_blocker = next(
                     (
-                        item for item in runtime.state["robots"]
+                        item
+                        for item in runtime.state["robots"]
                         if item.get("id") != robot.get("id")
-                        and item.get("currentCellId") == next_cell_id
+                        and (item["currentCellId"], float(item.get("currentLayer", 1))) == next_entry
                     ),
                     None,
                 )
@@ -3967,7 +3994,7 @@ class SimulationService:
                     ResourceType.ROBOT
                     if observed_blocker is not None
                     else ResourceType.RESERVATION
-                    if next_cell_id in reserved_targets
+                    if next_entry in reserved_targets
                     else ResourceType.UNKNOWN_BLOCKER
                 )
                 self._observe_robot_block(
@@ -3980,7 +4007,7 @@ class SimulationService:
                         "NEXT_CELL_OCCUPIED"
                         if observed_blocker is not None
                         else "TARGET_RESERVED"
-                        if next_cell_id in reserved_targets
+                        if next_entry in reserved_targets
                         else "UNKNOWN_BLOCKER"
                     ),
                 )
@@ -4046,8 +4073,10 @@ class SimulationService:
                     )
             else:
                 robot["phaseLabel"] = task["phaseLabel"]
-            occupied_cells.add(next_cell_id)
-            reserved_targets.add(next_cell_id)
+            # 真正移动成功：释放旧格(含 layer)，占用新格(含 layer)
+            occupied_cells.discard(current_entry)
+            occupied_cells.add(next_entry)
+            reserved_targets.add(next_entry)
             self._record_committed_motion(
                 runtime,
                 robot,
@@ -4062,12 +4091,14 @@ class SimulationService:
 
         self._flush_motion_events(runtime)
 
-    def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+    def _reroute_ctu(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]]) -> bool:
         """CTU 被堵时绕行：把其它设备当前占用的格临时视为障碍，重新算一条到当前目标的路径。"""
         target = robot.get("targetCellId")
         if not target or target == robot["currentCellId"]:
             return False
-        others = {parse_cell_id(cell) for cell in occupied_cells if cell != robot["currentCellId"]}
+        # occupied_cells 是 (cell-id, layer) tuple 集合，CTU 用 2D pathfinding → 只取 cell-id 部分
+        current_entry = (robot["currentCellId"], float(robot.get("currentLayer", 1)))
+        others = {parse_cell_id(cell) for cell, layer_f in occupied_cells if (cell, layer_f) != current_entry}
         # 普通绕行不得立即返回上一格，否则两辆相邻 CTU 会同步在两条巷道间
         # A-B-A-B 往返。真正需要后退时由 _clear_head_on/_yield_ctu 显式执行。
         last_cell = robot.get("lastCellId")
@@ -4086,7 +4117,7 @@ class SimulationService:
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         if task and task.get("phase") == "pickup_from_ctu" and len(path_cells) > 1:
             path_cells = path_cells[:-1]
-        if not path_cells or len(path_cells) <= 1 or path_cells[1]["id"] in occupied_cells:
+        if not path_cells or len(path_cells) <= 1 or (path_cells[1]["id"], float(robot.get("currentLayer", 1))) in occupied_cells:
             return False
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
@@ -4102,7 +4133,7 @@ class SimulationService:
         )
         return True
 
-    def _reroute_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+    def _reroute_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]]) -> bool:
         """四向车被堵时绕行：把其它四向车占用的格（含其下一步意图格）视为动态障碍，
         重新规划到原路径终点（path[-1]，即当前阶段目标）。轨道回放任务不重排。"""
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
@@ -4139,7 +4170,8 @@ class SimulationService:
         if not path3d or len(path3d) <= 1:
             return False
         first = cell_id(path3d[1][0], path3d[1][1], "1F")
-        if first in occupied_cells:
+        first_layer = float(path3d[1][2]) if len(path3d[1]) > 2 else current_layer
+        if (first, first_layer) in occupied_cells:
             return False
         stage = task.get("phase", "moving") if task else "moving"
         robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
@@ -4156,12 +4188,14 @@ class SimulationService:
         )
         return True
 
-    def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str], reserved_targets: set[str]) -> bool:
+    def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]], reserved_targets: set[tuple[str, float]]) -> bool:
         """四向车退回上一格（仅地面层；layer>1 的竖井场景不适用），破坏头对头对峙。"""
         if int(robot.get("currentLayer", 1)) != 1:
             return False
         last = robot.get("lastCellId")
-        if not last or last == robot["currentCellId"] or last in occupied_cells or last in reserved_targets:
+        # 后退只在 L1 发生：占用 (last, layer) 必须是空的
+        last_entry = (last, 1.0)
+        if not last or last == robot["currentCellId"] or last_entry in occupied_cells or last_entry in reserved_targets:
             return False
         if not self._physical_movement_ready(
             runtime,
@@ -4199,20 +4233,81 @@ class SimulationService:
         runtime: RunRuntime,
         robot: dict[str, Any],
         blocker: dict[str, Any] | None,
-        occupied_cells: set[str],
-        reserved_targets: set[str],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
     ) -> bool:
-        """两台四向车在带面/巷道头对头：确认对向车正要进入本车格后，退一格再绕行；
-        本车退不了则让对向车退。带面与巷道块都是 2 格宽，退让后必有并行道可绕。"""
+        """两台四向车在巷道头对头：让其中一辆 yield 到 row±1 的输送线（避车线），
+        等对向车通过后再继续。退一格 col 只作后备（如果 row±1 也被占）。"""
         if blocker is None or blocker.get("type") != "shuttle" or blocker.get("status") in {"failed", "idle", "exception"}:
             return False
         blocker_path = blocker.get("path") or []
         if len(blocker_path) <= 1 or blocker_path[1] != robot["currentCellId"]:
             return False
+
+        # 固定优先级：ID 较大的车辆让行，避免对称振荡
+        yielding, _priority = sorted((robot, blocker), key=lambda item: str(item.get("id")), reverse=True)
+
+        # 优先方案：yield 到 row±1 的输送线格（row 94-95 是输送线避车带）
+        if int(yielding.get("currentLayer", 1)) == 1:
+            cur_row = int(yielding.get("currentRow", 0))
+            cur_col = int(yielding.get("currentCol", 0))
+            cur_layer = 1.0
+            # 尝试 row-1（输送线方向），再 row+1
+            for row_offset in (-1, 1):
+                target_row = cur_row + row_offset
+                if target_row < 94: continue  # 不要越界
+                target_cell = cell_id(target_row, cur_col, "1F")
+                target_entry = (target_cell, cur_layer)
+                if target_entry in occupied_cells or target_entry in reserved_targets:
+                    continue
+                # 检查这个 row/col 是否是 walkable
+                try:
+                    floor, r, c = parse_cell_id(target_cell)
+                    if r != target_row or c != cur_col: continue
+                except (TypeError, ValueError):
+                    continue
+                if not self._physical_movement_ready(runtime, yielding, target_cell, cur_layer):
+                    continue
+                # 成功 yield 到输送线
+                motion_from = self._motion_position(runtime, yielding)
+                self._consume_motion_credit(yielding)
+                old_path = yielding.get("path") or [yielding["currentCellId"]]
+                old_layers = yielding.get("pathLayers") or [int(yielding.get("currentLayer", 1))] * len(old_path)
+                yielding["lastCellId"] = yielding["currentCellId"]
+                yielding["currentCellId"] = target_cell
+                yielding["currentRow"] = target_row
+                yielding["currentCol"] = cur_col
+                yielding["currentLayer"] = cur_layer
+                yielding["currentFloor"] = "1F"
+                # path: 当前 yield 格 → 原 path（先停 3 tick 等对向过）
+                yielding["path"] = [target_cell] + list(old_path)
+                yielding["pathLayers"] = [1] + [int(l) for l in old_layers]
+                yielding["pathStages"] = ["yield_to_conveyor"] + [yielding.get("phaseLabel", "moving")] * len(old_path)
+                yielding["yieldTicks"] = 3  # 等 3 tick 让对向车先走
+                yielding["waitTicks"] = 0
+                yielding["status"] = "blocked"
+                yielding["phaseLabel"] = "让行至输送线避车位"
+                # occupied_cells 更新
+                occupied_cells.discard((yielding["lastCellId"], cur_layer))
+                occupied_cells.add(target_entry)
+                reserved_targets.add(target_entry)
+                self._record_committed_motion(
+                    runtime, yielding, motion_from, MovementType.BACKOFF, "head_on_yield_conveyor"
+                )
+                floor, row, col = parse_cell_id(yielding["currentCellId"])
+                self._record_event(
+                    runtime, runtime.state["tick"], "robot_position",
+                    {"robotId": yielding["id"], "cellId": yielding["currentCellId"],
+                     "floor": floor, "row": row, "col": col, "layer": cur_layer,
+                     "status": "yielding"},
+                )
+                self._observe_deadlock_mitigation(runtime, yielding, "YIELD_CONVEYOR", "shuttle_head_on")
+                return True
+
+        # Fallback: 退一格 col（原 back_off 逻辑）
         if self._back_off_shuttle(runtime, robot, occupied_cells, reserved_targets):
             if self._reroute_shuttle(runtime, robot, occupied_cells):
                 return True
-            # 退了但暂时绕不开：至少打破头对头，对向车可以先走
             robot["status"] = "moving"
             return True
         if self._back_off_shuttle(runtime, blocker, occupied_cells, reserved_targets):
@@ -4224,7 +4319,7 @@ class SimulationService:
         runtime: RunRuntime,
         robot: dict[str, Any],
         blocker: dict[str, Any] | None,
-        occupied_cells: set[str],
+        occupied_cells: set[tuple[str, float]],
     ) -> bool:
         """头对头死锁：两台车互相把对方当前格当作下一格时，让其中一台后退一格再绕行。"""
         if blocker is None or blocker["status"] in {"failed", "idle", "exception"}:
@@ -4239,10 +4334,12 @@ class SimulationService:
             return True
         return self._yield_one_cell(runtime, priority, occupied_cells)
 
-    def _yield_one_cell(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str]) -> bool:
+    def _yield_one_cell(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]]) -> bool:
         """后退到上一格，并从那里重新规划到原目标；退不了或规划失败返回 False。"""
         last = robot.get("lastCellId")
-        if not last or last == robot["currentCellId"] or last in occupied_cells:
+        cur_layer_f = float(robot.get("currentLayer", 1))
+        last_entry = (last, cur_layer_f)
+        if not last or last == robot["currentCellId"] or last_entry in occupied_cells:
             return False
         # 不能退进货位/输送带格（上一格是刚取完货的库位时会出现）。
         if parse_cell_id(last) in build_occupied_lookup(runtime.topology):
@@ -4250,7 +4347,9 @@ class SimulationService:
         target = robot.get("targetCellId")
         if not target:
             return False
-        blocked = {parse_cell_id(cell) for cell in occupied_cells}
+        # occupied_cells 是 (cell-id, layer) tuple 集合，2D pathfinding 只取 cell-id 部分
+        cur_entry = (robot["currentCellId"], cur_layer_f)
+        blocked = {parse_cell_id(cell) for cell, _layer in occupied_cells if (cell, _layer) != cur_entry}
         path_cells = shortest_path(
             runtime.topology,
             last,
@@ -4270,7 +4369,7 @@ class SimulationService:
             return False
         motion_from = self._motion_position(runtime, robot)
         self._consume_motion_credit(robot)
-        occupied_cells.discard(robot["currentCellId"])
+        occupied_cells.discard((robot["currentCellId"], cur_layer_f))
         robot["lastCellId"] = robot["currentCellId"]
         robot["currentCellId"] = last
         robot["currentNode"] = last
@@ -4280,7 +4379,7 @@ class SimulationService:
         robot["currentCol"] = col
         robot["path"] = [cell["id"] for cell in path_cells]
         robot["pathLayers"] = [1] * len(robot["path"])
-        occupied_cells.add(last)
+        occupied_cells.add((last, cur_layer_f))
         self._record_committed_motion(
             runtime,
             robot,
@@ -4326,8 +4425,8 @@ class SimulationService:
         self,
         runtime: RunRuntime,
         robot: dict[str, Any],
-        occupied_cells: set[str],
-        reserved_targets: set[str],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
     ) -> None:
         """已交付但暂时没有任务的 CTU 返回起始待命位，避免长期占住唯一出库口。"""
         if robot.get("yieldTicks", 0) > 0:
@@ -4356,20 +4455,23 @@ class SimulationService:
         next_cell_id = path[1]
         path_layers = robot.get("pathLayers") or [1] * len(path)
         next_layer = path_layers[1] if len(path_layers) > 1 else 1
-        if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
+        cur_layer_f = float(robot.get("currentLayer", 1))
+        next_layer_f = float(next_layer)
+        current_entry = (current_cell_id, cur_layer_f)
+        next_entry = (next_cell_id, next_layer_f)
+        if not self._physical_movement_ready(runtime, robot, next_cell_id, next_layer_f):
             robot["phaseLabel"] = "Returning to standby / physical travel"
             return
-        occupied_cells.discard(current_cell_id)
-        if next_cell_id in occupied_cells or next_cell_id in reserved_targets:
-            occupied_cells.add(current_cell_id)
+        if next_entry != current_entry and (next_entry in occupied_cells or next_entry in reserved_targets):
             robot["status"] = "blocked"
             robot["waitTicks"] += 1
             robot["phaseLabel"] = "返回待命位 / 等待让行"
             observed_blocker = next(
                 (
-                    item for item in runtime.state["robots"]
+                    item
+                    for item in runtime.state["robots"]
                     if item.get("id") != robot.get("id")
-                    and item.get("currentCellId") == next_cell_id
+                    and (item["currentCellId"], float(item.get("currentLayer", 1))) == next_entry
                 ),
                 None,
             )
@@ -4377,7 +4479,7 @@ class SimulationService:
                 ResourceType.ROBOT
                 if observed_blocker is not None
                 else ResourceType.RESERVATION
-                if next_cell_id in reserved_targets
+                if next_entry in reserved_targets
                 else ResourceType.UNKNOWN_BLOCKER
             )
             self._observe_robot_block(
@@ -4390,7 +4492,7 @@ class SimulationService:
                     "NEXT_CELL_OCCUPIED"
                     if observed_blocker is not None
                     else "TARGET_RESERVED"
-                    if next_cell_id in reserved_targets
+                    if next_entry in reserved_targets
                     else "UNKNOWN_BLOCKER"
                 ),
             )
@@ -4425,8 +4527,9 @@ class SimulationService:
         robot["waitTicks"] = 0
         robot["status"] = "returning"
         robot["phaseLabel"] = "返回待命位"
-        occupied_cells.add(next_cell_id)
-        reserved_targets.add(next_cell_id)
+        occupied_cells.discard(current_entry)
+        occupied_cells.add(next_entry)
+        reserved_targets.add(next_entry)
         self._record_committed_motion(
             runtime,
             robot,
@@ -4449,8 +4552,8 @@ class SimulationService:
         self,
         runtime: RunRuntime,
         robot: dict[str, Any],
-        occupied_cells: set[str],
-        reserved_targets: set[str],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
     ) -> bool:
         """无可用绕行路线时退到相邻空闲格，给对向车辆释放当前通道。"""
         try:
@@ -4461,7 +4564,11 @@ class SimulationService:
 
         walkable = build_walkable_lookup(runtime.topology)
         fixed_occupied = build_occupied_lookup(runtime.topology)
-        unavailable = set(occupied_cells) | set(reserved_targets)
+        # unavailable 用于 cell-id 级别的 2D 检查（CTU 在 L1）
+        cur_layer_f = float(robot.get("currentLayer", 1))
+        occupied_cells_2d = {cell for cell, _layer in occupied_cells}
+        reserved_targets_2d = {cell for cell, _layer in reserved_targets}
+        unavailable = occupied_cells_2d | reserved_targets_2d
         candidates: list[tuple[int, str, tuple[str, int, int]]] = []
         for d_row, d_col in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             position = (floor, row + d_row, col + d_col)
@@ -4484,9 +4591,9 @@ class SimulationService:
             return False
         motion_from = self._motion_position(runtime, robot)
         self._consume_motion_credit(robot)
-        occupied_cells.discard(previous_cell)
-        occupied_cells.add(yield_cell_id)
-        reserved_targets.add(yield_cell_id)
+        occupied_cells.discard((previous_cell, cur_layer_f))
+        occupied_cells.add((yield_cell_id, 1.0))
+        reserved_targets.add((yield_cell_id, 1.0))
         robot["currentCellId"] = yield_cell_id
         robot["currentNode"] = yield_cell_id
         robot["currentFloor"] = floor
@@ -4678,7 +4785,7 @@ class SimulationService:
         runtime: RunRuntime,
         robot: dict[str, Any],
         task: dict[str, Any],
-        occupied_cells: set[str] | None = None,
+        occupied_cells: set[tuple[str, float]] | None = None,
     ) -> None:
         """交付到出入口：按载箱位逐箱升降、伸叉并释放到输送线。"""
         tick = runtime.state["tick"]
@@ -4847,7 +4954,7 @@ class SimulationService:
         )
         return True
 
-    def _deliver_empty_pallet(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[str] | None = None) -> None:
+    def _deliver_empty_pallet(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[tuple[str, float]] | None = None) -> None:
         """空托盘送达 (76,35)：堆积计数（最多 6 层），满层时触发 shuttle 搬往 (74,47) 入主线。"""
         tick = runtime.state["tick"]
         stack = runtime.state.setdefault("emptyPalletStack", {})
@@ -5214,7 +5321,7 @@ class SimulationService:
         )
         return True
 
-    def _deliver_pallet_back(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[str] | None = None) -> None:
+    def _deliver_pallet_back(self, runtime: RunRuntime, robot: dict[str, Any], task: dict[str, Any], occupied_cells: set[tuple[str, float]] | None = None) -> None:
         """托盘回到原货位：把余货写回库存，托盘留在货位里。"""
         tick = runtime.state["tick"]
         cell_id = str(task.get("palletSourceCellId") or task.get("deliveryCellId") or "")
@@ -5705,7 +5812,7 @@ class SimulationService:
         robot: dict[str, Any],
         task: dict[str, Any],
         zone: dict[str, Any],
-        occupied_cells: set[str] | None = None,
+        occupied_cells: set[tuple[str, float]] | None = None,
     ) -> None:
         """逐箱流水：把交付的全部货箱拆成单箱拣货子任务，父任务立即完成并释放机器人。
 
@@ -6651,7 +6758,7 @@ class SimulationService:
         runtime: RunRuntime,
         robot: dict[str, Any],
         task: dict[str, Any],
-        occupied_cells: set[str] | None = None,
+        occupied_cells: set[tuple[str, float]] | None = None,
     ) -> None:
         """任务收尾：清空机器人、回到待命位并累加指标（原交付完成逻辑复用）。"""
         tick = runtime.state["tick"]
@@ -6725,7 +6832,7 @@ class SimulationService:
         runtime: RunRuntime,
         robot: dict[str, Any],
         task: dict[str, Any],
-        occupied_cells: set[str] | None = None,
+        occupied_cells: set[tuple[str, float]] | None = None,
     ) -> None:
         tick = runtime.state["tick"]
         if task.get("mode") == "shuttle_transfer":
@@ -7128,7 +7235,7 @@ class SimulationService:
             )
             return
 
-    def _step_off_port(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[str] | None) -> None:
+    def _step_off_port(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]] | None) -> None:
         """交付后如果正停在 port 出入口格，退回进入口前的格子。"""
         port_cells = {
             port_entry_cell(runtime.topology, zone)
@@ -7162,8 +7269,9 @@ class SimulationService:
         robot["path"] = [back]
         robot["pathLayers"] = [robot.get("currentLayer", 1)]
         if occupied_cells is not None:
-            occupied_cells.discard(current)
-            occupied_cells.add(back)
+            cur_layer_f = float(robot.get("currentLayer", 1))
+            occupied_cells.discard((current, cur_layer_f))
+            occupied_cells.add((back, cur_layer_f))
         self._record_committed_motion(
             runtime,
             robot,
