@@ -556,8 +556,17 @@ def advance_deadlock_state(
         episode_quality = (
             episode.data_quality if participant_complete else DataQuality.INCOMPLETE
         )
+        participants_still_waiting = any(
+            snapshot_by_id[robot_id].is_waiting
+            for robot_id in episode.participant_robot_ids
+            if robot_id in snapshot_by_id
+        )
         if absent_ticks >= config.quiet_window_ticks:
-            if pending_evidence and episode_quality is DataQuality.COMPLETE:
+            if (
+                pending_evidence
+                and episode_quality is DataQuality.COMPLETE
+                and not participants_still_waiting
+            ):
                 status = EpisodeStatus.RESOLVED
                 resolved_at_tick: int | None = tick
                 resolution_evidence = pending_evidence

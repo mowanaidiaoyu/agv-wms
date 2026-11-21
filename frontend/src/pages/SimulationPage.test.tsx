@@ -309,6 +309,8 @@ describe('SimulationPage', () => {
     expect((await screen.findAllByText('ORD-DEMO-001')).length).toBeGreaterThan(0)
     expect(screen.getByText('订单队列')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '新建订单' })).toHaveLength(1)
+    expect(screen.queryByLabelText('订单拆解与 CTU 分配')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开订单编排' }))
     expect(screen.getByLabelText('订单拆解与 CTU 分配')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '7车联动订单' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '实时指标' })).not.toBeInTheDocument()
@@ -510,7 +512,7 @@ describe('SimulationPage', () => {
     expect(window.sessionStorage.getItem('agv-wms:selected-run:topology-test')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
-    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
     fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
     const newDraftId = vi.mocked(api.startSimulation).mock.calls.length
     expect(newDraftId).toBe(0)
@@ -612,7 +614,7 @@ describe('SimulationPage', () => {
       simulationActive: true,
     })
     fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
-    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
     fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
 
     await waitFor(() => expect(api.insertSimulationOrder).toHaveBeenCalledWith(
@@ -738,7 +740,7 @@ describe('SimulationPage', () => {
     await screen.findByTestId('simulation-3d')
     expect(screen.getAllByText('ORD-HISTORY-001').length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: '新建订单' }))
-    fireEvent.click(screen.getByRole('button', { name: /CTU多箱订单/ }))
+    fireEvent.click(screen.getByRole('button', { name: '添加' }))
     fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
 
     const removeButton = await screen.findByRole('button', { name: /删除订单 ORD-/ })

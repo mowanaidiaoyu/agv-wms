@@ -7,6 +7,7 @@ import logging
 import random
 import time
 import uuid
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ from .pathfinding import (
     build_walkable_lookup,
     cell_id,
     drop_zone_entry_cell,
+    expand_shuttle_blocked_states,
     node_position,
     node_to_cell_id,
     parse_cell_id,
@@ -66,6 +68,8 @@ from .pathfinding import (
     serviceable_storage_cells,
     shortest_path,
     shortest_path_shuttle,
+    shuttle_collision_footprint,
+    shuttle_state_is_walkable,
     shuttle_rack_slots,
     shuttle_servable_slots,
 )
@@ -94,6 +98,17 @@ def find_task(tasks: list[dict[str, Any]], task_id: str | None) -> dict[str, Any
     if not task_id:
         return None
     return next((task for task in tasks if task["id"] == task_id), None)
+
+
+def normalize_occupied_entries(entries: set[Any]) -> set[tuple[str, float]]:
+    """Accept current layered occupancy and legacy cell-id-only test inputs."""
+    normalized: set[tuple[str, float]] = set()
+    for entry in entries:
+        if isinstance(entry, tuple) and len(entry) == 2:
+            normalized.add((str(entry[0]), float(entry[1])))
+        else:
+            normalized.add((str(entry), 1.0))
+    return normalized
 
 
 ROBOT_CARRY_CAPACITY = {"ctu": 5, "shuttle": 1}
@@ -125,6 +140,24 @@ PORT_QUEUE_SERVICE_TICKS = 24
 # 机械臂交接：四向车在交接处等待后，机械臂抓取（pick）与放箱（place）的阶段时长。
 ARM_HANDOFF_PICK_TICKS = 3
 ARM_HANDOFF_PLACE_TICKS = 4
+# The handoff approach is a single-lane critical section.  Keep ownership
+# until the serving Shuttle has moved outside this Manhattan radius so that a
+# returning pallet cannot meet the next inbound vehicle head-on.
+ARM_HANDOFF_CLEARANCE_CELLS = 8
+# Fixed ground-conveyor FIFO in front of picking-handoff-01. Shuttle bodies
+# occupy 2x2 grid squares, so each logical queue module advances by two cols.
+# c43/c45 are deliberately excluded: they form the pallet-return clearing
+# zone between the queue head and the physical service module at c47/c48.
+HANDOFF_FIXED_CELL_ID = "cell-r92-c48"
+HANDOFF_QUEUE_SLOT_CELL_IDS = tuple(
+    f"cell-r92-c{col}" for col in (41, 39, 37, 35, 33, 31, 29, 27)
+)
+HANDOFF_RETURN_BUFFER_CELL_IDS = (
+    "cell-r92-c43",
+    "cell-r92-c45",
+    "cell-r92-c47",
+    "cell-r92-c48",
+)
 # 侧向出货口理货机械臂：抓取时长与交接臂一致；放箱阶段覆盖整段搬运动画
 # （前端整周期约 6.6 秒，1× 下 3+8 tick 与之对齐），把货箱放到放置区。
 ARM_DROPZONE_PICK_TICKS = 3
@@ -146,6 +179,18 @@ TELEMETRY_EVENT_TYPES = {
 # 过早绕行会让两车同时改道并形成 A-B-A-B 活锁，因此先稳定等待 4 tick。
 REROUTE_AFTER_BLOCK_TICKS = 4
 YIELD_AFTER_BLOCK_TICKS = 4
+# Cooperative Shuttle traffic planning.  Reservations include each vehicle's
+# complete 2x2 body and the swept area between consecutive logical states.
+# Rebuilding a short horizon every tick keeps the controller responsive to
+# task changes while preventing two individually valid paths from entering the
+# same intersection at the same time.
+SHUTTLE_RESERVATION_HORIZON_TICKS = 12
+SHUTTLE_FINAL_APPROACH_STEPS = 12
+SHUTTLE_OSCILLATION_HISTORY_LIMIT = 8
+SHUTTLE_OSCILLATION_RECOVERY_COOLDOWN_TICKS = 8
+# Let reroute/backoff finish one recovery window before raising an alert.
+# The former 3-tick threshold fired before mitigation even started.
+DEADLOCK_ALERT_AFTER_TICKS = REROUTE_AFTER_BLOCK_TICKS * 2
 MIN_SAFETY_TICKS = 10000
 WEBSOCKET_SEND_TIMEOUT_SECONDS = 2.0
 
@@ -1083,6 +1128,23 @@ class SimulationService:
         movement_type: MovementType | None,
         source: str,
     ) -> None:
+        if from_position is not None and robot.get("type") == "shuttle":
+            try:
+                traffic_position = RuntimePosition.from_robot(robot)
+            except (KeyError, TypeError, ValueError):
+                traffic_position = None
+            if traffic_position is not None and traffic_position != from_position:
+                task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+                history = list(robot.get("trafficMoveHistory") or [])
+                history.append({
+                    "tick": int(runtime.state.get("tick") or 0),
+                    "cellId": robot.get("currentCellId"),
+                    "layer": robot.get("currentLayer", 1),
+                    "phase": (task or {}).get("phase"),
+                    "movementType": (movement_type or MovementType.NORMAL).value,
+                    "source": source,
+                })
+                robot["trafficMoveHistory"] = history[-SHUTTLE_OSCILLATION_HISTORY_LIMIT:]
         observer = self._ensure_motion_observer(runtime)
         if observer is None or from_position is None:
             return
@@ -1343,6 +1405,14 @@ class SimulationService:
             "queues": {"conveyor": [], "station": [], "buffer": []},
             "conveyorItems": [],
             "pickingArm": {"status": "idle", "stage": None, "remainingTicks": 0, "taskId": None, "robotId": None} if arm_handoff else None,
+            "handoffTraffic": {
+                "ownerRobotId": None,
+                "ownerTaskId": None,
+                "entered": False,
+                "acquiredTick": None,
+                "clearanceCells": ARM_HANDOFF_CLEARANCE_CELLS,
+                "queue": [],
+            } if arm_handoff else None,
             "pickingArms": [
                 {
                     "armId": config["armId"],
@@ -1959,6 +2029,644 @@ class SimulationService:
             "dropoffBeltHeight": float(dropoff.get("beltHeight") or 3.0),
         }
 
+    def _handoff_traffic_state(self, runtime: RunRuntime) -> dict[str, Any] | None:
+        """Return the persisted single-capacity traffic controller state."""
+
+        if runtime.arm_handoff is None:
+            return None
+        traffic = runtime.state.get("handoffTraffic")
+        if not isinstance(traffic, dict):
+            traffic = {
+                "ownerRobotId": None,
+                "ownerTaskId": None,
+                "entered": False,
+                "acquiredTick": None,
+                "clearanceCells": ARM_HANDOFF_CLEARANCE_CELLS,
+                "queue": [],
+            }
+            runtime.state["handoffTraffic"] = traffic
+        traffic.setdefault("ownerRobotId", None)
+        traffic.setdefault("ownerTaskId", None)
+        traffic.setdefault("entered", False)
+        traffic.setdefault("acquiredTick", None)
+        traffic.setdefault("clearanceCells", ARM_HANDOFF_CLEARANCE_CELLS)
+        traffic.setdefault("queue", [])
+        return traffic
+
+    def _handoff_distance(self, runtime: RunRuntime, robot: dict[str, Any]) -> int:
+        target = runtime.arm_handoff or {}
+        try:
+            _floor, handoff_row, handoff_col = parse_cell_id(str(target["handoffCellId"]))
+            _robot_floor, robot_row, robot_col = parse_cell_id(str(robot["currentCellId"]))
+        except (KeyError, TypeError, ValueError):
+            return 10**9
+        return abs(robot_row - handoff_row) + abs(robot_col - handoff_col)
+
+    @staticmethod
+    def _uses_handoff_traffic(task: dict[str, Any] | None) -> bool:
+        return bool(task and (task.get("armHandoff") or task.get("handoffTraffic")))
+
+    def _handoff_route_states(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> list[tuple[int, int, int]]:
+        """Return the loaded route this task will use towards the arm."""
+
+        if task.get("phase") == "pickup_from_shuttle" and not robot.get("carrying"):
+            start_cell = str(task.get("sourceCellId") or robot["currentCellId"])
+            start_layer = int(task.get("sourceLayer") or robot.get("currentLayer", 1))
+        else:
+            start_cell = str(robot["currentCellId"])
+            start_layer = int(robot.get("currentLayer", 1))
+        return shortest_path_shuttle(
+            runtime.topology,
+            start_cell,
+            start_layer,
+            str(task.get("deliveryCellId") or (runtime.arm_handoff or {}).get("handoffCellId") or ""),
+            1,
+            runtime.config.get("pathPolicy", "astar"),
+        )
+
+    def _handoff_staging_target(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> tuple[str, int]:
+        """Choose a fixed conveyor queue slot or a legacy branch holding state.
+
+        The production handoff uses a visible FIFO on row 92. Other synthetic
+        topologies retain the route-merge planner used by focused tests.
+        """
+
+        handoff_cell = str((runtime.arm_handoff or {}).get("handoffCellId") or "")
+        if handoff_cell == HANDOFF_FIXED_CELL_ID:
+            # Vehicles travel from different racks and therefore do not reach
+            # the conveyor in task-creation order.  All of them first converge
+            # on the west admission module; a final slot is allocated only when
+            # the vehicle physically arrives there.  This preserves the real
+            # arrival order and prevents a later vehicle from parking at c39 in
+            # front of an earlier vehicle still travelling toward c41.
+            return HANDOFF_QUEUE_SLOT_CELL_IDS[-1], 1
+
+        own_path = self._handoff_route_states(runtime, robot, task)
+        if len(own_path) <= 1:
+            return str(robot["currentCellId"]), int(robot.get("currentLayer", 1))
+
+        other_route_states: set[tuple[int, int, int]] = set()
+        for other_task in runtime.state.get("tasks", []):
+            if (
+                other_task.get("id") == task.get("id")
+                or other_task.get("status") in TERMINAL_TASK_STATUSES
+                or not other_task.get("armHandoff")
+                or not other_task.get("assignedRobotId")
+            ):
+                continue
+            other_robot = next(
+                (
+                    item for item in runtime.state.get("robots", [])
+                    if item.get("id") == other_task.get("assignedRobotId")
+                ),
+                None,
+            )
+            if other_robot is not None:
+                other_route_states.update(self._handoff_route_states(runtime, other_robot, other_task))
+
+        merge_index = next(
+            (index for index, state in enumerate(own_path[1:], start=1) if state in other_route_states),
+            len(own_path) - 1,
+        )
+        preferred_index = max(0, merge_index - 1)
+        layers_by_coordinate: dict[tuple[int, int], set[int]] = {}
+        for path_row, path_col, path_layer in own_path:
+            layers_by_coordinate.setdefault((path_row, path_col), set()).add(path_layer)
+
+        reserved_footprints: set[tuple[int, int, float]] = set()
+        for other_task in runtime.state.get("tasks", []):
+            if other_task.get("id") == task.get("id"):
+                continue
+            staging_cell = other_task.get("handoffStagingCellId")
+            if not staging_cell or other_task.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            try:
+                _floor, staging_row, staging_col = parse_cell_id(str(staging_cell))
+            except ValueError:
+                continue
+            reserved_footprints.update(shuttle_collision_footprint(
+                runtime.topology,
+                staging_row,
+                staging_col,
+                float(other_task.get("handoffStagingLayer") or 1),
+            ))
+
+        occupied_footprints: set[tuple[int, int, float]] = set()
+        for other_robot in runtime.state.get("robots", []):
+            if other_robot.get("id") == robot.get("id"):
+                continue
+            occupied_footprints.update(self._robot_collision_footprint(runtime, other_robot))
+
+        for index in range(preferred_index, -1, -1):
+            row, col, layer = own_path[index]
+            # Never park in a lift shaft.  A vehicle stopped on one lift level
+            # can otherwise prevent the token owner from descending through
+            # the same (row, col) coordinate on another level.
+            if len(layers_by_coordinate.get((row, col), set())) > 1:
+                continue
+            footprint = shuttle_collision_footprint(runtime.topology, row, col, float(layer))
+            if footprint.intersection(reserved_footprints):
+                continue
+            if index > 0 and footprint.intersection(occupied_footprints):
+                continue
+            return cell_id(row, col, "1F"), int(layer)
+
+        row, col, layer = own_path[0]
+        return cell_id(row, col, "1F"), int(layer)
+
+    def _compact_handoff_queue(self, runtime: RunRuntime) -> bool:
+        """Advance one FIFO waiter toward c41 while the arm corridor is busy."""
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return False
+        queue_tasks: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
+        for task in runtime.state.get("tasks", []):
+            if task.get("status") in TERMINAL_TASK_STATUSES:
+                continue
+            staging_cell = str(task.get("handoffStagingCellId") or "")
+            if (
+                not task.get("handoffQueueAdmitted")
+                or staging_cell not in HANDOFF_QUEUE_SLOT_CELL_IDS
+            ):
+                continue
+            robot = next(
+                (
+                    item for item in runtime.state.get("robots", [])
+                    if item.get("id") == task.get("assignedRobotId")
+                ),
+                None,
+            )
+            if robot is None:
+                continue
+            queue_tasks.append((
+                int(task.get("handoffQueuedTick") or 0),
+                str(task.get("id") or ""),
+                task,
+                robot,
+            ))
+        queue_tasks.sort(key=lambda item: (item[0], item[1]))
+
+        for index, (_queued_tick, _task_id, task, robot) in enumerate(queue_tasks):
+            if index >= len(HANDOFF_QUEUE_SLOT_CELL_IDS):
+                break
+            desired = HANDOFF_QUEUE_SLOT_CELL_IDS[index]
+            if task.get("phase") != "waiting_handoff_slot" or robot.get("currentCellId") == desired:
+                continue
+            desired_footprint = self._robot_collision_footprint(runtime, robot, desired, 1)
+            occupied = set()
+            for other in runtime.state.get("robots", []):
+                if other.get("id") != robot.get("id"):
+                    occupied.update(self._robot_collision_footprint(runtime, other))
+            if desired_footprint.intersection(occupied):
+                continue
+            if self._set_robot_leg(runtime, robot, task, "to_handoff_staging", desired, target_layer=1):
+                task["handoffStagingCellId"] = desired
+                task["handoffStagingLayer"] = 1
+                task["handoffStagingApproachCells"] = list(robot.get("path") or [])
+                task["handoffStagingApproachLayers"] = list(robot.get("pathLayers") or [])
+                task["phaseLabel"] = "输送线队列向前补位"
+                robot["phaseLabel"] = task["phaseLabel"]
+                return True
+        return False
+
+    def _handoff_return_buffer_cleared(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> bool:
+        """Whether a returning Shuttle has branched clear of c43/c45."""
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return False
+        protected = self._handoff_protected_footprint(runtime)
+        return not protected.intersection(self._robot_collision_footprint(runtime, robot))
+
+    def _handoff_protected_footprint(
+        self,
+        runtime: RunRuntime,
+    ) -> set[tuple[int, int, float]]:
+        """Physical c43/c45 evacuation lane through its south branch."""
+
+        protected: set[tuple[int, int, float]] = set()
+        for protected_cell in HANDOFF_RETURN_BUFFER_CELL_IDS:
+            _floor, row, col = parse_cell_id(protected_cell)
+            protected.update(shuttle_collision_footprint(runtime.topology, row, col, 1))
+        for row in range(92, 98):
+            for col in range(43, 50):
+                if shuttle_state_is_walkable(runtime.topology, row, col, 1):
+                    protected.update(shuttle_collision_footprint(runtime.topology, row, col, 1))
+        # Residual pallets use the c49 lift approach before branching deeper
+        # into the warehouse. Keep inbound queue traffic out until the owner
+        # has also cleared this short vertical/lift segment.
+        for row in range(98, 101):
+            for col in range(47, 50):
+                if shuttle_state_is_walkable(runtime.topology, row, col, 1):
+                    protected.update(shuttle_collision_footprint(runtime.topology, row, col, 1))
+        for layer in range(2, 5):
+            for row in range(97, 101):
+                for col in range(47, 52):
+                    if shuttle_state_is_walkable(runtime.topology, row, col, layer):
+                        protected.update(shuttle_collision_footprint(runtime.topology, row, col, layer))
+        return protected
+
+    def _handoff_final_corridor_available(
+        self,
+        runtime: RunRuntime,
+        requester: dict[str, Any],
+    ) -> bool:
+        """No other Shuttle body occupies the c43..c48 final corridor."""
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return True
+        protected = self._handoff_protected_footprint(runtime)
+        return not any(
+            other.get("id") != requester.get("id")
+            and bool(other.get("currentTaskId") or other.get("carrying") or other.get("returningToStandby"))
+            and bool(protected.intersection(self._robot_collision_footprint(runtime, other)))
+            for other in runtime.state.get("robots", [])
+        )
+
+    def _handoff_return_route_blocked_states(
+        self,
+        runtime: RunRuntime,
+    ) -> set[tuple[int, int, int]] | None:
+        """Keep pallet returns off the occupied row-92 FIFO footprint."""
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return None
+        # Blocking both body rows forces the vehicle to leave through c43/c45
+        # and branch north/south before travelling toward storage or its rack.
+        return {
+            (row, col, 1)
+            for row in (92, 93)
+            for col in range(20, 43)
+        }
+
+    def _handoff_queue_approach_blocked_states(
+        self,
+        runtime: RunRuntime,
+    ) -> set[tuple[int, int, int]] | None:
+        """States inbound queue traffic must avoid while a return owns the branch.
+
+        This is deliberately wider than the row-92 buffer.  A Shuttle that is
+        merely stopped at the south lift mouth still blocks the returning 2x2
+        vehicle several ticks later.  New inbound vehicles are therefore
+        replanned through the west conveyor entrance while the branch is
+        reserved instead of being parked on the return route.
+        """
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return None
+        blocked = {
+            (row, col, 1)
+            for row in range(92, 101)
+            for col in range(43, 52)
+            if shuttle_state_is_walkable(runtime.topology, row, col, 1)
+        }
+        blocked.update({
+            (row, col, layer)
+            for layer in range(2, 5)
+            for row in range(97, 101)
+            for col in range(47, 52)
+            if shuttle_state_is_walkable(runtime.topology, row, col, layer)
+        })
+        return blocked
+
+    def _handoff_queue_feeder_blocked_states(
+        self,
+        runtime: RunRuntime,
+    ) -> set[tuple[int, int, int]] | None:
+        """West admission turn reserved for the northbound loaded convoy."""
+
+        if str((runtime.arm_handoff or {}).get("handoffCellId") or "") != HANDOFF_FIXED_CELL_ID:
+            return None
+        return {
+            (row, col, 1)
+            for row in range(92, 101)
+            for col in range(27, 34)
+            if shuttle_state_is_walkable(runtime.topology, row, col, 1)
+        }
+
+    def _handoff_queue_feeder_footprint(
+        self,
+        runtime: RunRuntime,
+    ) -> set[tuple[int, int, float]]:
+        footprint: set[tuple[int, int, float]] = set()
+        for row, col, layer in self._handoff_queue_feeder_blocked_states(runtime) or set():
+            footprint.update(shuttle_collision_footprint(runtime.topology, row, col, float(layer)))
+        return footprint
+
+    def _is_loaded_handoff_queue_feeder(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> bool:
+        task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        return bool(
+            task
+            and task.get("phase") == "to_handoff_staging"
+            and robot.get("carrying")
+            and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+        )
+
+    def _loaded_handoff_queue_feeders_active(self, runtime: RunRuntime) -> bool:
+        """Return whether a loaded Shuttle is imminently using the L1 feeder.
+
+        Merely having a loaded vehicle in ``to_handoff_staging`` is not enough:
+        it may still be several floors and dozens of cells away.  The former
+        global boolean froze every empty L1 Shuttle for the complete trip.  A
+        feeder becomes active only when the rolling near-term path contains an
+        L1 body footprint that intersects the protected feeder area.
+        """
+
+        feeder_footprint = self._handoff_queue_feeder_footprint(runtime)
+        if not feeder_footprint:
+            return False
+        for robot in runtime.state.get("robots", []):
+            if not self._is_loaded_handoff_queue_feeder(runtime, robot):
+                continue
+            path = list(robot.get("path") or [robot.get("currentCellId")])
+            layers = list(
+                robot.get("pathLayers")
+                or [robot.get("currentLayer", 1)] * len(path)
+            )
+            if len(layers) < len(path):
+                layers.extend(
+                    [layers[-1] if layers else robot.get("currentLayer", 1)]
+                    * (len(path) - len(layers))
+                )
+            for index, path_cell in enumerate(
+                path[:SHUTTLE_FINAL_APPROACH_STEPS + 1]
+            ):
+                layer = float(layers[index])
+                if layer != 1.0:
+                    continue
+                if self._robot_collision_footprint(
+                    runtime,
+                    robot,
+                    str(path_cell),
+                    layer,
+                ).intersection(feeder_footprint):
+                    return True
+        return False
+
+    def _acquire_handoff_traffic(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+    ) -> bool:
+        traffic = self._handoff_traffic_state(runtime)
+        if traffic is None:
+            return True
+        owner_id = traffic.get("ownerRobotId")
+        if owner_id not in (None, robot.get("id")):
+            return False
+        if owner_id is None:
+            task.pop("handoffTrafficCleared", None)
+            traffic.update({
+                "ownerRobotId": robot["id"],
+                "ownerTaskId": task["id"],
+                "entered": False,
+                "acquiredTick": int(runtime.state.get("tick") or 0),
+            })
+            self._record_event(
+                runtime,
+                int(runtime.state.get("tick") or 0),
+                "handoff_traffic_acquired",
+                {"robotId": robot["id"], "taskId": task["id"]},
+            )
+        else:
+            task.pop("handoffTrafficCleared", None)
+            traffic["ownerTaskId"] = task["id"]
+        return True
+
+    def _release_handoff_traffic(self, runtime: RunRuntime, reason: str) -> None:
+        traffic = self._handoff_traffic_state(runtime)
+        if traffic is None or not traffic.get("ownerRobotId"):
+            return
+        payload = {
+            "robotId": traffic.get("ownerRobotId"),
+            "taskId": traffic.get("ownerTaskId"),
+            "reason": reason,
+        }
+        owner_task = find_task(runtime.state.get("tasks", []), traffic.get("ownerTaskId"))
+        if owner_task is not None:
+            owner_task["handoffTrafficCleared"] = True
+        traffic.update({
+            "ownerRobotId": None,
+            "ownerTaskId": None,
+            "entered": False,
+            "acquiredTick": None,
+        })
+        self._record_event(
+            runtime,
+            int(runtime.state.get("tick") or 0),
+            "handoff_traffic_released",
+            payload,
+        )
+
+    def _refresh_handoff_traffic(self, runtime: RunRuntime) -> dict[str, Any] | None:
+        """Reconcile ownership and release it only after the serving vehicle exits."""
+
+        traffic = self._handoff_traffic_state(runtime)
+        if traffic is None:
+            return None
+        # Keep the physical conveyor FIFO dense.  Only one waiter is advanced
+        # per refresh and collision checks require its destination footprint to
+        # be fully clear, so the visible queue closes gaps front-to-back without
+        # making two 2x2 vehicles overlap.
+        self._compact_handoff_queue(runtime)
+        pending = [
+            task["id"]
+            for task in runtime.state.get("tasks", [])
+            if task.get("status") not in TERMINAL_TASK_STATUSES
+            and task.get("armHandoff")
+            and task.get("id") != traffic.get("ownerTaskId")
+        ]
+        traffic["queue"] = pending
+        owner_id = traffic.get("ownerRobotId")
+        if owner_id is None:
+            # Restored/legacy snapshots may contain an assigned handoff task but
+            # no controller state.  Give ownership to the vehicle closest to
+            # the handoff; every subsequent assignment is gated below.
+            candidates: list[tuple[int, int, int, str, dict[str, Any], dict[str, Any]]] = []
+            for task in runtime.state.get("tasks", []):
+                if (
+                    task.get("status") in TERMINAL_TASK_STATUSES
+                    or task.get("handoffTrafficCleared")
+                    or not self._uses_handoff_traffic(task)
+                ):
+                    continue
+                robot = next(
+                    (
+                        item for item in runtime.state.get("robots", [])
+                        if item.get("id") == task.get("assignedRobotId")
+                    ),
+                    None,
+                )
+                if robot is not None and robot.get("status") not in {"failed", "exception"}:
+                    phase = str(task.get("phase") or "")
+                    if task.get("armHandoff") and phase not in {
+                        "waiting_handoff_slot",
+                        "delivery_to_port",
+                        "waiting_arm_handoff",
+                    }:
+                        # A loaded Shuttle must physically reach the conveyor
+                        # FIFO before it may reserve the serialized final leg.
+                        continue
+                    if task.get("armHandoff") and not robot.get("carrying"):
+                        continue
+                    if (
+                        task.get("armHandoff")
+                        and phase == "waiting_handoff_slot"
+                        and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+                        and (
+                            task.get("handoffStagingCellId") != HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+                            or robot.get("currentCellId") != HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+                        )
+                    ):
+                        # The production line is a real FIFO: a vehicle may
+                        # enter the final arm segment only from the c41 head
+                        # module, never by overtaking from a rear slot.
+                        continue
+                    if (
+                        task.get("armHandoff")
+                        and phase == "waiting_handoff_slot"
+                        and not self._handoff_final_corridor_available(runtime, robot)
+                    ):
+                        continue
+                    # Loaded Shuttles already waiting for the arm are served
+                    # before vehicles that are still travelling to a rack.
+                    phase_rank = 0 if phase == "waiting_handoff_slot" else 1
+                    candidates.append((
+                        phase_rank,
+                        int(task.get("handoffQueuedTick") or runtime.state.get("tick") or 0),
+                        self._handoff_distance(runtime, robot),
+                        str(robot["id"]),
+                        robot,
+                        task,
+                    ))
+            if candidates:
+                _phase_rank, _queued_tick, _distance, _robot_id, robot, task = min(
+                    candidates,
+                    key=lambda item: (item[0], item[1], item[2], item[3]),
+                )
+                if self._acquire_handoff_traffic(runtime, robot, task) and task.get("phase") == "waiting_handoff_slot":
+                    if self._set_robot_leg(
+                        runtime,
+                        robot,
+                        task,
+                        "delivery_to_port",
+                        task.get("deliveryCellId"),
+                        target_layer=1,
+                    ):
+                        task.pop("handoffQueuedTick", None)
+                        task.pop("handoffQueueAdmitted", None)
+                        task.pop("handoffStagingCellId", None)
+                        task.pop("handoffStagingLayer", None)
+                        task.pop("handoffStagingApproachCells", None)
+                        task.pop("handoffStagingApproachLayers", None)
+                        self._record_event(
+                            runtime,
+                            int(runtime.state.get("tick") or 0),
+                            "handoff_queue_released",
+                            {"robotId": robot["id"], "taskId": task["id"]},
+                        )
+            return traffic
+
+        robot = next(
+            (item for item in runtime.state.get("robots", []) if item.get("id") == owner_id),
+            None,
+        )
+        if robot is None or robot.get("status") in {"failed", "exception"}:
+            self._release_handoff_traffic(runtime, "owner_unavailable")
+            return traffic
+
+        clearance = int(traffic.get("clearanceCells") or ARM_HANDOFF_CLEARANCE_CELLS)
+        distance = self._handoff_distance(runtime, robot)
+        owner_task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        if owner_task is None:
+            owner_task = find_task(runtime.state.get("tasks", []), traffic.get("ownerTaskId"))
+        owner_phase = str((owner_task or {}).get("phase") or "")
+        # Ownership can be granted while a loaded Shuttle is still approaching
+        # or retreating from its staging point. If it has since settled, start
+        # the serialized final leg immediately instead of leaving the token
+        # owner parked forever.
+        if owner_task is not None and owner_phase in {
+            "waiting_handoff_slot",
+            "yielding_handoff_staging",
+        }:
+            if self._set_robot_leg(
+                runtime,
+                robot,
+                owner_task,
+                "delivery_to_port",
+                owner_task.get("deliveryCellId"),
+                target_layer=1,
+            ):
+                owner_task.pop("handoffQueuedTick", None)
+                owner_task.pop("handoffQueueAdmitted", None)
+                owner_task.pop("handoffStagingCellId", None)
+                owner_task.pop("handoffStagingLayer", None)
+                owner_task.pop("handoffStagingApproachCells", None)
+                owner_task.pop("handoffStagingApproachLayers", None)
+                owner_phase = "delivery_to_port"
+        owner_is_returning_load = owner_phase in {
+            "delivery_empty_pallet",
+            "return_pallet_to_lane",
+        }
+        if owner_is_returning_load:
+            # c43 is the branch point: empty pallets turn north and residual
+            # pallets turn south. Release as soon as the 2x2 vehicle body has
+            # cleared c43/c45, so the next c41 waiter can feed the arm while
+            # this vehicle continues independently to pallet storage/the rack.
+            if traffic.get("entered") and self._handoff_return_buffer_cleared(runtime, robot):
+                self._release_handoff_traffic(runtime, "owner_cleared_return_buffer")
+            elif (owner_task or {}).get("status") in TERMINAL_TASK_STATUSES:
+                self._release_handoff_traffic(runtime, "owner_return_completed")
+            return traffic
+        if owner_phase in {"delivery_to_port", "waiting_arm_handoff"}:
+            # Serialize the complete inbound final leg. A valid route can
+            # briefly move away from the handoff after entering its geometric
+            # radius; releasing on that detour admits a second loaded Shuttle.
+            if distance <= clearance:
+                traffic["entered"] = True
+            return traffic
+        # A Shuttle can start inside the geometric clearance radius (the
+        # right-most standby position is exactly eight cells from the handoff)
+        # and then travel away to collect its pallet.  That is not an exit from
+        # the critical section.  Entry becomes real only on the delivery/exit
+        # leg, never during pickup.
+        approaching_or_exiting = bool(
+            self._uses_handoff_traffic(owner_task)
+            and owner_phase in {"delivery_empty_pallet", "return_pallet_to_lane"}
+            or robot.get("returningToStandby")
+        )
+        if (
+            robot.get("returningToStandby")
+            and traffic.get("entered")
+            and self._handoff_return_buffer_cleared(runtime, robot)
+        ):
+            self._release_handoff_traffic(runtime, "owner_cleared_return_buffer")
+        elif approaching_or_exiting and distance <= clearance:
+            traffic["entered"] = True
+        elif traffic.get("entered"):
+            self._release_handoff_traffic(runtime, "owner_cleared_zone")
+        elif not robot.get("currentTaskId") and not robot.get("returningToStandby"):
+            self._release_handoff_traffic(runtime, "owner_task_ended_before_entry")
+        return traffic
+
     def _advance_picking_arm(self, runtime: RunRuntime) -> None:
         """机械臂交接：从交接处四向车抓取货箱，放到放货点输送带；完成后四向车才释放。
 
@@ -1969,6 +2677,7 @@ class SimulationService:
         target = runtime.arm_handoff
         if not arm or not target:
             return
+        traffic = self._refresh_handoff_traffic(runtime)
         tick = runtime.state["tick"]
         stage = arm.get("stage")
         if stage in {"pick", "place"}:
@@ -2039,6 +2748,36 @@ class SimulationService:
             task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
             if task is None or task.get("phase") != "waiting_arm_handoff":
                 continue
+            if traffic is not None:
+                owner_id = traffic.get("ownerRobotId")
+                if owner_id not in (None, robot.get("id")):
+                    # Physical occupancy is authoritative.  A restored or
+                    # legacy-bugged snapshot can carry stale ownership while a
+                    # different loaded Shuttle is already waiting on the
+                    # single-capacity handoff cell.  Repair ownership so the
+                    # arm can clear the real occupant instead of deadlocking
+                    # the whole approach.
+                    previous_owner = owner_id
+                    traffic.update({
+                        "ownerRobotId": robot["id"],
+                        "ownerTaskId": task["id"],
+                        "entered": True,
+                        "acquiredTick": int(runtime.state.get("tick") or 0),
+                    })
+                    task.pop("handoffTrafficCleared", None)
+                    self._record_event(
+                        runtime,
+                        int(runtime.state.get("tick") or 0),
+                        "handoff_traffic_reconciled",
+                        {
+                            "previousOwnerRobotId": previous_owner,
+                            "robotId": robot["id"],
+                            "taskId": task["id"],
+                            "reason": "physical_handoff_occupant",
+                        },
+                    )
+                if owner_id is None and not self._acquire_handoff_traffic(runtime, robot, task):
+                    continue
             arm.update({
                 "status": "busy",
                 "stage": "pick",
@@ -3746,16 +4485,22 @@ class SimulationService:
     def _assign_tasks(self, runtime: RunRuntime) -> None:
         # 回库子任务已在回库口等待：优先派空闲 CTU 取回，再派新任务。
         self._assign_pickup_returns(runtime)
+        self._refresh_handoff_traffic(runtime)
         pending = [task for task in runtime.state["tasks"] if task["status"] == "pending"]
         if not pending:
             return
         pending.sort(key=lambda task: (task["priority"], task["id"]))
+        # Assignment and handoff admission are separate resources.  Every idle
+        # Shuttle may fetch a different pallet in parallel; only the loaded
+        # approach to the single-capacity arm is serialized later.
+        dispatchable = list(pending)
+        gated_task_ids: set[str] = set()
         # 故障设备停在原地，占的格子对其它设备不可通行：寻路和代价计算都要排除。
         failed_cells = {
             parse_cell_id(robot["currentCellId"]) for robot in runtime.state["robots"] if robot["failed"]
         }
         transfer_task_ids: set[str] = set()
-        for task in pending:
+        for task in dispatchable:
             if task.get("mode") != "shuttle_transfer":
                 continue
             robot = next(
@@ -3800,7 +4545,7 @@ class SimulationService:
         matches = assign_tasks(
             runtime.config.get("dispatchPolicy", "greedy"),
             runtime.state["robots"],
-            [task for task in pending if task["id"] not in transfer_task_ids],
+            [task for task in dispatchable if task["id"] not in transfer_task_ids],
             runtime.topology,
             runtime.config.get("pathPolicy", "astar"),
             failed_cells,
@@ -3841,7 +4586,7 @@ class SimulationService:
 
         matched_task_ids = transfer_task_ids | {task_id for _, task_id in matches}
         for task in pending:
-            if task["id"] in matched_task_ids or task.get("status") != "pending":
+            if task["id"] in matched_task_ids or task["id"] in gated_task_ids or task.get("status") != "pending":
                 continue
             compatible = [
                 robot for robot in runtime.state["robots"]
@@ -3900,9 +4645,462 @@ class SimulationService:
             suggestion="Check the requested vehicle, device availability, and topology reachability.",
         )
 
+    def _robot_collision_footprint(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        cell_id_value: str | None = None,
+        layer: int | float | None = None,
+    ) -> frozenset[tuple[int, int, float]]:
+        """Return the physical cells occupied by a robot at one position."""
+        target_cell = cell_id_value or str(robot["currentCellId"])
+        _floor, row, col = parse_cell_id(target_cell)
+        target_layer = float(robot.get("currentLayer", 1) if layer is None else layer)
+        if robot.get("type") == "shuttle":
+            return shuttle_collision_footprint(runtime.topology, row, col, target_layer)
+        return frozenset({(row, col, target_layer)})
+
+    def _physical_move_blocker(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        target_cell: str,
+        target_layer: int | float,
+        reserved_footprint: set[tuple[int, int, float]],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Return the blocking robot and whether a same-tick reservation blocks.
+
+        Legacy topology data can already contain overlapping Shuttle start
+        nodes.  A proposed move may leave that overlap only when it strictly
+        reduces it; otherwise each Shuttle/CTU footprint is a moving obstacle.
+        """
+        candidate = self._robot_collision_footprint(runtime, robot, target_cell, target_layer)
+        current = self._robot_collision_footprint(runtime, robot)
+        for other in runtime.state.get("robots", []):
+            if other.get("id") == robot.get("id"):
+                continue
+            other_footprint = self._robot_collision_footprint(runtime, other)
+            candidate_overlap = candidate.intersection(other_footprint)
+            if not candidate_overlap:
+                continue
+            current_overlap = current.intersection(other_footprint)
+            if not current_overlap or len(candidate_overlap) >= len(current_overlap):
+                return other, False
+        return None, bool(candidate.intersection(reserved_footprint))
+
+    def _update_shuttle_progress_watchdogs(self, runtime: RunRuntime) -> None:
+        """Track real task progress independently from status-label changes."""
+
+        for robot in runtime.state.get("robots", []):
+            if robot.get("type") != "shuttle":
+                continue
+            task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+            token = "|".join((
+                str(robot.get("currentCellId") or ""),
+                str(robot.get("currentLayer") or 1),
+                str(robot.get("currentTaskId") or ""),
+                str((task or {}).get("phase") or ""),
+                str((task or {}).get("picked") or 0),
+                str((task or {}).get("status") or ""),
+            ))
+            previous = str(robot.get("trafficProgressToken") or "")
+            active = bool(
+                robot.get("currentTaskId")
+                or robot.get("returningToStandby")
+            ) and robot.get("status") not in {"failed", "exception", "idle"}
+            if active and previous == token:
+                robot["trafficNoProgressTicks"] = int(robot.get("trafficNoProgressTicks") or 0) + 1
+            else:
+                robot["trafficNoProgressTicks"] = 0
+            robot["trafficProgressToken"] = token
+
+    def _refresh_empty_pallet_traffic(self, runtime: RunRuntime) -> dict[str, Any]:
+        """Serialize the final approach to the single-capacity pallet stack."""
+
+        tick = int(runtime.state.get("tick") or 0)
+        traffic = runtime.state.setdefault("emptyPalletTraffic", {
+            "contractVersion": "empty-pallet-traffic-v1",
+            "ownerRobotId": None,
+            "ownerTaskId": None,
+            "acquiredTick": None,
+            "queue": [],
+        })
+        candidates: list[tuple[int, int, str, str, dict[str, Any], dict[str, Any]]] = []
+        for task in runtime.state.get("tasks", []):
+            if (
+                task.get("status") in TERMINAL_TASK_STATUSES
+                or task.get("phase") != "delivery_empty_pallet"
+            ):
+                continue
+            assigned_robot_id = task.get("assignedRobotId")
+            robot = next(
+                (
+                    item for item in runtime.state.get("robots", [])
+                    if (
+                        item.get("id") == assigned_robot_id
+                        if assigned_robot_id
+                        else item.get("currentTaskId") == task.get("id")
+                    )
+                ),
+                None,
+            )
+            if robot is None or robot.get("status") in {"failed", "exception"}:
+                continue
+            task.setdefault("emptyPalletQueuedTick", tick)
+            candidates.append((
+                max(0, len(robot.get("path") or []) - 1),
+                int(task.get("emptyPalletQueuedTick") or tick),
+                str(robot.get("id")),
+                str(task.get("id")),
+                robot,
+                task,
+            ))
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+        owner_pair = (
+            str(traffic.get("ownerRobotId") or ""),
+            str(traffic.get("ownerTaskId") or ""),
+        )
+        owner = next((item for item in candidates if item[2:4] == owner_pair), None)
+        # A vehicle already ahead in the final approach must be allowed to
+        # empty the lane. The token owner cannot drive through its footprint,
+        # and sending the vehicle ahead backwards can jam the entrance.
+        downstream = False
+        if owner is not None and candidates and 0 < candidates[0][0] < owner[0]:
+            front = candidates[0][4]
+            owner_robot = owner[4]
+            if owner[0] <= SHUTTLE_FINAL_APPROACH_STEPS:
+                layers = owner_robot.get("pathLayers") or []
+                blocker, _ = self._physical_move_blocker(
+                    runtime,
+                    owner_robot,
+                    owner_robot["path"][1],
+                    layers[1] if len(layers) > 1 else owner_robot.get("currentLayer", 1),
+                    set(),
+                )
+                downstream = blocker is front
+        if owner is None or downstream:
+            if traffic.get("ownerRobotId"):
+                self._record_event(
+                    runtime,
+                    tick,
+                    "empty_pallet_traffic_released",
+                    {
+                        "robotId": traffic.get("ownerRobotId"),
+                        "taskId": traffic.get("ownerTaskId"),
+                    },
+                )
+            traffic.update({
+                "ownerRobotId": None,
+                "ownerTaskId": None,
+                "acquiredTick": None,
+            })
+        if traffic.get("ownerRobotId") is None and candidates:
+            _distance, _queued, robot_id, task_id, _robot, _task = candidates[0]
+            traffic.update({
+                "ownerRobotId": robot_id,
+                "ownerTaskId": task_id,
+                "acquiredTick": tick,
+            })
+            self._record_event(
+                runtime,
+                tick,
+                "empty_pallet_traffic_acquired",
+                {"robotId": robot_id, "taskId": task_id},
+            )
+        traffic["queue"] = [
+            item[3] for item in candidates
+            if item[3] != traffic.get("ownerTaskId")
+        ]
+        return traffic
+
+    def _shuttle_traffic_priority(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> tuple[int, int, int, str]:
+        """Return one stable, aging-aware priority for all Shuttle decisions."""
+
+        task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        phase = str((task or {}).get("phase") or "")
+        task_kind = str((task or {}).get("taskKind") or "")
+        handoff = self._handoff_traffic_state(runtime)
+        empty_pallet = runtime.state.get("emptyPalletTraffic") or {}
+        if phase.startswith("yielding_"):
+            rank = 0
+        elif robot.get("id") in {
+            (handoff or {}).get("ownerRobotId"),
+            empty_pallet.get("ownerRobotId"),
+        }:
+            rank = 1
+        elif task_kind in {EMPTY_PALLET_TASK_KIND, PALLET_RETURN_TASK_KIND}:
+            rank = 2
+        elif robot.get("carrying"):
+            rank = 3
+        elif phase == "to_handoff_staging":
+            rank = 4
+        elif phase == "pickup_from_shuttle":
+            rank = 5
+        elif robot.get("returningToStandby"):
+            rank = 7
+        else:
+            rank = 6
+        age = max(
+            int(robot.get("waitTicks") or 0),
+            int(robot.get("trafficNoProgressTicks") or 0),
+        )
+        queued_tick = int(
+            (task or {}).get("emptyPalletQueuedTick")
+            or (task or {}).get("handoffQueuedTick")
+            or (task or {}).get("startedTick")
+            or runtime.state.get("tick")
+            or 0
+        )
+        return rank, -age, queued_tick, str(robot.get("id") or "")
+
+    def _movement_priority_key(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> tuple[Any, ...]:
+        # Preserve the former CTU-before-Shuttle execution order while making
+        # every Shuttle decision use the same deterministic traffic priority.
+        if robot.get("type") != "shuttle":
+            return (0, str(robot.get("id") or ""))
+        return (1, *self._shuttle_traffic_priority(runtime, robot))
+
+    def _build_shuttle_reservation_plan(
+        self,
+        runtime: RunRuntime,
+        movable: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        """Build a rolling cooperative reservation table for Shuttle bodies."""
+
+        horizon = SHUTTLE_RESERVATION_HORIZON_TICKS
+        footprints: dict[int, list[tuple[str, frozenset[tuple[int, int, float]]]]] = {
+            offset: [] for offset in range(1, horizon + 1)
+        }
+        sweeps: dict[int, list[tuple[str, frozenset[tuple[int, int, float]]]]] = {
+            offset: [] for offset in range(1, horizon + 1)
+        }
+        edges: dict[int, list[tuple[str, tuple[str, float], tuple[str, float]]]] = {
+            offset: [] for offset in range(1, horizon + 1)
+        }
+        decisions: dict[str, dict[str, Any]] = {}
+        shuttles = sorted(
+            (robot for robot in movable if robot.get("type") == "shuttle"),
+            key=lambda item: self._shuttle_traffic_priority(runtime, item),
+        )
+        for robot in shuttles:
+            robot_id = str(robot.get("id") or "")
+            path = list(robot.get("path") or [robot.get("currentCellId")])
+            if not path or path[0] != robot.get("currentCellId"):
+                path = [str(robot.get("currentCellId"))] + path
+            layers = list(
+                robot.get("pathLayers")
+                or [robot.get("currentLayer", 1)] * len(path)
+            )
+            if len(layers) < len(path):
+                layers.extend([layers[-1] if layers else robot.get("currentLayer", 1)] * (len(path) - len(layers)))
+            previous_cell = str(robot.get("currentCellId"))
+            previous_layer = float(robot.get("currentLayer", 1))
+            previous_footprint = self._robot_collision_footprint(
+                runtime,
+                robot,
+                previous_cell,
+                previous_layer,
+            )
+            reserved_steps = 0
+            blocker_id: str | None = None
+            conflict_tick: int | None = None
+            conflict_reason: str | None = None
+            for offset in range(1, horizon + 1):
+                path_index = min(offset, len(path) - 1)
+                candidate_cell = str(path[path_index])
+                candidate_layer = float(layers[path_index])
+                candidate_footprint = self._robot_collision_footprint(
+                    runtime,
+                    robot,
+                    candidate_cell,
+                    candidate_layer,
+                )
+                swept_footprint = frozenset(previous_footprint | candidate_footprint)
+                candidate_entry = (candidate_cell, candidate_layer)
+                previous_entry = (previous_cell, previous_layer)
+                conflict = next(
+                    (
+                        owner_id for owner_id, reserved in footprints[offset]
+                        if candidate_footprint.intersection(reserved)
+                    ),
+                    None,
+                )
+                if conflict is None:
+                    conflict = next(
+                        (
+                            owner_id for owner_id, reserved in sweeps[offset]
+                            if swept_footprint.intersection(reserved)
+                        ),
+                        None,
+                    )
+                    if conflict is not None:
+                        conflict_reason = "SWEPT_FOOTPRINT_CONFLICT"
+                else:
+                    conflict_reason = "FUTURE_FOOTPRINT_CONFLICT"
+                if conflict is None:
+                    conflict = next(
+                        (
+                            owner_id for owner_id, start, end in edges[offset]
+                            if start == candidate_entry and end == previous_entry
+                        ),
+                        None,
+                    )
+                    if conflict is not None:
+                        conflict_reason = "EDGE_SWAP_CONFLICT"
+                if conflict is not None:
+                    blocker_id = conflict
+                    conflict_tick = offset
+                    break
+                footprints[offset].append((robot_id, candidate_footprint))
+                sweeps[offset].append((robot_id, swept_footprint))
+                edges[offset].append((robot_id, previous_entry, candidate_entry))
+                reserved_steps += 1
+                previous_cell = candidate_cell
+                previous_layer = candidate_layer
+                previous_footprint = candidate_footprint
+            decisions[robot_id] = {
+                "allowed": reserved_steps > 0,
+                "reservedSteps": reserved_steps,
+                "conflictTick": conflict_tick,
+                "blockerRobotId": blocker_id,
+                "reason": conflict_reason,
+                "priority": list(self._shuttle_traffic_priority(runtime, robot)[:-1]),
+            }
+
+        runtime.state["shuttleTrafficReservations"] = {
+            "contractVersion": "shuttle-space-time-reservations-v1",
+            "tick": int(runtime.state.get("tick") or 0),
+            "horizonTicks": horizon,
+            "decisions": [
+                {"robotId": robot_id, **decision}
+                for robot_id, decision in sorted(decisions.items())
+            ],
+        }
+        return decisions
+
+    def _would_repeat_shuttle_oscillation(
+        self,
+        robot: dict[str, Any],
+        task: dict[str, Any],
+        next_cell_id: str,
+        next_layer: int | float,
+    ) -> bool:
+        """Detect only a planned continuation of an established A-B-A-B loop.
+
+        A-B-A followed by a newly planned B-C route is a valid escape, not a
+        livelock.  The old three-sample check stopped that escape forever
+        because no committed move could ever change the history.  Require two
+        complete cycles and verify that the planned step after A returns to B.
+        Layer is part of the state so a lift transition at the same cell is not
+        mistaken for oscillation.
+        """
+
+        history = list(robot.get("trafficMoveHistory") or [])
+        if len(history) < 4:
+            return False
+        recent = history[-4:]
+        phase = str(task.get("phase") or "")
+        if any(str(item.get("phase") or "") != phase for item in recent):
+            return False
+        states = [
+            (
+                str(item.get("cellId") or ""),
+                float(item.get("layer") or robot.get("currentLayer", 1)),
+            )
+            for item in recent
+        ]
+        if not (
+            states[0] == states[2]
+            and states[1] == states[3]
+            and states[0] != states[1]
+        ):
+            return False
+        if (str(next_cell_id), float(next_layer)) != states[0]:
+            return False
+
+        path = list(robot.get("path") or [])
+        layers = list(robot.get("pathLayers") or [])
+        # Reaching a one-step destination, or proceeding from A to a new C,
+        # finishes/leaves the cycle.  Only A followed by B repeats it.
+        if len(path) <= 2:
+            return False
+        following_layer = (
+            float(layers[2])
+            if len(layers) > 2
+            else float(robot.get("currentLayer", 1))
+        )
+        return (str(path[2]), following_layer) == states[1]
+
+    def _erase_shuttle_path_cycles(self, robot: dict[str, Any]) -> bool:
+        """Remove closed state loops while preserving valid lift transitions."""
+
+        path = list(robot.get("path") or [])
+        if len(path) <= 2:
+            return False
+        layers = list(
+            robot.get("pathLayers")
+            or [robot.get("currentLayer", 1)] * len(path)
+        )
+        if len(layers) < len(path):
+            layers.extend(
+                [layers[-1] if layers else robot.get("currentLayer", 1)]
+                * (len(path) - len(layers))
+            )
+        stages = list(robot.get("pathStages") or [])
+        if len(stages) < len(path):
+            stages.extend(
+                [stages[-1] if stages else "moving"]
+                * (len(path) - len(stages))
+            )
+
+        compact_path: list[str] = []
+        compact_layers: list[int | float] = []
+        compact_stages: list[str] = []
+        state_indexes: dict[tuple[str, float], int] = {}
+        changed = False
+        for cell, layer, stage in zip(path, layers, stages):
+            state = (str(cell), float(layer))
+            repeated_at = state_indexes.get(state)
+            if repeated_at is not None:
+                changed = True
+                for removed_cell, removed_layer in zip(
+                    compact_path[repeated_at + 1:],
+                    compact_layers[repeated_at + 1:],
+                ):
+                    state_indexes.pop((str(removed_cell), float(removed_layer)), None)
+                compact_path = compact_path[:repeated_at + 1]
+                compact_layers = compact_layers[:repeated_at + 1]
+                compact_stages = compact_stages[:repeated_at + 1]
+                continue
+            state_indexes[state] = len(compact_path)
+            compact_path.append(str(cell))
+            compact_layers.append(layer)
+            compact_stages.append(str(stage))
+
+        if not changed:
+            return False
+        robot["path"] = compact_path
+        robot["pathLayers"] = compact_layers
+        robot["pathStages"] = compact_stages
+        return True
+
     def _move_robots(self, runtime: RunRuntime) -> None:
+        self._update_shuttle_progress_watchdogs(runtime)
+        empty_pallet_traffic = self._refresh_empty_pallet_traffic(runtime)
         movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle", "exception"}]
-        movable.sort(key=lambda item: item["id"])
+        for robot in movable:
+            if robot.get("type") == "shuttle":
+                self._erase_shuttle_path_cycles(robot)
+        movable.sort(key=lambda item: self._movement_priority_key(runtime, item))
         # occupied_cells: (cell-id, layer) tuple —— 同 2D 位置不同层是不同 entry，
         # discard 只释放当前车的那一层，不会误伤其他层的车。
         occupied_cells: set[tuple[str, float]] = {
@@ -3910,18 +5108,118 @@ class SimulationService:
             for robot in runtime.state["robots"]
         }
         reserved_targets: set[tuple[str, float]] = set()
+        reserved_footprint: set[tuple[int, int, float]] = set()
+        shuttle_reservations = self._build_shuttle_reservation_plan(runtime, movable)
 
         for robot in movable:
             task = find_task(runtime.state["tasks"], robot["currentTaskId"])
             if task is None:
                 if robot.get("returningToStandby"):
-                    self._move_robot_to_standby(runtime, robot, occupied_cells, reserved_targets)
+                    reservation = shuttle_reservations.get(str(robot.get("id") or ""))
+                    if (
+                        robot.get("type") == "shuttle"
+                        and reservation is not None
+                        and not reservation.get("allowed")
+                    ):
+                        standby_path = list(robot.get("path") or [])
+                        robot["status"] = "blocked"
+                        robot["waitTicks"] = int(robot.get("waitTicks") or 0) + 1
+                        robot["phaseLabel"] = "返回待命位 / 等待时空预留"
+                        self._observe_robot_block(
+                            runtime,
+                            robot,
+                            standby_path[1] if len(standby_path) > 1 else None,
+                            str(reservation.get("blockerRobotId") or "") or None,
+                            ResourceType.RESERVATION,
+                            str(reservation.get("reason") or "SPACE_TIME_RESERVATION_CONFLICT"),
+                        )
+                        if robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
+                            blocker_id = str(reservation.get("blockerRobotId") or "")
+                            blocker = next(
+                                (
+                                    item for item in runtime.state.get("robots", [])
+                                    if item.get("id") == blocker_id
+                                ),
+                                None,
+                            )
+                            if blocker is not None and self._clear_shuttle_head_on(
+                                runtime,
+                                robot,
+                                blocker,
+                                occupied_cells,
+                                reserved_targets,
+                                reserved_footprint,
+                            ):
+                                robot["waitTicks"] = 0
+                        continue
+                    self._move_robot_to_standby(
+                        runtime,
+                        robot,
+                        occupied_cells,
+                        reserved_targets,
+                        reserved_footprint,
+                    )
                     continue
                 robot["status"] = "idle"
                 robot["phaseLabel"] = "待命"
                 robot["path"] = [robot["currentCellId"]]
                 robot["pathLayers"] = [robot.get("currentLayer", 1)]
                 continue
+
+            if robot.get("type") == "shuttle" and task.get("phase") == "yielding_for_traffic":
+                priority_id = str(task.get("trafficYieldForRobotId") or "")
+                priority = next(
+                    (
+                        item for item in runtime.state.get("robots", [])
+                        if str(item.get("id") or "") == priority_id
+                    ),
+                    None,
+                )
+                priority_released = priority is None or (
+                    not priority.get("currentTaskId")
+                    and not priority.get("carrying")
+                )
+                if priority_released:
+                    # The vehicle for which this Shuttle entered a side bay has
+                    # finished its productive movement.  Do not insist on
+                    # reaching a now-stale clearance endpoint: another idle
+                    # Shuttle may legitimately park there in the meantime and
+                    # turn the temporary yield into a permanent deadlock.
+                    resume_phase = str(task.get("trafficYieldResumePhase") or "moving")
+                    resume_cell = str(task.get("trafficYieldResumeCellId") or "")
+                    resume_layer = int(
+                        task.get("trafficYieldResumeLayer")
+                        or robot.get("currentLayer", 1)
+                    )
+                    if resume_cell and self._set_robot_leg(
+                        runtime,
+                        robot,
+                        task,
+                        resume_phase,
+                        resume_cell,
+                        target_layer=resume_layer,
+                    ):
+                        robot["waitTicks"] = 0
+                        robot["yieldTicks"] = 0
+                        for key in (
+                            "trafficYieldResumePhase",
+                            "trafficYieldResumeCellId",
+                            "trafficYieldResumeLayer",
+                            "trafficYieldForRobotId",
+                        ):
+                            task.pop(key, None)
+                        self._record_event(
+                            runtime,
+                            int(runtime.state.get("tick") or 0),
+                            "shuttle_clearance_yield_released",
+                            {
+                                "robotId": robot.get("id"),
+                                "taskId": task.get("id"),
+                                "priorityRobotId": priority_id or None,
+                                "resumePhase": resume_phase,
+                            },
+                        )
+                    continue
 
             if robot.get("yieldTicks", 0) > 0:
                 robot["yieldTicks"] -= 1
@@ -3949,6 +5247,320 @@ class SimulationService:
             next_cell_id = path[1]
             next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
             next_stage = path_stages[1] if len(path_stages) > 1 else task.get("phase", "moving")
+            if (
+                robot.get("type") == "shuttle"
+                and task.get("phase") == "delivery_empty_pallet"
+                and empty_pallet_traffic.get("ownerRobotId") != robot.get("id")
+                and len(path) - 1 <= SHUTTLE_FINAL_APPROACH_STEPS
+            ):
+                robot["status"] = "waiting"
+                robot["waitTicks"] = int(robot.get("waitTicks") or 0) + 1
+                robot["phaseLabel"] = "空托盘存放入口排队 / 等待通行令牌"
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    str(empty_pallet_traffic.get("ownerRobotId") or "") or None,
+                    ResourceType.SHUTTLE_TRACK,
+                    "EMPTY_PALLET_FINAL_APPROACH_RESERVED",
+                )
+                continue
+
+            reservation = shuttle_reservations.get(str(robot.get("id") or ""))
+            if (
+                robot.get("type") == "shuttle"
+                and task.get("phase") != "yielding_for_traffic"
+                and reservation is not None
+                and not reservation.get("allowed")
+            ):
+                robot["status"] = "blocked"
+                robot["waitTicks"] = int(robot.get("waitTicks") or 0) + 1
+                robot["phaseLabel"] = f"{task['phaseLabel']} / 等待时空预留"
+                blocker_id = str(reservation.get("blockerRobotId") or "")
+                self._observe_robot_block(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    blocker_id or None,
+                    ResourceType.RESERVATION,
+                    str(reservation.get("reason") or "SPACE_TIME_RESERVATION_CONFLICT"),
+                )
+                if robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
+                    blocker = next(
+                        (
+                            item for item in runtime.state.get("robots", [])
+                            if item.get("id") == blocker_id
+                        ),
+                        None,
+                    )
+                    priority_vehicle = bool(
+                        robot.get("carrying")
+                        or robot.get("id") in {
+                            (self._handoff_traffic_state(runtime) or {}).get("ownerRobotId"),
+                            (runtime.state.get("emptyPalletTraffic") or {}).get("ownerRobotId"),
+                        }
+                        or task.get("taskKind") in {
+                            EMPTY_PALLET_TASK_KIND,
+                            PALLET_RETURN_TASK_KIND,
+                        }
+                    )
+                    cleared_for_priority = bool(
+                        priority_vehicle
+                        and blocker is not None
+                        and self._clear_shuttle_head_on(
+                            runtime,
+                            robot,
+                            blocker,
+                            occupied_cells,
+                            reserved_targets,
+                            reserved_footprint,
+                        )
+                    )
+                    if cleared_for_priority:
+                        robot["waitTicks"] = 0
+                    elif self._reroute_shuttle(runtime, robot, occupied_cells):
+                        self._observe_deadlock_mitigation(
+                            runtime,
+                            robot,
+                            "REROUTE",
+                            "space_time_reservation",
+                        )
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                    elif blocker is not None and self._clear_shuttle_head_on(
+                        runtime,
+                        robot,
+                        blocker,
+                        occupied_cells,
+                        reserved_targets,
+                        reserved_footprint,
+                    ):
+                        robot["waitTicks"] = 0
+                continue
+
+            if (
+                robot.get("type") == "shuttle"
+                and task.get("phase") != "yielding_for_traffic"
+                and self._would_repeat_shuttle_oscillation(
+                    robot,
+                    task,
+                    next_cell_id,
+                    next_layer,
+                )
+            ):
+                tick = int(runtime.state.get("tick") or 0)
+                signature = "|".join((
+                    str(task.get("id") or ""),
+                    str(task.get("phase") or ""),
+                    str(robot.get("currentCellId") or ""),
+                    str(next_cell_id),
+                    str(float(next_layer)),
+                ))
+                last_signature = str(robot.get("trafficOscillationSignature") or "")
+                last_tick = int(robot.get("trafficOscillationRecoveryTick") or -999999)
+                recovery_ready = (
+                    signature != last_signature
+                    or tick - last_tick >= SHUTTLE_OSCILLATION_RECOVERY_COOLDOWN_TICKS
+                )
+                if recovery_ready:
+                    robot["trafficOscillationSignature"] = signature
+                    robot["trafficOscillationRecoveryTick"] = tick
+                    robot["status"] = "blocked"
+                    robot["waitTicks"] = max(
+                        REROUTE_AFTER_BLOCK_TICKS,
+                        int(robot.get("waitTicks") or 0) + 1,
+                    )
+                    robot["phaseLabel"] = f"{task['phaseLabel']} / 检测到往返活锁，正在重新规划"
+                    self._observe_robot_block(
+                        runtime,
+                        robot,
+                        next_cell_id,
+                        None,
+                        ResourceType.OTHER,
+                        "A_B_A_B_OSCILLATION_GUARD",
+                    )
+                    if self._reroute_shuttle(runtime, robot, occupied_cells):
+                        self._erase_shuttle_path_cycles(robot)
+                        self._observe_deadlock_mitigation(
+                            runtime,
+                            robot,
+                            "REROUTE",
+                            "oscillation_guard",
+                        )
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                    # Pause at most this tick. If the same recovery cannot find
+                    # an alternative, the cooldown lets the reservation-safe
+                    # move proceed next tick instead of self-locking forever.
+                    continue
+            if (
+                robot.get("type") == "shuttle"
+                and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+            ):
+                feeder_footprint = self._handoff_queue_feeder_footprint(runtime)
+                current_feeder_overlap = bool(
+                    self._robot_collision_footprint(runtime, robot).intersection(feeder_footprint)
+                )
+                next_feeder_overlap = bool(
+                    self._robot_collision_footprint(
+                        runtime,
+                        robot,
+                        next_cell_id,
+                        next_layer,
+                    ).intersection(feeder_footprint)
+                )
+                entering_feeder = not current_feeder_overlap and next_feeder_overlap
+                is_loaded_feeder = self._is_loaded_handoff_queue_feeder(runtime, robot)
+                if is_loaded_feeder and entering_feeder:
+                    # Do not freeze a loaded convoy merely because an empty
+                    # Shuttle is somewhere in the broad feeder area.  That
+                    # created a circular wait: the empty Shuttle respected the
+                    # loaded vehicle's future reservation while the loaded
+                    # vehicle waited for the empty one to leave.  Wait only for
+                    # an immediate physical conflict; later steps are still
+                    # protected by the rolling 2x2 space-time reservation.
+                    next_footprint = self._robot_collision_footprint(
+                        runtime,
+                        robot,
+                        next_cell_id,
+                        next_layer,
+                    )
+                    opposing_ahead = any(
+                        other.get("id") != robot.get("id")
+                        and not self._is_loaded_handoff_queue_feeder(runtime, other)
+                        and bool(other.get("currentTaskId") or other.get("returningToStandby"))
+                        and bool(
+                            self._robot_collision_footprint(runtime, other).intersection(next_footprint)
+                        )
+                        for other in runtime.state.get("robots", [])
+                    )
+                    if opposing_ahead:
+                        robot["status"] = "waiting"
+                        robot["phaseLabel"] = "输送线入口等待空车退出"
+                        continue
+                elif (
+                    not is_loaded_feeder
+                    and entering_feeder
+                    and self._loaded_handoff_queue_feeders_active(runtime)
+                ):
+                    # Do not park an empty vehicle directly in front of the
+                    # loaded convoy at the reservation boundary.  If the next
+                    # step of a feeder already needs this vehicle's current
+                    # footprint, let the empty vehicle continue through and
+                    # make the loaded convoy wait until it has evacuated.
+                    current_footprint = self._robot_collision_footprint(runtime, robot)
+                    blocks_loaded_approach = False
+                    for feeder in runtime.state.get("robots", []):
+                        if not self._is_loaded_handoff_queue_feeder(runtime, feeder):
+                            continue
+                        feeder_path = feeder.get("path") or []
+                        if len(feeder_path) <= 1:
+                            continue
+                        feeder_layers = feeder.get("pathLayers") or [feeder.get("currentLayer", 1)] * len(feeder_path)
+                        feeder_next_layer = feeder_layers[1] if len(feeder_layers) > 1 else feeder.get("currentLayer", 1)
+                        if current_footprint.intersection(
+                            self._robot_collision_footprint(
+                                runtime,
+                                feeder,
+                                feeder_path[1],
+                                feeder_next_layer,
+                            )
+                        ):
+                            blocks_loaded_approach = True
+                            break
+                    if blocks_loaded_approach:
+                        pass
+                    else:
+                        target_cell = str(robot.get("targetCellId") or "")
+                        target_layer = int(robot.get("targetLayer") or robot.get("currentLayer", 1))
+                        rerouted = bool(
+                            target_cell
+                            and self._robot_path_to(
+                                runtime,
+                                robot,
+                                target_cell,
+                                target_layer,
+                                extra_blocked=self._handoff_queue_feeder_blocked_states(runtime),
+                                task_id=task.get("id"),
+                                evidence_kind="replan",
+                            )
+                        )
+                        rerouted_path = list(robot.get("path") or [])
+                        rerouted_layers = list(
+                            robot.get("pathLayers")
+                            or [robot.get("currentLayer", 1)] * len(rerouted_path)
+                        )
+                        rerouted_away = False
+                        if rerouted and len(rerouted_path) > 1:
+                            rerouted_next_layer = (
+                                rerouted_layers[1]
+                                if len(rerouted_layers) > 1
+                                else robot.get("currentLayer", 1)
+                            )
+                            rerouted_away = not bool(
+                                self._robot_collision_footprint(
+                                    runtime,
+                                    robot,
+                                    rerouted_path[1],
+                                    rerouted_next_layer,
+                                ).intersection(feeder_footprint)
+                            )
+                        if rerouted_away:
+                            robot["status"] = "moving"
+                            robot["waitTicks"] = 0
+                            robot["phaseLabel"] = "绕行输送线入队口"
+                        else:
+                            robot["status"] = "waiting"
+                            robot["phaseLabel"] = "等待载货车队通过"
+                        continue
+            if (
+                robot.get("type") == "shuttle"
+                and task.get("phase") == "to_handoff_staging"
+                and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+            ):
+                protected = self._handoff_protected_footprint(runtime)
+                current_footprint = self._robot_collision_footprint(runtime, robot)
+                next_footprint = self._robot_collision_footprint(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    next_layer,
+                )
+                traffic = self._handoff_traffic_state(runtime)
+                queue_head_ready = any(
+                    queued_task.get("phase") == "waiting_handoff_slot"
+                    and queued_task.get("handoffStagingCellId") == HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+                    for queued_task in runtime.state.get("tasks", [])
+                )
+                corridor_reserved = bool((traffic or {}).get("ownerRobotId") or queue_head_ready)
+                entering_corridor = (
+                    not current_footprint.intersection(protected)
+                    and bool(next_footprint.intersection(protected))
+                )
+                if corridor_reserved and entering_corridor:
+                    staging_cell = str(task.get("handoffStagingCellId") or "")
+                    staging_layer = int(task.get("handoffStagingLayer") or 1)
+                    rerouted = bool(
+                        staging_cell
+                        and self._robot_path_to(
+                            runtime,
+                            robot,
+                            staging_cell,
+                            staging_layer,
+                            extra_blocked=self._handoff_queue_approach_blocked_states(runtime),
+                            task_id=task.get("id"),
+                            evidence_kind="replan",
+                        )
+                    )
+                    if rerouted:
+                        robot["status"] = "moving"
+                        robot["waitTicks"] = 0
+                        robot["phaseLabel"] = "绕行返程通道 / 前往输送线队列"
+                        task["phaseLabel"] = robot["phaseLabel"]
+                    else:
+                        robot["status"] = "waiting"
+                        robot["phaseLabel"] = "输送线入口等待交接区清空"
+                    continue
             if not self._physical_movement_ready(runtime, robot, next_cell_id, float(next_layer)):
                 robot["phaseLabel"] = task["phaseLabel"]
                 continue
@@ -3958,7 +5570,22 @@ class SimulationService:
             # 只有在真正移动成功时才 discard 旧格 + add 新格。
             current_entry = (current_cell_id, float(robot.get("currentLayer", 1)))
             next_entry = (next_cell_id, float(next_layer))
-            if next_entry != current_entry and (next_entry in occupied_cells or next_entry in reserved_targets):
+            physical_blocker: dict[str, Any] | None = None
+            footprint_reserved = False
+            if next_entry != current_entry:
+                physical_blocker, footprint_reserved = self._physical_move_blocker(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    next_layer,
+                    reserved_footprint,
+                )
+            if next_entry != current_entry and (
+                next_entry in occupied_cells
+                or next_entry in reserved_targets
+                or physical_blocker is not None
+                or footprint_reserved
+            ):
                 robot["status"] = "blocked"
                 robot["waitTicks"] += 1
                 robot["phaseLabel"] = f"{task['phaseLabel']} / 等待让行"
@@ -3977,11 +5604,12 @@ class SimulationService:
                         "status": "blocked",
                     },
                 )
-                blocker = next(
+                exact_blocker = next(
                     (item for item in movable if (item["currentCellId"], float(item.get("currentLayer", 1))) == next_entry),
                     None,
                 )
-                observed_blocker = next(
+                blocker = physical_blocker or exact_blocker
+                observed_blocker = physical_blocker or next(
                     (
                         item
                         for item in runtime.state["robots"]
@@ -3994,7 +5622,7 @@ class SimulationService:
                     ResourceType.ROBOT
                     if observed_blocker is not None
                     else ResourceType.RESERVATION
-                    if next_entry in reserved_targets
+                    if next_entry in reserved_targets or footprint_reserved
                     else ResourceType.UNKNOWN_BLOCKER
                 )
                 self._observe_robot_block(
@@ -4007,7 +5635,7 @@ class SimulationService:
                         "NEXT_CELL_OCCUPIED"
                         if observed_blocker is not None
                         else "TARGET_RESERVED"
-                        if next_entry in reserved_targets
+                        if next_entry in reserved_targets or footprint_reserved
                         else "UNKNOWN_BLOCKER"
                     ),
                 )
@@ -4026,12 +5654,46 @@ class SimulationService:
                     elif robot["waitTicks"] >= YIELD_AFTER_BLOCK_TICKS:
                         self._yield_ctu(runtime, robot, occupied_cells, reserved_targets)
                 elif robot["type"] == "shuttle" and robot["waitTicks"] >= REROUTE_AFTER_BLOCK_TICKS:
-                    if self._reroute_shuttle(runtime, robot, occupied_cells):
+                    fixed_queue_feeder = bool(
+                        task.get("phase") == "to_handoff_staging"
+                        and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+                    )
+                    idle_blocker = bool(
+                        blocker is not None
+                        and not blocker.get("currentTaskId")
+                        and not blocker.get("carrying")
+                    )
+                    # Loaded FIFO feeders keep their one-way route. Resolve an
+                    # opposing unladen pickup first; replanning the loaded car
+                    # to the same corridor merely reset waitTicks forever.
+                    cleared_head_on = bool(
+                        (fixed_queue_feeder or idle_blocker)
+                        and self._clear_shuttle_head_on(
+                            runtime,
+                            robot,
+                            blocker,
+                            occupied_cells,
+                            reserved_targets,
+                            reserved_footprint,
+                        )
+                    )
+                    if cleared_head_on:
+                        robot["waitTicks"] = 0
+                        robot["status"] = "moving"
+                        robot["phaseLabel"] = task["phaseLabel"]
+                    elif self._reroute_shuttle(runtime, robot, occupied_cells):
                         self._observe_deadlock_mitigation(runtime, robot, "REROUTE")
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
-                    elif self._clear_shuttle_head_on(runtime, robot, blocker, occupied_cells, reserved_targets):
+                    elif self._clear_shuttle_head_on(
+                        runtime,
+                        robot,
+                        blocker,
+                        occupied_cells,
+                        reserved_targets,
+                        reserved_footprint,
+                    ):
                         robot["waitTicks"] = 0
                         robot["status"] = "moving"
                         robot["phaseLabel"] = task["phaseLabel"]
@@ -4077,6 +5739,7 @@ class SimulationService:
             occupied_cells.discard(current_entry)
             occupied_cells.add(next_entry)
             reserved_targets.add(next_entry)
+            reserved_footprint.update(self._robot_collision_footprint(runtime, robot))
             self._record_committed_motion(
                 runtime,
                 robot,
@@ -4098,7 +5761,8 @@ class SimulationService:
             return False
         # occupied_cells 是 (cell-id, layer) tuple 集合，CTU 用 2D pathfinding → 只取 cell-id 部分
         current_entry = (robot["currentCellId"], float(robot.get("currentLayer", 1)))
-        others = {parse_cell_id(cell) for cell, layer_f in occupied_cells if (cell, layer_f) != current_entry}
+        occupied_entries = normalize_occupied_entries(occupied_cells)
+        others = {parse_cell_id(cell) for cell, layer_f in occupied_entries if (cell, layer_f) != current_entry}
         # 普通绕行不得立即返回上一格，否则两辆相邻 CTU 会同步在两条巷道间
         # A-B-A-B 往返。真正需要后退时由 _clear_head_on/_yield_ctu 显式执行。
         last_cell = robot.get("lastCellId")
@@ -4142,20 +5806,36 @@ class SimulationService:
         path = robot.get("path") or []
         if len(path) <= 1:
             return False
+        original_path = [str(value) for value in path]
+        original_layers = [
+            float(value)
+            for value in (
+                robot.get("pathLayers")
+                or [robot.get("currentLayer", 1)] * len(path)
+            )
+        ]
         goal_cell = path[-1]
         goal_layer = int((robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(path))[-1])
         current_layer = int(robot.get("currentLayer", 1))
         others: set[tuple[int, int, int]] = set()
+        current_footprint = self._robot_collision_footprint(runtime, robot)
         for item in runtime.state["robots"]:
             if item["id"] == robot["id"] or item.get("type") != "shuttle":
+                continue
+            if current_footprint.intersection(self._robot_collision_footprint(runtime, item)):
                 continue
             layer = int(item.get("currentLayer", 1))
             others.add((int(item["currentRow"]), int(item["currentCol"]), layer))
             blocker_path = item.get("path") or []
             if len(blocker_path) > 1 and blocker_path[1] != item["currentCellId"]:
                 _floor, nr, nc = parse_cell_id(blocker_path[1])
-                others.add((nr, nc, layer))
+                blocker_layers = item.get("pathLayers") or [layer] * len(blocker_path)
+                next_layer = int(blocker_layers[1]) if len(blocker_layers) > 1 else layer
+                others.add((nr, nc, next_layer))
         others.discard((int(robot["currentRow"]), int(robot["currentCol"]), current_layer))
+        physical_blocked = expand_shuttle_blocked_states(runtime.topology, others)
+        if task and task.get("phase") in {"delivery_empty_pallet", "return_pallet_to_lane"}:
+            physical_blocked.update(self._handoff_return_route_blocked_states(runtime) or set())
         diagnostic: dict[str, Any] = {}
         path3d = shortest_path_shuttle(
             runtime.topology,
@@ -4164,18 +5844,34 @@ class SimulationService:
             goal_cell,
             goal_layer,
             runtime.config["pathPolicy"],
-            extra_blocked=others,
+            extra_blocked=physical_blocked,
             evidence=diagnostic,
         )
         if not path3d or len(path3d) <= 1:
             return False
         first = cell_id(path3d[1][0], path3d[1][1], "1F")
         first_layer = float(path3d[1][2]) if len(path3d[1]) > 2 else current_layer
+        # A normal replan must not immediately undo the last committed move.
+        # Around the handoff this produced an endless c47 <-> c48 oscillation
+        # in front of an idle Shuttle and prevented the dedicated idle-blocker
+        # yielding path from ever running.
+        if first == robot.get("lastCellId") and first_layer == float(robot.get("currentLayer", 1)):
+            return False
         if (first, first_layer) in occupied_cells:
             return False
         stage = task.get("phase", "moving") if task else "moving"
-        robot["path"] = [cell_id(row, col, "1F") for row, col, _ in path3d]
-        robot["pathLayers"] = [layer for _, _, layer in path3d]
+        replanned_path = [cell_id(row, col, "1F") for row, col, _ in path3d]
+        replanned_layers = [layer for _, _, layer in path3d]
+        if (
+            replanned_path == original_path
+            and [float(value) for value in replanned_layers] == original_layers
+        ):
+            # A deterministic planner often returns the exact route that is
+            # already blocked. Treating that as mitigation reset waitTicks on
+            # every retry and prevented the side-yield/backoff stage forever.
+            return False
+        robot["path"] = replanned_path
+        robot["pathLayers"] = replanned_layers
         robot["pathStages"] = [stage] * len(robot["path"])
         self._record_planning_evidence(
             runtime,
@@ -4188,36 +5884,299 @@ class SimulationService:
         )
         return True
 
-    def _back_off_shuttle(self, runtime: RunRuntime, robot: dict[str, Any], occupied_cells: set[tuple[str, float]], reserved_targets: set[tuple[str, float]]) -> bool:
-        """四向车退回上一格（仅地面层；layer>1 的竖井场景不适用），破坏头对头对峙。"""
-        if int(robot.get("currentLayer", 1)) != 1:
+    def _yield_shuttle_to_clearance(
+        self,
+        runtime: RunRuntime,
+        yielding: dict[str, Any],
+        priority: dict[str, Any],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]],
+    ) -> bool:
+        """Route one Shuttle into a verified side position until traffic clears.
+
+        A one-cell back-off is not sufficient for a snapped 2x2 Shuttle: it can
+        alternate between two logical cells while both physical positions still
+        block the other vehicle. On any floor, select the nearest reachable
+        state whose complete body is outside the priority vehicle's remaining
+        corridor, then resume the original task through dynamic replanning.
+        """
+
+        task = find_task(runtime.state.get("tasks", []), yielding.get("currentTaskId"))
+        if task is None or task.get("phase") == "yielding_for_traffic":
             return False
+        if yielding.get("type") != "shuttle" or priority.get("type") != "shuttle":
+            return False
+
+        layer = int(yielding.get("currentLayer", 1))
+        if layer != int(priority.get("currentLayer", 1)):
+            return False
+        try:
+            _floor, current_row, current_col = parse_cell_id(str(yielding["currentCellId"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        resume_cell = str(yielding.get("targetCellId") or "")
+        if not resume_cell:
+            return False
+        resume_layer = int(yielding.get("targetLayer") or layer)
+        resume_phase = str(task.get("phase") or "moving")
+
+        priority_path = list(priority.get("path") or [priority.get("currentCellId")])
+        priority_layers = list(
+            priority.get("pathLayers")
+            or [priority.get("currentLayer", 1)] * len(priority_path)
+        )
+        priority_corridor: set[tuple[int, int, float]] = set()
+        for index, path_cell in enumerate(priority_path[:16]):
+            try:
+                _floor, path_row, path_col = parse_cell_id(str(path_cell))
+            except (TypeError, ValueError):
+                continue
+            path_layer = int(
+                priority_layers[index]
+                if index < len(priority_layers)
+                else priority.get("currentLayer", 1)
+            )
+            priority_corridor.update(
+                shuttle_collision_footprint(
+                    runtime.topology,
+                    path_row,
+                    path_col,
+                    path_layer,
+                )
+            )
+        if not priority_corridor:
+            return False
+
+        # Do not feed the priority vehicle's *future* corridor into the path
+        # finder's hard blocked-state set.  A 2x2 Shuttle that is already in
+        # that corridor often needs one or two logical bridge states before it
+        # can reach a side bay.  Treating all future states as walls makes the
+        # escape impossible before the monotonic-overlap validation below even
+        # gets a chance to evaluate it.  Current physical footprints remain a
+        # strict collision barrier, while the future corridor is handled by
+        # the decreasing-overlap rule.
+        other_states: set[tuple[int, int, int]] = set()
+        other_footprints: set[tuple[int, int, float]] = set()
+        for other in runtime.state.get("robots", []):
+            if other.get("id") == yielding.get("id") or other.get("type") != "shuttle":
+                continue
+            other_layer = int(other.get("currentLayer", 1))
+            other_states.add((int(other["currentRow"]), int(other["currentCol"]), other_layer))
+            other_footprints.update(self._robot_collision_footprint(runtime, other))
+        blocked_states = expand_shuttle_blocked_states(runtime.topology, other_states)
+
+        handoff_cell = str((runtime.arm_handoff or {}).get("handoffCellId") or "")
+
+        chosen_path: list[tuple[int, int, int]] | None = None
+        # Eight logical cells is deliberately bounded: this is a local escape,
+        # not a replacement for the task's normal route planner.
+        for radius in range(1, 9):
+            candidates: list[tuple[int, int]] = []
+            for d_row in range(-radius, radius + 1):
+                d_col = radius - abs(d_row)
+                candidates.append((current_row + d_row, current_col + d_col))
+                if d_col:
+                    candidates.append((current_row + d_row, current_col - d_col))
+            for candidate_row, candidate_col in sorted(set(candidates)):
+                if not shuttle_state_is_walkable(
+                    runtime.topology,
+                    candidate_row,
+                    candidate_col,
+                    layer,
+                ):
+                    continue
+                candidate_cell = cell_id(candidate_row, candidate_col, "1F")
+                if candidate_cell == handoff_cell:
+                    continue
+                candidate_entry = (candidate_cell, float(layer))
+                if candidate_entry in occupied_cells or candidate_entry in reserved_targets:
+                    continue
+                candidate_footprint = shuttle_collision_footprint(
+                    runtime.topology,
+                    candidate_row,
+                    candidate_col,
+                    layer,
+                )
+                if (
+                    candidate_footprint.intersection(priority_corridor)
+                    or candidate_footprint.intersection(other_footprints)
+                    or candidate_footprint.intersection(reserved_footprint)
+                ):
+                    continue
+                path = shortest_path_shuttle(
+                    runtime.topology,
+                    str(yielding["currentCellId"]),
+                    layer,
+                    candidate_cell,
+                    layer,
+                    runtime.config["pathPolicy"],
+                    extra_blocked=blocked_states,
+                )
+                if not path or len(path) <= 1:
+                    continue
+                # A snapped 2x2 body can need one or more logical bridge steps
+                # before its footprint leaves the priority corridor. Permit
+                # those steps only while overlap is monotonically decreasing;
+                # real overlap with another vehicle/reservation is never
+                # allowed, and the selected destination is already required to
+                # be completely outside the priority corridor.
+                previous_overlap = len(
+                    self._robot_collision_footprint(runtime, yielding).intersection(
+                        priority_corridor
+                    )
+                )
+                escape_valid = True
+                for row, col, state_layer in path[1:]:
+                    step_footprint = shuttle_collision_footprint(
+                        runtime.topology,
+                        row,
+                        col,
+                        state_layer,
+                    )
+                    if step_footprint.intersection(
+                        other_footprints | reserved_footprint
+                    ):
+                        escape_valid = False
+                        break
+                    overlap = len(step_footprint.intersection(priority_corridor))
+                    if overlap > previous_overlap:
+                        escape_valid = False
+                        break
+                    previous_overlap = overlap
+                if not escape_valid or previous_overlap != 0:
+                    continue
+                chosen_path = path
+                break
+            if chosen_path is not None:
+                break
+        if chosen_path is None:
+            return False
+
+        task["trafficYieldResumePhase"] = resume_phase
+        task["trafficYieldResumeCellId"] = resume_cell
+        task["trafficYieldResumeLayer"] = resume_layer
+        task["trafficYieldForRobotId"] = priority.get("id")
+        task["phase"] = "yielding_for_traffic"
+        task["phaseLabel"] = "驶入安全侧位 / 等待冲突通道清空"
+        task.setdefault("history", []).append({
+            "tick": int(runtime.state.get("tick") or 0),
+            "phase": task["phase"],
+            "status": task.get("status", "in_progress"),
+        })
+        yielding.update({
+            "path": [cell_id(row, col, "1F") for row, col, _ in chosen_path],
+            "pathLayers": [state_layer for _, _, state_layer in chosen_path],
+            "pathStages": [task["phase"]] * len(chosen_path),
+            "targetCellId": cell_id(chosen_path[-1][0], chosen_path[-1][1], "1F"),
+            "targetLayer": chosen_path[-1][2],
+            "status": "moving",
+            "phaseLabel": task["phaseLabel"],
+            "waitTicks": 0,
+            "yieldTicks": 0,
+        })
+        self._observe_deadlock_mitigation(
+            runtime,
+            yielding,
+            "YIELD_CLEARANCE",
+            f"priority={priority.get('id')}",
+        )
+        self._record_event(
+            runtime,
+            int(runtime.state.get("tick") or 0),
+            "shuttle_clearance_yield_planned",
+            {
+                "robotId": yielding.get("id"),
+                "priorityRobotId": priority.get("id"),
+                "taskId": task.get("id"),
+                "fromCellId": yielding.get("currentCellId"),
+                "toCellId": yielding.get("targetCellId"),
+            },
+        )
+        return True
+
+    def _back_off_shuttle(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]] | None = None,
+        *,
+        allow_same_footprint_bridge: bool = False,
+    ) -> bool:
+        """Move a Shuttle back to its previous same-layer cell to break a stand-off."""
+        current_layer = float(robot.get("currentLayer", 1))
         last = robot.get("lastCellId")
-        # 后退只在 L1 发生：占用 (last, layer) 必须是空的
-        last_entry = (last, 1.0)
+        last_entry = (last, current_layer)
         if not last or last == robot["currentCellId"] or last_entry in occupied_cells or last_entry in reserved_targets:
+            return False
+        try:
+            _last_floor, last_row, last_col = parse_cell_id(str(last))
+            _cur_floor, current_row, current_col = parse_cell_id(str(robot["currentCellId"]))
+        except (TypeError, ValueError):
+            return False
+        # Recovery positions have no endpoint exemption: they must be a real
+        # Shuttle route state and a direct graph-neighbour of the current state.
+        # This prevents coordinates such as cell-r94-c47 from being invented by
+        # deadlock handling.
+        explicit_last = next(
+            (cell for cell in runtime.topology.get("cells", []) if cell.get("id") == last),
+            None,
+        )
+        if not shuttle_state_is_walkable(runtime.topology, last_row, last_col, current_layer) and not (
+            explicit_last is not None
+            and explicit_last.get("type") != "blocked"
+            and explicit_last.get("walkable", True)
+        ):
+            return False
+        step_distance = abs(last_row - current_row) + abs(last_col - current_col)
+        if step_distance < 1 or step_distance > 2:
+            return False
+        if (
+            not allow_same_footprint_bridge
+            and self._robot_collision_footprint(runtime, robot, str(last), current_layer)
+            == self._robot_collision_footprint(runtime, robot)
+        ):
+            return False
+        physical_blocker, footprint_reserved = self._physical_move_blocker(
+            runtime,
+            robot,
+            last,
+            current_layer,
+            reserved_footprint or set(),
+        )
+        if physical_blocker is not None or footprint_reserved:
             return False
         if not self._physical_movement_ready(
             runtime,
             robot,
             last,
-            float(robot.get("currentLayer", 1)),
+            current_layer,
         ):
             return False
         motion_from = self._motion_position(runtime, robot)
         self._consume_motion_credit(robot)
+        old_current = robot["currentCellId"]
         old_path = robot.get("path") or [robot["currentCellId"]]
-        old_layers = robot.get("pathLayers") or [int(robot.get("currentLayer", 1))] * len(old_path)
+        old_layers = robot.get("pathLayers") or [current_layer] * len(old_path)
         floor, row, col = parse_cell_id(last)
         robot["currentCellId"] = last
+        robot["currentNode"] = last
         robot["currentFloor"] = floor
         robot["currentRow"] = row
         robot["currentCol"] = col
+        robot["lastCellId"] = old_current
         robot["path"] = [last] + list(old_path)
-        robot["pathLayers"] = [int(robot.get("currentLayer", 1))] + [int(layer) for layer in old_layers]
+        robot["pathLayers"] = [current_layer] + list(old_layers)
         task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
         stage = task.get("phase", "moving") if task else "moving"
         robot["pathStages"] = [stage] * len(robot["path"])
+        occupied_cells.discard((old_current, current_layer))
+        occupied_cells.add(last_entry)
+        reserved_targets.add(last_entry)
+        if reserved_footprint is not None:
+            reserved_footprint.update(self._robot_collision_footprint(runtime, robot))
         self._record_committed_motion(
             runtime,
             robot,
@@ -4228,6 +6187,323 @@ class SimulationService:
         self._observe_deadlock_mitigation(runtime, robot, "BACKTRACK", "shuttle_head_on")
         return True
 
+    def _retreat_handoff_staging(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+    ) -> bool:
+        """Send a loaded waiting Shuttle back along its verified approach.
+
+        A branch-local holding point can still overlap the return footprint of
+        the Shuttle that owns the serialized arm corridor. Reversing the
+        already planned approach is safer than inventing a side-step: every
+        state is known to be valid and normal collision checks still apply.
+        """
+
+        task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        if task is None or task.get("phase") != "waiting_handoff_slot":
+            return False
+        cells = list(task.get("handoffStagingApproachCells") or [])
+        layers = list(task.get("handoffStagingApproachLayers") or [])
+        if len(cells) <= 1 or cells[-1] != robot.get("currentCellId"):
+            return False
+        if len(layers) != len(cells):
+            layers = [robot.get("currentLayer", 1)] * len(cells)
+
+        # One Shuttle footprint only needs a short pull-back to clear the
+        # branch mouth. Returning all the way to the rack would create new
+        # head-on conflicts and waste the benefit of staging.
+        retreat_length = min(len(cells), 6)
+        retreat_cells = list(reversed(cells))[:retreat_length]
+        retreat_layers = list(reversed(layers))[:retreat_length]
+        retained_length = len(cells) - retreat_length + 1
+        task["handoffStagingApproachCells"] = cells[:retained_length]
+        task["handoffStagingApproachLayers"] = layers[:retained_length]
+        task["phase"] = "yielding_handoff_staging"
+        task["phaseLabel"] = "等待区主动退出 / 让返程车先行"
+        robot.update({
+            "status": "moving",
+            "phaseLabel": task["phaseLabel"],
+            "path": retreat_cells,
+            "pathLayers": retreat_layers,
+            "pathStages": [task["phase"]] * len(retreat_cells),
+            "targetCellId": retreat_cells[-1],
+            "targetLayer": retreat_layers[-1],
+            "waitTicks": 0,
+        })
+        self._record_event(
+            runtime,
+            int(runtime.state.get("tick") or 0),
+            "handoff_staging_retreat",
+            {
+                "robotId": robot["id"],
+                "taskId": task["id"],
+                "fromCellId": retreat_cells[0],
+                "toCellId": retreat_cells[-1],
+            },
+        )
+        return True
+
+    def _idle_shuttle_clearance_step(
+        self,
+        runtime: RunRuntime,
+        idle: dict[str, Any],
+        row: int,
+        col: int,
+        layer: float,
+        corridor: frozenset[tuple[int, int, float]],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]],
+    ) -> tuple[int, int] | None:
+        """Find the first step of a short, physically clear exit."""
+        start = (row, col)
+        pending = deque([(start, start, 0)])
+        visited = {start}
+        handoff_cell = (runtime.arm_handoff or {}).get("handoffCellId")
+        obstacles = set(reserved_footprint)
+        for other in runtime.state["robots"]:
+            if other is not idle:
+                obstacles.update(self._robot_collision_footprint(runtime, other))
+        while pending:
+            position, first_step, distance = pending.popleft()
+            if distance:
+                footprint = shuttle_collision_footprint(runtime.topology, *position, layer)
+                if not footprint.intersection(corridor):
+                    return first_step
+            if distance >= 8:
+                continue
+            r, c = position
+            for neighbor in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                target = cell_id(*neighbor, "1F")
+                entry = (target, layer)
+                if (
+                    target == handoff_cell
+                    or entry in occupied_cells
+                    or entry in reserved_targets
+                    or not shuttle_state_is_walkable(runtime.topology, *neighbor, layer)
+                ):
+                    continue
+                footprint = shuttle_collision_footprint(runtime.topology, *neighbor, layer)
+                if not footprint.intersection(obstacles):
+                    pending.append((neighbor, first_step if distance else neighbor, distance + 1))
+        return None
+
+    def _yield_idle_shuttle(
+        self,
+        runtime: RunRuntime,
+        idle: dict[str, Any],
+        requester: dict[str, Any],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]],
+        *,
+        depth: int = 0,
+        visited: frozenset[str] = frozenset(),
+        corridor: frozenset[tuple[int, int, float]] | None = None,
+    ) -> bool:
+        """Move an idle blocker to a verified neighbouring Shuttle state.
+
+        Every recursive push uses the original requester's remaining corridor.
+        A narrow two-cell branch can require one temporary step farther into
+        that corridor before the idle vehicle can leave it, so overlap growth
+        is ranked last instead of being rejected outright.
+        """
+
+        idle_id = str(idle.get("id"))
+        if depth > 4 or idle_id in visited:
+            return False
+        next_visited = visited | {idle_id}
+        layer = float(idle.get("currentLayer", 1))
+        try:
+            _floor, row, col = parse_cell_id(str(idle["currentCellId"]))
+            _request_floor, request_row, request_col = parse_cell_id(str(requester["currentCellId"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if corridor is None:
+            corridor_cells: set[tuple[int, int, float]] = set()
+            requester_path = requester.get("path") or [requester["currentCellId"]]
+            requester_layers = requester.get("pathLayers") or [requester.get("currentLayer", 1)] * len(requester_path)
+            for index, path_cell in enumerate(requester_path):
+                path_layer = float(
+                    requester_layers[index]
+                    if index < len(requester_layers)
+                    else requester.get("currentLayer", 1)
+                )
+                if path_layer == layer:
+                    corridor_cells.update(
+                        self._robot_collision_footprint(runtime, requester, path_cell, path_layer)
+                    )
+            corridor = frozenset(corridor_cells)
+        current_overlap = len(self._robot_collision_footprint(runtime, idle).intersection(corridor))
+        current_footprint = self._robot_collision_footprint(runtime, idle)
+        handoff_cell = str((runtime.arm_handoff or {}).get("handoffCellId") or "")
+        clearance_step = self._idle_shuttle_clearance_step(
+            runtime, idle, row, col, layer, corridor, occupied_cells,
+            reserved_targets, reserved_footprint,
+        )
+        candidates: list[tuple[int, int, int, int, str, int, int]] = []
+        idle_chain_pending = False
+        neighbours = (
+            (row - 1, col),
+            (row + 1, col),
+            (row, col - 1),
+            (row, col + 1),
+        )
+        for next_row, next_col in (clearance_step,) if clearance_step else neighbours:
+            if not shuttle_state_is_walkable(runtime.topology, next_row, next_col, layer):
+                continue
+            target_cell = cell_id(next_row, next_col, "1F")
+            target_entry = (target_cell, layer)
+            if target_cell == handoff_cell:
+                continue
+            if target_entry in occupied_cells or target_entry in reserved_targets:
+                continue
+            target_footprint = self._robot_collision_footprint(runtime, idle, target_cell, layer)
+            changes_footprint = target_footprint != current_footprint
+            if not changes_footprint and clearance_step is None:
+                # Some two-cell-wide branches require a logical intermediate
+                # whose 2x2 footprint is unchanged.  Admit it only when the
+                # intermediate has a following state that really changes the
+                # footprint; otherwise it is pure coordinate oscillation.
+                bridge_has_exit = False
+                for exit_row, exit_col in (
+                    (next_row - 1, next_col),
+                    (next_row + 1, next_col),
+                    (next_row, next_col - 1),
+                    (next_row, next_col + 1),
+                ):
+                    if (exit_row, exit_col) == (row, col):
+                        continue
+                    if not shuttle_state_is_walkable(runtime.topology, exit_row, exit_col, layer):
+                        continue
+                    exit_cell = cell_id(exit_row, exit_col, "1F")
+                    if exit_cell == handoff_cell:
+                        continue
+                    if self._robot_collision_footprint(runtime, idle, exit_cell, layer) != current_footprint:
+                        bridge_has_exit = True
+                        break
+                if not bridge_has_exit:
+                    continue
+            candidate_overlap = len(target_footprint.intersection(corridor))
+            physical_blocker, footprint_reserved = self._physical_move_blocker(
+                runtime,
+                idle,
+                target_cell,
+                layer,
+                reserved_footprint,
+            )
+            if footprint_reserved:
+                continue
+            if physical_blocker is not None:
+                if (
+                    physical_blocker.get("type") == "shuttle"
+                    and not physical_blocker.get("currentTaskId")
+                    and not physical_blocker.get("carrying")
+                    and str(physical_blocker.get("id")) not in next_visited
+                    and depth < 4
+                ):
+                    if self._yield_idle_shuttle(
+                        runtime,
+                        physical_blocker,
+                        idle,
+                        occupied_cells,
+                        reserved_targets,
+                        reserved_footprint,
+                        depth=depth + 1,
+                        visited=next_visited,
+                        corridor=corridor,
+                    ):
+                        # One vehicle in the blocking chain moved this tick. Let
+                        # the scheduler re-evaluate the direct blocker next tick.
+                        return True
+                    idle_chain_pending = True
+                continue
+            distance = abs(next_row - request_row) + abs(next_col - request_col)
+            candidates.append((
+                current_overlap - candidate_overlap,
+                int(changes_footprint),
+                int(target_cell != idle.get("lastCellId")),
+                distance,
+                target_cell,
+                next_row,
+                next_col,
+            ))
+        if not candidates:
+            return False
+        if idle_chain_pending and not any(candidate[1] for candidate in candidates):
+            # Give the recursive push enough ticks to accrue physical motion
+            # credit instead of escaping through a no-op logical bridge.
+            return False
+
+        (
+            _overlap_reduction,
+            _changes_footprint,
+            _not_reverse,
+            _distance,
+            target_cell,
+            target_row,
+            target_col,
+        ) = max(
+            candidates,
+            # Releasing physical space outranks a temporary increase in route
+            # overlap.  Otherwise an unchanged-footprint bridge can win and
+            # bounce forever between two logical coordinates.
+            key=lambda item: (item[1], item[2], item[0], item[3], item[4]),
+        )
+        if not self._physical_movement_ready(runtime, idle, target_cell, layer):
+            return False
+        motion_from = self._motion_position(runtime, idle)
+        self._consume_motion_credit(idle)
+        previous = idle["currentCellId"]
+        occupied_cells.discard((previous, layer))
+        idle.update({
+            "lastCellId": previous,
+            "currentCellId": target_cell,
+            "currentNode": target_cell,
+            "currentFloor": "1F",
+            "currentRow": target_row,
+            "currentCol": target_col,
+            "path": [target_cell],
+            "pathLayers": [layer],
+            "pathStages": ["idle_yield"],
+            "targetCellId": target_cell,
+            "targetLayer": layer,
+            "status": "idle",
+            "phaseLabel": "待命 / 主动让行",
+            "waitTicks": 0,
+            "returningToStandby": False,
+        })
+        occupied_cells.add((target_cell, layer))
+        reserved_targets.add((target_cell, layer))
+        reserved_footprint.update(self._robot_collision_footprint(runtime, idle))
+        self._record_committed_motion(
+            runtime,
+            idle,
+            motion_from,
+            MovementType.BACKOFF,
+            "_yield_idle_shuttle",
+        )
+        self._record_event(
+            runtime,
+            int(runtime.state.get("tick") or 0),
+            "robot_position",
+            {
+                "robotId": idle["id"],
+                "cellId": target_cell,
+                "floor": "1F",
+                "row": target_row,
+                "col": target_col,
+                "layer": layer,
+                "status": "yielding",
+            },
+        )
+        self._observe_deadlock_mitigation(runtime, idle, "YIELD_IDLE", "shuttle_idle_blocker")
+        return True
+
     def _clear_shuttle_head_on(
         self,
         runtime: RunRuntime,
@@ -4235,84 +6511,306 @@ class SimulationService:
         blocker: dict[str, Any] | None,
         occupied_cells: set[tuple[str, float]],
         reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]],
     ) -> bool:
-        """两台四向车在巷道头对头：让其中一辆 yield 到 row±1 的输送线（避车线），
-        等对向车通过后再继续。退一格 col 只作后备（如果 row±1 也被占）。"""
-        if blocker is None or blocker.get("type") != "shuttle" or blocker.get("status") in {"failed", "idle", "exception"}:
+        """Break a Shuttle stand-off by retreating on a verified route edge.
+
+        Never synthesize a side coordinate here.  The old ``row +/- 1`` rule
+        assumed every conveyor row was a passing bay and could move a vehicle
+        onto a non-existent topology cell.
+        """
+        if blocker is None or blocker.get("type") != "shuttle" or blocker.get("status") in {"failed", "exception"}:
             return False
+        traffic = self._handoff_traffic_state(runtime)
+        owner_id = traffic.get("ownerRobotId") if traffic else None
+        # The Shuttle leaving the arm corridor must never be trapped by a
+        # branch holding point. Ask the loaded waiter to retrace its verified
+        # staging approach; movement itself remains collision checked.
+        if robot.get("id") == owner_id and blocker.get("id") != owner_id:
+            if self._retreat_handoff_staging(runtime, blocker):
+                return True
+        # A taskless Shuttle returning to standby is operationally idle too.
+        # Treating only status == idle as movable left those vehicles parked on
+        # lift mouths after a completed delivery, where they could block the
+        # next serialized handoff owner indefinitely.
+        blocker_is_idle = not blocker.get("currentTaskId") and not blocker.get("carrying")
         blocker_path = blocker.get("path") or []
-        if len(blocker_path) <= 1 or blocker_path[1] != robot["currentCellId"]:
-            return False
+        if not blocker_is_idle:
+            if len(blocker_path) <= 1:
+                return False
+            blocker_layers = blocker.get("pathLayers") or [blocker.get("currentLayer", 1)] * len(blocker_path)
+            blocker_next_layer = blocker_layers[1] if len(blocker_layers) > 1 else blocker.get("currentLayer", 1)
+            blocker_next_footprint = self._robot_collision_footprint(
+                runtime,
+                blocker,
+                blocker_path[1],
+                blocker_next_layer,
+            )
+            if not blocker_next_footprint.intersection(self._robot_collision_footprint(runtime, robot)):
+                return False
 
-        # 固定优先级：ID 较大的车辆让行，避免对称振荡
-        yielding, _priority = sorted((robot, blocker), key=lambda item: str(item.get("id")), reverse=True)
+        if blocker_is_idle and self._yield_idle_shuttle(
+            runtime,
+            blocker,
+            robot,
+            occupied_cells,
+            reserved_targets,
+            reserved_footprint,
+        ):
+            return True
 
-        # 优先方案：yield 到 row±1 的输送线格（row 94-95 是输送线避车带）
-        if int(yielding.get("currentLayer", 1)) == 1:
-            cur_row = int(yielding.get("currentRow", 0))
-            cur_col = int(yielding.get("currentCol", 0))
-            cur_layer = 1.0
-            # 尝试 row-1（输送线方向），再 row+1
-            for row_offset in (-1, 1):
-                target_row = cur_row + row_offset
-                if target_row < 94: continue  # 不要越界
-                target_cell = cell_id(target_row, cur_col, "1F")
-                target_entry = (target_cell, cur_layer)
-                if target_entry in occupied_cells or target_entry in reserved_targets:
-                    continue
-                # 检查这个 row/col 是否是 walkable
+        robot_task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        blocker_task = find_task(runtime.state.get("tasks", []), blocker.get("currentTaskId"))
+        loaded_feeder = bool(
+            robot_task
+            and robot_task.get("phase") == "to_handoff_staging"
+            and robot.get("carrying")
+            and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+        )
+        unladen_pickup = bool(
+            blocker_task
+            and blocker_task.get("phase") == "pickup_from_shuttle"
+            and not blocker.get("carrying")
+        )
+        if loaded_feeder and unladen_pickup:
+            # The loaded conveyor feeder has fixed one-way priority.  When an
+            # empty pickup approaches head-on, first try to give that empty car
+            # a genuinely different route around the feeder's remaining path.
+            # A simple one-cell retreat otherwise sends it straight back into
+            # the same conflict after its yield timer expires.
+            feeder_path = list(robot.get("path") or [robot.get("currentCellId")])
+            feeder_layers = list(robot.get("pathLayers") or [robot.get("currentLayer", 1)] * len(feeder_path))
+            feeder_states: set[tuple[int, int, int]] = set()
+            for index, feeder_cell in enumerate(feeder_path[1:24], start=1):
                 try:
-                    floor, r, c = parse_cell_id(target_cell)
-                    if r != target_row or c != cur_col: continue
-                except (TypeError, ValueError):
+                    _floor, feeder_row, feeder_col = parse_cell_id(str(feeder_cell))
+                except ValueError:
                     continue
-                if not self._physical_movement_ready(runtime, yielding, target_cell, cur_layer):
-                    continue
-                # 成功 yield 到输送线
-                motion_from = self._motion_position(runtime, yielding)
-                self._consume_motion_credit(yielding)
-                old_path = yielding.get("path") or [yielding["currentCellId"]]
-                old_layers = yielding.get("pathLayers") or [int(yielding.get("currentLayer", 1))] * len(old_path)
-                yielding["lastCellId"] = yielding["currentCellId"]
-                yielding["currentCellId"] = target_cell
-                yielding["currentRow"] = target_row
-                yielding["currentCol"] = cur_col
-                yielding["currentLayer"] = cur_layer
-                yielding["currentFloor"] = "1F"
-                # path: 当前 yield 格 → 原 path（先停 3 tick 等对向过）
-                yielding["path"] = [target_cell] + list(old_path)
-                yielding["pathLayers"] = [1] + [int(l) for l in old_layers]
-                yielding["pathStages"] = ["yield_to_conveyor"] + [yielding.get("phaseLabel", "moving")] * len(old_path)
-                yielding["yieldTicks"] = 3  # 等 3 tick 让对向车先走
+                feeder_layer = int(
+                    feeder_layers[index]
+                    if index < len(feeder_layers)
+                    else robot.get("currentLayer", 1)
+                )
+                feeder_states.add((feeder_row, feeder_col, feeder_layer))
+            target_cell = str(blocker.get("targetCellId") or "")
+            target_layer = int(blocker.get("targetLayer") or blocker.get("currentLayer", 1))
+            old_path = [str(value) for value in (blocker.get("path") or [])]
+            old_layers = [
+                float(value)
+                for value in (
+                    blocker.get("pathLayers")
+                    or [blocker.get("currentLayer", 1)] * len(old_path)
+                )
+            ]
+            replanned = bool(
+                target_cell
+                and self._robot_path_to(
+                    runtime,
+                    blocker,
+                    target_cell,
+                    target_layer,
+                    extra_blocked=feeder_states,
+                    task_id=(blocker_task or {}).get("id"),
+                    evidence_kind="replan",
+                )
+            )
+            new_path = [str(value) for value in (blocker.get("path") or [])]
+            new_layers = [
+                float(value)
+                for value in (
+                    blocker.get("pathLayers")
+                    or [blocker.get("currentLayer", 1)] * len(new_path)
+                )
+            ]
+            if replanned and (new_path != old_path or new_layers != old_layers):
+                blocker["waitTicks"] = 0
+                blocker["yieldTicks"] = 0
+                blocker["status"] = "moving"
+                blocker["phaseLabel"] = "空车绕行 / 载货队列优先"
+                return True
+
+        def yield_rank(item: dict[str, Any]) -> tuple[int, int, str]:
+            task = find_task(runtime.state.get("tasks", []), item.get("currentTaskId"))
+            is_owner = item.get("id") == owner_id
+            phase = str((task or {}).get("phase") or "")
+            is_outbound = bool(
+                item.get("returningToStandby")
+                or task and task.get("taskKind") in {EMPTY_PALLET_TASK_KIND, PALLET_RETURN_TASK_KIND}
+            )
+            is_inbound = bool(task and task.get("armHandoff"))
+            is_unladen_pickup = bool(phase == "pickup_from_shuttle" and not item.get("carrying"))
+            # Prefer moving an idle/non-owner/inbound vehicle.  The vehicle
+            # already leaving the handoff must keep right of way.
+            score = (
+                4 if is_unladen_pickup
+                else 3 if item.get("status") == "idle"
+                else 2 if is_inbound
+                else 1
+            )
+            # The serialized handoff owner has absolute right of way.  A
+            # taskless vehicle returning to standby is outbound too, but must
+            # retreat when it meets the owner on a single-lane segment.
+            protected = 2 if is_owner else 1 if is_outbound else 0
+            return (score, -protected, str(item.get("id")))
+
+        candidates = sorted((robot, blocker), key=yield_rank, reverse=True)
+        non_owner_candidates = [
+            item for item in candidates if item.get("id") != owner_id
+        ]
+        taskless_candidates = [
+            item for item in candidates
+            if item.get("id") != owner_id
+            and not item.get("currentTaskId") and not item.get("carrying")
+        ]
+        if taskless_candidates:
+            # Standby is best-effort. It must not repeatedly interrupt a
+            # productive task to reserve a route back to the home position.
+            yield_candidates = taskless_candidates
+        elif owner_id and non_owner_candidates:
+            # The vehicle leaving the serialized arm owns the return corridor,
+            # even when the opposing vehicle also carries a load.
+            yield_candidates = non_owner_candidates
+        else:
+            non_loaded_candidates = [
+                item for item in candidates
+                if not self._is_loaded_handoff_queue_feeder(runtime, item)
+            ]
+            # Without a handoff owner, a loaded inbound convoy outranks an
+            # unladen pickup/standby return.
+            yield_candidates = non_loaded_candidates or candidates
+        for yielding in yield_candidates:
+            priority = blocker if yielding is robot else robot
+            if self._yield_shuttle_to_clearance(
+                runtime,
+                yielding,
+                priority,
+                occupied_cells,
+                reserved_targets,
+                reserved_footprint,
+            ):
+                return True
+        for yielding in yield_candidates:
+            if self._retreat_unladen_shuttle_two_cells(
+                runtime,
+                yielding,
+                occupied_cells,
+                reserved_targets,
+                reserved_footprint,
+            ):
+                yielding["yieldTicks"] = 2
                 yielding["waitTicks"] = 0
                 yielding["status"] = "blocked"
-                yielding["phaseLabel"] = "让行至输送线避车位"
-                # occupied_cells 更新
-                occupied_cells.discard((yielding["lastCellId"], cur_layer))
-                occupied_cells.add(target_entry)
-                reserved_targets.add(target_entry)
-                self._record_committed_motion(
-                    runtime, yielding, motion_from, MovementType.BACKOFF, "head_on_yield_conveyor"
-                )
-                floor, row, col = parse_cell_id(yielding["currentCellId"])
-                self._record_event(
-                    runtime, runtime.state["tick"], "robot_position",
-                    {"robotId": yielding["id"], "cellId": yielding["currentCellId"],
-                     "floor": floor, "row": row, "col": col, "layer": cur_layer,
-                     "status": "yielding"},
-                )
-                self._observe_deadlock_mitigation(runtime, yielding, "YIELD_CONVEYOR", "shuttle_head_on")
+                yielding["phaseLabel"] = "高层巷道退入侧位让行"
                 return True
-
-        # Fallback: 退一格 col（原 back_off 逻辑）
-        if self._back_off_shuttle(runtime, robot, occupied_cells, reserved_targets):
-            if self._reroute_shuttle(runtime, robot, occupied_cells):
+        for yielding in yield_candidates:
+            if self._back_off_shuttle(
+                runtime,
+                yielding,
+                occupied_cells,
+                reserved_targets,
+                reserved_footprint,
+            ):
+                if yielding.get("returningToStandby") and not yielding.get("currentTaskId"):
+                    # A taskless standby return is best-effort.  After it has
+                    # retreated for the traffic owner, do not immediately send
+                    # it back into the same contested corridor; park it at the
+                    # verified cell and let a later task replan from there.
+                    current_cell = yielding["currentCellId"]
+                    current_layer = yielding.get("currentLayer", 1)
+                    yielding.update({
+                        "returningToStandby": False,
+                        "yieldTicks": 0,
+                        "waitTicks": 0,
+                        "status": "idle",
+                        "phaseLabel": "待命 / 让行驻车",
+                        "path": [current_cell],
+                        "pathLayers": [current_layer],
+                        "pathStages": ["idle_yield"],
+                        "targetCellId": current_cell,
+                        "targetLayer": current_layer,
+                    })
+                    return True
+                yielding["yieldTicks"] = 3
+                yielding["waitTicks"] = 0
+                yielding["status"] = "blocked"
+                yielding["phaseLabel"] = "沿合法路径退让"
                 return True
-            robot["status"] = "moving"
-            return True
-        if self._back_off_shuttle(runtime, blocker, occupied_cells, reserved_targets):
-            return self._reroute_shuttle(runtime, blocker, occupied_cells)
         return False
+
+    def _retreat_unladen_shuttle_two_cells(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        occupied_cells: set[tuple[str, float]],
+        reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]],
+    ) -> bool:
+        """Retreat an empty high-level pickup far enough to clear a 2x2 body."""
+
+        task = find_task(runtime.state.get("tasks", []), robot.get("currentTaskId"))
+        if (
+            task is None
+            or task.get("phase") != "pickup_from_shuttle"
+            or robot.get("carrying")
+        ):
+            return False
+        last_cell = str(robot.get("lastCellId") or "")
+        if not last_cell or last_cell == robot.get("currentCellId"):
+            return False
+        try:
+            _floor, current_row, current_col = parse_cell_id(str(robot["currentCellId"]))
+            _last_floor, last_row, last_col = parse_cell_id(last_cell)
+        except ValueError:
+            return False
+        d_row = last_row - current_row
+        d_col = last_col - current_col
+        if abs(d_row) + abs(d_col) != 1:
+            return False
+        second_row = last_row + d_row
+        second_col = last_col + d_col
+        layer = int(robot.get("currentLayer", 1))
+        if not shuttle_state_is_walkable(runtime.topology, second_row, second_col, layer):
+            return False
+        second_cell = cell_id(second_row, second_col, "1F")
+        second_entry = (second_cell, float(layer))
+        if second_entry in occupied_cells or second_entry in reserved_targets:
+            return False
+        second_blocker, second_reserved = self._physical_move_blocker(
+            runtime,
+            robot,
+            second_cell,
+            layer,
+            reserved_footprint,
+        )
+        if second_blocker is not None or second_reserved:
+            return False
+
+        resume_cell = str(robot.get("targetCellId") or (robot.get("path") or [""])[-1])
+        resume_layer = int(robot.get("targetLayer") or (robot.get("pathLayers") or [layer])[-1])
+        resume_phase = str(task.get("phase") or "pickup_from_shuttle")
+        if not self._back_off_shuttle(
+            runtime,
+            robot,
+            occupied_cells,
+            reserved_targets,
+            reserved_footprint,
+            allow_same_footprint_bridge=True,
+        ):
+            return False
+        task["yieldResumePhase"] = resume_phase
+        task["yieldResumeCellId"] = resume_cell
+        task["yieldResumeLayer"] = resume_layer
+        task["phase"] = "yielding_for_handoff_queue"
+        task["phaseLabel"] = "高层巷道退入侧位让行"
+        robot.update({
+            "path": [last_cell, second_cell],
+            "pathLayers": [layer, layer],
+            "pathStages": [task["phase"], task["phase"]],
+            "targetCellId": second_cell,
+            "targetLayer": layer,
+            "phaseLabel": task["phaseLabel"],
+        })
+        return True
 
     def _clear_head_on(
         self,
@@ -4349,7 +6847,8 @@ class SimulationService:
             return False
         # occupied_cells 是 (cell-id, layer) tuple 集合，2D pathfinding 只取 cell-id 部分
         cur_entry = (robot["currentCellId"], cur_layer_f)
-        blocked = {parse_cell_id(cell) for cell, _layer in occupied_cells if (cell, _layer) != cur_entry}
+        occupied_entries = normalize_occupied_entries(occupied_cells)
+        blocked = {parse_cell_id(cell) for cell, _layer in occupied_entries if (cell, _layer) != cur_entry}
         path_cells = shortest_path(
             runtime.topology,
             last,
@@ -4427,8 +6926,11 @@ class SimulationService:
         robot: dict[str, Any],
         occupied_cells: set[tuple[str, float]],
         reserved_targets: set[tuple[str, float]],
+        reserved_footprint: set[tuple[int, int, float]] | None = None,
     ) -> None:
         """已交付但暂时没有任务的 CTU 返回起始待命位，避免长期占住唯一出库口。"""
+        if reserved_footprint is None:
+            reserved_footprint = set()
         if robot.get("yieldTicks", 0) > 0:
             robot["yieldTicks"] -= 1
             robot["status"] = "blocked"
@@ -4459,14 +6961,63 @@ class SimulationService:
         next_layer_f = float(next_layer)
         current_entry = (current_cell_id, cur_layer_f)
         next_entry = (next_cell_id, next_layer_f)
+        if (
+            robot.get("type") == "shuttle"
+            and self._loaded_handoff_queue_feeders_active(runtime)
+        ):
+            feeder_footprint = self._handoff_queue_feeder_footprint(runtime)
+            current_overlap = bool(
+                self._robot_collision_footprint(runtime, robot).intersection(feeder_footprint)
+            )
+            next_overlap = bool(
+                self._robot_collision_footprint(
+                    runtime,
+                    robot,
+                    next_cell_id,
+                    next_layer_f,
+                ).intersection(feeder_footprint)
+            )
+            if not current_overlap and next_overlap:
+                target_cell = str(robot.get("targetCellId") or "")
+                target_layer = int(robot.get("targetLayer") or robot.get("currentLayer", 1))
+                if target_cell and self._robot_path_to(
+                    runtime,
+                    robot,
+                    target_cell,
+                    target_layer,
+                    extra_blocked=self._handoff_queue_feeder_blocked_states(runtime),
+                    evidence_kind="replan",
+                ):
+                    robot["status"] = "returning"
+                    robot["waitTicks"] = 0
+                    robot["phaseLabel"] = "返回待命位 / 绕行输送线入队口"
+                else:
+                    robot["status"] = "waiting"
+                    robot["phaseLabel"] = "返回待命位 / 等待载货车队通过"
+                return
         if not self._physical_movement_ready(runtime, robot, next_cell_id, next_layer_f):
             robot["phaseLabel"] = "Returning to standby / physical travel"
             return
-        if next_entry != current_entry and (next_entry in occupied_cells or next_entry in reserved_targets):
+        physical_blocker: dict[str, Any] | None = None
+        footprint_reserved = False
+        if next_entry != current_entry:
+            physical_blocker, footprint_reserved = self._physical_move_blocker(
+                runtime,
+                robot,
+                next_cell_id,
+                next_layer_f,
+                reserved_footprint,
+            )
+        if next_entry != current_entry and (
+            next_entry in occupied_cells
+            or next_entry in reserved_targets
+            or physical_blocker is not None
+            or footprint_reserved
+        ):
             robot["status"] = "blocked"
             robot["waitTicks"] += 1
             robot["phaseLabel"] = "返回待命位 / 等待让行"
-            observed_blocker = next(
+            observed_blocker = physical_blocker or next(
                 (
                     item
                     for item in runtime.state["robots"]
@@ -4479,7 +7030,7 @@ class SimulationService:
                 ResourceType.ROBOT
                 if observed_blocker is not None
                 else ResourceType.RESERVATION
-                if next_entry in reserved_targets
+                if next_entry in reserved_targets or footprint_reserved
                 else ResourceType.UNKNOWN_BLOCKER
             )
             self._observe_robot_block(
@@ -4492,7 +7043,7 @@ class SimulationService:
                     "NEXT_CELL_OCCUPIED"
                     if observed_blocker is not None
                     else "TARGET_RESERVED"
-                    if next_entry in reserved_targets
+                    if next_entry in reserved_targets or footprint_reserved
                     else "UNKNOWN_BLOCKER"
                 ),
             )
@@ -4510,10 +7061,20 @@ class SimulationService:
                     robot["waitTicks"] = 0
                     robot["status"] = "returning"
                     robot["phaseLabel"] = "返回待命位"
+                elif observed_blocker is not None and self._clear_shuttle_head_on(
+                    runtime,
+                    robot,
+                    observed_blocker,
+                    occupied_cells,
+                    reserved_targets,
+                    reserved_footprint,
+                ):
+                    robot["waitTicks"] = 0
             return
 
         motion_from = self._motion_position(runtime, robot)
         self._consume_motion_credit(robot)
+        robot["lastCellId"] = current_cell_id
         robot["currentCellId"] = next_cell_id
         robot["currentNode"] = next_cell_id
         floor, row, col = parse_cell_id(next_cell_id)
@@ -4530,6 +7091,7 @@ class SimulationService:
         occupied_cells.discard(current_entry)
         occupied_cells.add(next_entry)
         reserved_targets.add(next_entry)
+        reserved_footprint.update(self._robot_collision_footprint(runtime, robot))
         self._record_committed_motion(
             runtime,
             robot,
@@ -4566,7 +7128,7 @@ class SimulationService:
         fixed_occupied = build_occupied_lookup(runtime.topology)
         # unavailable 用于 cell-id 级别的 2D 检查（CTU 在 L1）
         cur_layer_f = float(robot.get("currentLayer", 1))
-        occupied_cells_2d = {cell for cell, _layer in occupied_cells}
+        occupied_cells_2d = {cell for cell, _layer in normalize_occupied_entries(occupied_cells)}
         reserved_targets_2d = {cell for cell, _layer in reserved_targets}
         unavailable = occupied_cells_2d | reserved_targets_2d
         candidates: list[tuple[int, str, tuple[str, int, int]]] = []
@@ -4897,7 +7459,13 @@ class SimulationService:
         因此不新建「去货位取托盘」的路段，而是把托盘当作车载物直接开往目标格。
         """
         tick = int(runtime.state["tick"])
-        if not self._robot_path_to(runtime, robot, EMPTY_PALLET_RETURN_CELL_ID, 1):
+        if not self._robot_path_to(
+            runtime,
+            robot,
+            EMPTY_PALLET_RETURN_CELL_ID,
+            1,
+            extra_blocked=self._handoff_return_route_blocked_states(runtime),
+        ):
             self._record_event(
                 runtime,
                 tick,
@@ -4917,6 +7485,7 @@ class SimulationService:
             created_tick=tick,
         )
         return_task["taskKind"] = EMPTY_PALLET_TASK_KIND
+        return_task["handoffTraffic"] = True
         return_task["status"] = "in_progress"
         return_task["startedTick"] = tick
         return_task["phase"] = "delivery_empty_pallet"
@@ -4926,6 +7495,9 @@ class SimulationService:
         return_task["palletSourceCellId"] = str(task.get("palletSourceCellId") or "")
         return_task["palletSourceLayer"] = int(task.get("palletSourceLayer") or 1)
         runtime.state["tasks"].append(return_task)
+        traffic = self._handoff_traffic_state(runtime)
+        if traffic is not None and traffic.get("ownerRobotId") == robot.get("id"):
+            traffic["ownerTaskId"] = return_task["id"]
 
         # 原订单任务转由输送线独立推进，四向车腾出来专门运空托盘。
         task["assignedRobotId"] = None
@@ -5262,7 +7834,13 @@ class SimulationService:
         if not extras or not source_cell:
             return False
         tick = int(runtime.state["tick"])
-        if not self._robot_path_to(runtime, robot, source_cell, source_layer):
+        if not self._robot_path_to(
+            runtime,
+            robot,
+            source_cell,
+            source_layer,
+            extra_blocked=self._handoff_return_route_blocked_states(runtime),
+        ):
             self._record_event(
                 runtime,
                 tick,
@@ -5282,6 +7860,7 @@ class SimulationService:
             created_tick=tick,
         )
         return_task["taskKind"] = PALLET_RETURN_TASK_KIND
+        return_task["handoffTraffic"] = True
         return_task["status"] = "in_progress"
         return_task["startedTick"] = tick
         return_task["phase"] = "return_pallet_to_lane"
@@ -5295,6 +7874,9 @@ class SimulationService:
         return_task["targetCellId"] = source_cell
         return_task["targetLayer"] = source_layer
         runtime.state["tasks"].append(return_task)
+        traffic = self._handoff_traffic_state(runtime)
+        if traffic is not None and traffic.get("ownerRobotId") == robot.get("id"):
+            traffic["ownerTaskId"] = return_task["id"]
 
         # 原订单任务转由输送线独立推进，四向车腾出来把余货送回货位。
         task["assignedRobotId"] = None
@@ -6835,6 +9417,82 @@ class SimulationService:
         occupied_cells: set[tuple[str, float]] | None = None,
     ) -> None:
         tick = runtime.state["tick"]
+        if task.get("phase") == "yielding_for_traffic":
+            resume_phase = str(task.get("trafficYieldResumePhase") or "moving")
+            resume_cell = str(task.get("trafficYieldResumeCellId") or "")
+            resume_layer = int(task.get("trafficYieldResumeLayer") or robot.get("currentLayer", 1))
+            if not resume_cell:
+                self._fail_active_task(runtime, robot, task, "traffic_yield_resume_target_missing")
+                return
+
+            occupied_states: set[tuple[int, int, int]] = set()
+            for other in runtime.state.get("robots", []):
+                if other.get("id") == robot.get("id") or other.get("type") != "shuttle":
+                    continue
+                other_layer = int(other.get("currentLayer", 1))
+                occupied_states.add((int(other["currentRow"]), int(other["currentCol"]), other_layer))
+                other_path = list(other.get("path") or [])
+                if len(other_path) > 1:
+                    try:
+                        _floor, next_row, next_col = parse_cell_id(str(other_path[1]))
+                    except (TypeError, ValueError):
+                        continue
+                    other_layers = list(
+                        other.get("pathLayers")
+                        or [other_layer] * len(other_path)
+                    )
+                    next_layer = int(other_layers[1]) if len(other_layers) > 1 else other_layer
+                    occupied_states.add((next_row, next_col, next_layer))
+            dynamic_blocked = expand_shuttle_blocked_states(runtime.topology, occupied_states)
+            if not self._robot_path_to(
+                runtime,
+                robot,
+                resume_cell,
+                resume_layer,
+                extra_blocked=dynamic_blocked,
+                task_id=task.get("id"),
+                evidence_kind="replan",
+            ):
+                robot["status"] = "waiting"
+                robot["phaseLabel"] = "安全侧位等待 / 冲突通道未清空"
+                robot["path"] = [robot["currentCellId"]]
+                robot["pathLayers"] = [robot.get("currentLayer", 1)]
+                robot["pathStages"] = [task["phase"]]
+                return
+
+            path = list(robot.get("path") or [])
+            path_layers = list(robot.get("pathLayers") or [])
+            if len(path) > 1:
+                next_layer = path_layers[1] if len(path_layers) > 1 else robot.get("currentLayer", 1)
+                physical_blocker, footprint_reserved = self._physical_move_blocker(
+                    runtime,
+                    robot,
+                    path[1],
+                    next_layer,
+                    set(),
+                )
+                if physical_blocker is not None or footprint_reserved:
+                    robot["status"] = "waiting"
+                    robot["phaseLabel"] = "安全侧位等待 / 冲突通道未清空"
+                    robot["path"] = [robot["currentCellId"]]
+                    robot["pathLayers"] = [robot.get("currentLayer", 1)]
+                    robot["pathStages"] = [task["phase"]]
+                    return
+
+            task["phase"] = resume_phase
+            task["phaseLabel"] = self._phase_label(resume_phase)
+            for key in (
+                "trafficYieldResumePhase",
+                "trafficYieldResumeCellId",
+                "trafficYieldResumeLayer",
+                "trafficYieldForRobotId",
+            ):
+                task.pop(key, None)
+            robot["status"] = "moving"
+            robot["phaseLabel"] = task["phaseLabel"]
+            robot["pathStages"] = [resume_phase] * len(robot.get("path") or [])
+            return
+
         if task.get("mode") == "shuttle_transfer":
             if task["phase"] == "pickup_wait":
                 if tick < int(task.get("pickupReadyTick") or tick):
@@ -6957,7 +9615,58 @@ class SimulationService:
                 robot["carrying"].append({**box, "kind": "pallet_goods"})
             # 倒库任务交付到库内目标货道（其层随目标货道）；出货任务交付到地面线（L1）。
             delivery_layer = int(task.get("targetLayer", 1)) if task.get("taskKind") == "relocate" else 1
-            if self._set_robot_leg(runtime, robot, task, "delivery_to_port", task["deliveryCellId"], target_layer=delivery_layer):
+            traffic = self._handoff_traffic_state(runtime) if task.get("armHandoff") else None
+            if traffic is not None and traffic.get("ownerRobotId") != robot.get("id"):
+                # Fetching and branch transport are fully parallel.  A loaded
+                # non-owner proceeds to a branch-local holding state and stops
+                # before the first shared single-lane segment.
+                staging_cell, staging_layer = self._handoff_staging_target(runtime, robot, task)
+                task["handoffStagingCellId"] = staging_cell
+                task["handoffStagingLayer"] = staging_layer
+                if str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID:
+                    task["handoffQueueAdmitted"] = False
+                    task.pop("handoffQueuedTick", None)
+                else:
+                    task["handoffQueuedTick"] = tick
+                task["handoffStagingOriginCellId"] = robot.get("currentCellId")
+                task["handoffStagingOriginLayer"] = robot.get("currentLayer", 1)
+                if (
+                    staging_cell != robot.get("currentCellId")
+                    or staging_layer != int(robot.get("currentLayer", 1))
+                ) and self._set_robot_leg(
+                    runtime,
+                    robot,
+                    task,
+                    "to_handoff_staging",
+                    staging_cell,
+                    target_layer=staging_layer,
+                ):
+                    task["handoffStagingApproachCells"] = list(robot.get("path") or [])
+                    task["handoffStagingApproachLayers"] = list(robot.get("pathLayers") or [])
+                    task["phaseLabel"] = "载货前往机械臂等待区"
+                    robot["phaseLabel"] = task["phaseLabel"]
+                else:
+                    task["phase"] = "waiting_handoff_slot"
+                    task["phaseLabel"] = "已到等待区 / 等待机械臂通行时隙"
+                    robot["status"] = "waiting"
+                    robot["phaseLabel"] = task["phaseLabel"]
+                    robot["path"] = [robot["currentCellId"]]
+                    robot["pathLayers"] = [robot.get("currentLayer", 1)]
+                    robot["pathStages"] = [task["phase"]]
+                    self._record_event(
+                        runtime,
+                        tick,
+                        "handoff_queue_joined",
+                        {"robotId": robot["id"], "taskId": task["id"], "cellId": robot["currentCellId"]},
+                    )
+            elif self._set_robot_leg(
+                runtime,
+                robot,
+                task,
+                "delivery_to_port",
+                task["deliveryCellId"],
+                target_layer=delivery_layer,
+            ):
                 task["phaseLabel"] = "倒库移位" if task.get("taskKind") == "relocate" else "输送线交付"
             task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
             self._record_event(runtime, tick, "task_state_changed", {"taskId": task["id"], "phase": task["phase"], "status": task["status"]})
@@ -7047,6 +9756,147 @@ class SimulationService:
 
         if task["phase"] == "waiting_arm_handoff":
             # 机械臂接管（_advance_picking_arm 驱动）；四向车在此阶段原地等待。
+            return
+
+        if task["phase"] == "yielding_for_handoff_queue":
+            resume_phase = str(task.pop("yieldResumePhase", "pickup_from_shuttle"))
+            resume_cell = str(task.pop("yieldResumeCellId", task.get("sourceCellId") or ""))
+            resume_layer = int(task.pop("yieldResumeLayer", task.get("sourceLayer") or 1))
+            self._set_robot_leg(
+                runtime,
+                robot,
+                task,
+                resume_phase,
+                resume_cell,
+                target_layer=resume_layer,
+            )
+            return
+
+        if task["phase"] == "to_handoff_staging":
+            staging_cell = str(task.get("handoffStagingCellId") or "")
+            staging_layer = int(task.get("handoffStagingLayer") or 1)
+            if (
+                staging_cell
+                and (
+                    robot.get("currentCellId") != staging_cell
+                    or int(robot.get("currentLayer", 1)) != staging_layer
+                )
+            ):
+                # Recovery/back-off may temporarily reduce a route to one
+                # state. Never convert that intermediate coordinate into a
+                # queue stop; re-establish the assigned odd-column module.
+                self._set_robot_leg(
+                    runtime,
+                    robot,
+                    task,
+                    "to_handoff_staging",
+                    staging_cell,
+                    target_layer=staging_layer,
+                )
+                return
+            if (
+                str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+                and not task.get("handoffQueueAdmitted")
+            ):
+                reserved_slots = {
+                    str(other_task.get("handoffStagingCellId") or "")
+                    for other_task in runtime.state.get("tasks", [])
+                    if other_task.get("id") != task.get("id")
+                    and other_task.get("status") not in TERMINAL_TASK_STATUSES
+                    and other_task.get("handoffQueueAdmitted")
+                }
+                queue_slot = next(
+                    (slot for slot in HANDOFF_QUEUE_SLOT_CELL_IDS if slot not in reserved_slots),
+                    None,
+                )
+                if queue_slot is None:
+                    robot["status"] = "waiting"
+                    task["phaseLabel"] = "输送线入口等待队列空位"
+                    robot["phaseLabel"] = task["phaseLabel"]
+                    return
+                task["handoffQueueAdmitted"] = True
+                task["handoffQueuedTick"] = tick
+                task["handoffStagingCellId"] = queue_slot
+                task["handoffStagingLayer"] = 1
+                if queue_slot != robot.get("currentCellId"):
+                    if self._set_robot_leg(
+                        runtime,
+                        robot,
+                        task,
+                        "to_handoff_staging",
+                        queue_slot,
+                        target_layer=1,
+                    ):
+                        task["handoffStagingApproachCells"] = list(robot.get("path") or [])
+                        task["handoffStagingApproachLayers"] = list(robot.get("pathLayers") or [])
+                        task["phaseLabel"] = "已进入输送线队列 / 向前排队"
+                        robot["phaseLabel"] = task["phaseLabel"]
+                        return
+                    task["handoffQueueAdmitted"] = False
+                    task.pop("handoffQueuedTick", None)
+                    task["handoffStagingCellId"] = HANDOFF_QUEUE_SLOT_CELL_IDS[-1]
+                    robot["status"] = "waiting"
+                    robot["phaseLabel"] = "输送线入口等待队列通路"
+                    return
+            traffic = self._handoff_traffic_state(runtime)
+            if traffic is not None and traffic.get("ownerRobotId") == robot.get("id"):
+                if self._set_robot_leg(
+                    runtime,
+                    robot,
+                    task,
+                    "delivery_to_port",
+                    task.get("deliveryCellId"),
+                    target_layer=1,
+                ):
+                    task.pop("handoffStagingCellId", None)
+                    task.pop("handoffStagingLayer", None)
+                return
+            task["phase"] = "waiting_handoff_slot"
+            task["phaseLabel"] = "已到等待区 / 等待机械臂通行时隙"
+            robot["status"] = "waiting"
+            robot["phaseLabel"] = task["phaseLabel"]
+            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
+            robot["pathStages"] = [task["phase"]]
+            self._record_event(
+                runtime,
+                tick,
+                "handoff_queue_joined",
+                {"robotId": robot["id"], "taskId": task["id"], "cellId": robot["currentCellId"]},
+            )
+            return
+
+        if task["phase"] == "yielding_handoff_staging":
+            traffic = self._handoff_traffic_state(runtime)
+            if traffic is not None and traffic.get("ownerRobotId") == robot.get("id"):
+                if self._set_robot_leg(
+                    runtime,
+                    robot,
+                    task,
+                    "delivery_to_port",
+                    task.get("deliveryCellId"),
+                    target_layer=1,
+                ):
+                    task.pop("handoffStagingCellId", None)
+                    task.pop("handoffStagingLayer", None)
+                return
+            task["phase"] = "waiting_handoff_slot"
+            task["phaseLabel"] = "已退回支路等待区 / 等待机械臂通行时隙"
+            task["handoffStagingCellId"] = robot.get("currentCellId")
+            task["handoffStagingLayer"] = robot.get("currentLayer", 1)
+            robot["status"] = "waiting"
+            robot["phaseLabel"] = task["phaseLabel"]
+            robot["path"] = [robot["currentCellId"]]
+            robot["pathLayers"] = [robot.get("currentLayer", 1)]
+            robot["pathStages"] = [task["phase"]]
+            return
+
+        if task["phase"] == "waiting_handoff_slot":
+            # _refresh_handoff_traffic selects the next loaded Shuttle and
+            # promotes it to delivery_to_port.  Until then it stays at the
+            # already verified pickup state and remains a dynamic obstacle.
+            robot["status"] = "waiting"
+            robot["phaseLabel"] = task["phaseLabel"]
             return
 
         if task["phase"] in {
@@ -7407,6 +10257,16 @@ class SimulationService:
         diagnostic: dict[str, Any] = {}
         if robot["type"] == "shuttle":
             layer = target_layer if target_layer is not None else robot.get("currentLayer", 1)
+            shuttle_blocked: set[tuple[int, int, int]] = set()
+            for blocked_state in extra_blocked or set():
+                if not isinstance(blocked_state, tuple) or len(blocked_state) != 3:
+                    continue
+                first, second, third = blocked_state
+                if isinstance(first, str):
+                    # Legacy failed-cell inputs are (floor, row, col).
+                    shuttle_blocked.add((int(second), int(third), 1))
+                else:
+                    shuttle_blocked.add((int(first), int(second), int(third)))
             path3d = shortest_path_shuttle(
                 runtime.topology,
                 robot["currentCellId"],
@@ -7414,6 +10274,7 @@ class SimulationService:
                 target_cell_id,
                 layer,
                 runtime.config["pathPolicy"],
+                extra_blocked=shuttle_blocked or None,
                 evidence=diagnostic,
             )
             if not path3d:
@@ -7459,11 +10320,22 @@ class SimulationService:
         if not target_cell_id:
             self._fail_active_task(runtime, robot, task, "target_missing")
             return False
+        extra_blocked: set[tuple[int, int, int]] | None = None
+        if (
+            robot.get("type") == "shuttle"
+            and phase == "to_handoff_staging"
+            and str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+        ):
+            # Every loaded Shuttle joins the FIFO from its west end.  Allowing
+            # an east-side shortcut makes a later vehicle cross occupied queue
+            # slots (c41, c39, ...), which is an unavoidable physical deadlock.
+            extra_blocked = self._handoff_queue_approach_blocked_states(runtime)
         if not self._robot_path_to(
             runtime,
             robot,
             target_cell_id,
             target_layer,
+            extra_blocked=extra_blocked,
             stop_adjacent=phase in {"pickup_from_ctu", "return_to_storage"},
             task_id=task.get("id"),
         ):
@@ -7506,9 +10378,30 @@ class SimulationService:
 
     def _detect_contention(self, runtime: RunRuntime) -> None:
         tick = runtime.state["tick"]
-        blocked = [robot for robot in runtime.state["robots"] if robot["status"] == "blocked"]
+        blocked = [
+            robot
+            for robot in runtime.state["robots"]
+            if robot["status"] == "blocked"
+            # A taskless standby return is best-effort and is automatically
+            # parked/yielded for productive traffic.  Including it in the
+            # business deadlock chain emits repeated false alarms while that
+            # mitigation is already working.
+            and not (robot.get("returningToStandby") and not robot.get("currentTaskId"))
+            # Loaded Shuttles feeding the fixed row-92 FIFO intentionally form
+            # a convoy behind one another. Their waitTicks describe queueing,
+            # not a cyclic dependency; the end-to-end queue replay verifies
+            # forward progress separately.
+            and not (
+                str((runtime.arm_handoff or {}).get("handoffCellId") or "") == HANDOFF_FIXED_CELL_ID
+                and (
+                    find_task(runtime.state.get("tasks", []), robot.get("currentTaskId")) or {}
+                ).get("phase") == "to_handoff_staging"
+            )
+        ]
 
-        if len(blocked) >= 2 and all(robot["waitTicks"] >= 3 for robot in blocked):
+        if len(blocked) >= 2 and all(
+            robot["waitTicks"] >= DEADLOCK_ALERT_AFTER_TICKS for robot in blocked
+        ):
             waiting_chain = []
             for robot in blocked:
                 task = find_task(runtime.state["tasks"], robot["currentTaskId"])
@@ -7761,6 +10654,10 @@ class SimulationService:
             "pending_assignment": "待分配",
             "pickup_from_ctu": "CTU 取货",
             "pickup_from_shuttle": "四向车取货",
+            "to_handoff_staging": "载货前往机械臂等待区",
+            "yielding_for_handoff_queue": "空车退入侧位让行",
+            "yielding_handoff_staging": "等待区主动退出让行",
+            "waiting_handoff_slot": "已取货 / 等待机械臂通行时隙",
             "delivery_to_port": "输送线交付",
             "conveyor_transfer": "输送线转运",
             "conveyor_to_lift": "下层输送转运",

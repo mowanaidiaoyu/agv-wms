@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { emptyTopology } from '../data/topologyDefaults'
 import { paintCell, placeNode } from './topology'
-import { buildGroundBeltLookup, buildSceneSpec, shuttleGroundSnapPosition, shuttleTrackWorldPosition } from './topology3d'
+import { buildGroundBeltLookup, buildSceneSpec, shuttleGroundSnapPosition, shuttleTrackWorldPosition, simulationRobotVisibleOnFloor } from './topology3d'
+
+describe('simulationRobotVisibleOnFloor', () => {
+  it('keeps a Shuttle visible when it moves between internal rack levels', () => {
+    expect(simulationRobotVisibleOnFloor({ currentFloor: '1F', currentLayer: 1 }, '1F')).toBe(true)
+    expect(simulationRobotVisibleOnFloor({ currentFloor: '1F', currentLayer: 4 }, '1F')).toBe(true)
+    expect(simulationRobotVisibleOnFloor({ currentFloor: '2F', currentLayer: 4 }, '1F')).toBe(false)
+  })
+})
 
 describe('shuttleTrackWorldPosition', () => {
   it('matches the backend shuttle-internal-levels-v1 coordinate contract', () => {

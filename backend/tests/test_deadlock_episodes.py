@@ -220,6 +220,26 @@ class EpisodeLifecycleTests(unittest.TestCase):
         self.assertEqual(episode.status, EpisodeStatus.ENDED_UNVERIFIED)
         self.assertIsNone(episode.resolved_at_tick)
 
+    def test_movement_while_a_participant_still_waits_is_not_verified_resolution(self) -> None:
+        state = self.advance_ring(new_deadlock_state("run-yield-oscillation"), 1, 3)
+        yielding = [
+            robot(
+                "R1",
+                "cell-3",
+                "cell-4",
+                waiting=True,
+                resource_type=ResourceType.OTHER,
+                resource_id="ACTIVE_YIELD_WAIT",
+            ),
+            robot("R2", "cell-2", None, waiting=False),
+        ]
+        state = advance_deadlock_state(state, 4, yielding, config=self.config)
+        state = advance_deadlock_state(state, 5, yielding, config=self.config)
+        episode = state.episodes[0]
+        assert episode.status is EpisodeStatus.ENDED_UNVERIFIED
+        assert episode.resolved_at_tick is None
+        assert any(item.startswith("ROBOT_MOVED:R1") for item in episode.resolution_evidence)
+
     def test_task_progress_is_valid_resolution_evidence(self) -> None:
         state = self.advance_ring(new_deadlock_state("run-progress"), 1, 3)
         state = advance_deadlock_state(

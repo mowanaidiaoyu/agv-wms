@@ -5,9 +5,12 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.assignment import assign_tasks
-from app.services.pathfinding import cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle, shuttle_servable_slots
+from app.services.pathfinding import (
+    cell_id, node_to_cell_id, parse_cell_id, shortest_path, shortest_path_shuttle,
+    shuttle_servable_slots, shuttle_state_is_walkable,
+)
 from app.services.runtime import repo
-from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, RunRuntime, SimulationService
+from app.services.simulation import CTU_RACK_LAYERS, ROBOT_CARRY_CAPACITY, RunRuntime, SimulationService, find_task
 from app.services.simulation_config import build_simulation_config
 
 
@@ -752,13 +755,552 @@ def test_head_on_deadlock_lets_one_robot_yield():
         path=["cell-r1-c2", "cell-r1-c1"],
         status="blocked",
     )
-    occupied = {"cell-r1-c1", "cell-r1-c2"}
+    occupied = {("cell-r1-c1", 1.0), ("cell-r1-c2", 1.0)}
 
     assert service._clear_head_on(runtime, r1, r2, occupied) is True
     assert r1["currentCellId"] == "cell-r1-c0"
     assert r1["lastCellId"] == "cell-r1-c1"
     assert r1["path"][0] == "cell-r1-c0"
     assert r1["path"][-1] == "cell-r1-c2"
+
+
+def _opposing_shuttle_runtime(*, ground_conveyor: bool = False, base_row: int = 0):
+    if ground_conveyor:
+        zones = []
+        cells = [
+            {
+                "id": cell_id(row, col),
+                "floor": "1F",
+                "row": row,
+                "col": col,
+                "type": "conveyor",
+                "walkable": True,
+                "conveyorGround": True,
+                "conveyorAnchor": {"row": 0, "col": 0 if col < 2 else 2},
+            }
+            for row in range(2)
+            for col in range(4)
+        ]
+    else:
+        zone_height = 4 if base_row else 2
+        slot_aisles = {f"{base_row},0": 1, f"{base_row},2": 1}
+        if zone_height > 2:
+            slot_aisles.update({f"{base_row + 2},0": 1, f"{base_row + 2},2": 1})
+        zones = [
+            {
+                "id": "shuttle-zone",
+                "label": "Shuttle aisle",
+                "type": "shuttle",
+                "x": 0,
+                "y": base_row,
+                "width": 4,
+                "height": zone_height,
+                "slotAisles": slot_aisles,
+            }
+        ]
+        cells = [
+            {
+                "id": cell_id(row, col),
+                "floor": "1F",
+                "row": row,
+                "col": col,
+                "type": "road",
+                "walkable": True,
+                "zoneId": "shuttle-zone",
+            }
+            for row in range(base_row, base_row + zone_height)
+            for col in range(4)
+        ]
+    topology = {
+        "id": "opposing-shuttle-topology",
+        "name": "Opposing Shuttle Topology",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": max(4, base_row + 6), "cols": 6, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": zones,
+        "cells": cells,
+        "nodes": [
+            {"id": "shuttle-a", "type": "shuttle_robot", "floor": "1F", "row": base_row, "col": 0, "label": "Shuttle A"},
+            {"id": "shuttle-b", "type": "shuttle_robot", "floor": "1F", "row": base_row + 1, "col": 2, "label": "Shuttle B"},
+        ],
+    }
+    config = {
+        **TWO_ROBOT_CONFIG,
+        "id": "opposing-shuttle-config",
+        "topologyId": topology["id"],
+        "robots": [
+            {"id": "shuttle-a", "type": "shuttle", "startNode": "shuttle-a", "speed": 1.0, "battery": 100, "enabled": True},
+            {"id": "shuttle-b", "type": "shuttle", "startNode": "shuttle-b", "speed": 1.0, "battery": 100, "enabled": True},
+        ],
+    }
+    service = _service()
+    runtime = service._create_runtime("opposing-shuttle-run", topology, config)
+    runtime.state["tasks"] = [
+        {"id": "task-a", "status": "in_progress", "phase": "moving", "phaseLabel": "Shuttle A moving"},
+        {"id": "task-b", "status": "in_progress", "phase": "moving", "phaseLabel": "Shuttle B moving"},
+    ]
+    first, second = runtime.state["robots"]
+    first.update(
+        status="moving",
+        currentTaskId="task-a",
+        targetCellId=cell_id(base_row, 2),
+        path=[cell_id(base_row, 0), cell_id(base_row, 1), cell_id(base_row, 2)],
+        pathLayers=[1, 1, 1],
+        pathStages=["moving", "moving", "moving"],
+    )
+    second.update(
+        status="moving",
+        currentTaskId="task-b",
+        targetCellId=cell_id(base_row + 1, 0),
+        path=[cell_id(base_row + 1, 2), cell_id(base_row + 1, 1), cell_id(base_row + 1, 0)],
+        pathLayers=[1, 1, 1],
+        pathStages=["moving", "moving", "moving"],
+    )
+    return service, runtime, first, second
+
+
+def test_opposing_shuttles_treat_snapped_aisle_bodies_as_dynamic_obstacles():
+    service, runtime, first, second = _opposing_shuttle_runtime()
+
+    service._move_robots(runtime)
+
+    assert first["currentCellId"] == cell_id(0, 0)
+    assert second["currentCellId"] == cell_id(1, 2)
+    assert first["status"] == second["status"] == "blocked"
+    assert first["waitTicks"] == second["waitTicks"] == 1
+
+
+def test_opposing_shuttles_cannot_cross_on_snapped_ground_conveyor():
+    service, runtime, first, second = _opposing_shuttle_runtime(ground_conveyor=True)
+
+    service._move_robots(runtime)
+
+    assert first["currentCellId"] == cell_id(0, 0)
+    assert second["currentCellId"] == cell_id(1, 2)
+    assert first["status"] == second["status"] == "blocked"
+
+
+def test_opposing_shuttles_reroute_through_a_free_physical_aisle():
+    service, runtime, first, second = _opposing_shuttle_runtime(base_row=96)
+
+    for tick in range(1, 5):
+        runtime.state["tick"] = tick
+        service._move_robots(runtime)
+
+    rerouted_cells = [*first.get("path", []), *second.get("path", [])]
+    assert any(parse_cell_id(value)[1] >= 98 for value in rerouted_cells)
+    assert first["currentCellId"] != cell_id(96, 1)
+    assert second["currentCellId"] != cell_id(97, 1)
+
+
+def test_taskless_standby_shuttles_break_head_on_reservation_chain():
+    service, runtime, first, second = _opposing_shuttle_runtime(base_row=96)
+    runtime.state["tasks"] = []
+    for robot in (first, second):
+        robot.update(
+            currentTaskId=None,
+            returningToStandby=True,
+            status="returning",
+            waitTicks=4,
+            carrying=[],
+        )
+    initial = {
+        first["id"]: first["currentCellId"],
+        second["id"]: second["currentCellId"],
+    }
+
+    for tick in range(1, 6):
+        runtime.state["tick"] = tick
+        service._move_robots(runtime)
+
+    # A taskless return is best-effort: one vehicle must move to a verified
+    # neighbouring state and park instead of both reserving the same corridor
+    # forever.
+    assert any(
+        robot["currentCellId"] != initial[robot["id"]]
+        or not robot.get("returningToStandby")
+        for robot in (first, second)
+    )
+    assert not (
+        first.get("returningToStandby")
+        and second.get("returningToStandby")
+        and first.get("waitTicks", 0) > 4
+        and second.get("waitTicks", 0) > 4
+    )
+
+
+def test_loaded_shuttle_on_upper_layer_does_not_freeze_l1_feeder(monkeypatch):
+    service, runtime, loaded, _other = _opposing_shuttle_runtime(base_row=96)
+    runtime.arm_handoff = {"handoffCellId": "cell-r92-c48"}
+    task = find_task(runtime.state["tasks"], loaded["currentTaskId"])
+    task["phase"] = "to_handoff_staging"
+    loaded["carrying"] = [{"skuId": "SKU-LOADED"}]
+    loaded["pathLayers"] = [2] * len(loaded["path"])
+    loaded["currentLayer"] = 2
+    l1_feeder = set(service._robot_collision_footprint(
+        runtime,
+        loaded,
+        loaded["currentCellId"],
+        1,
+    ))
+    monkeypatch.setattr(
+        service,
+        "_handoff_queue_feeder_footprint",
+        lambda _runtime: l1_feeder,
+    )
+
+    assert service._loaded_handoff_queue_feeders_active(runtime) is False
+
+    loaded["currentLayer"] = 1
+    loaded["pathLayers"] = [1] * len(loaded["path"])
+    assert service._loaded_handoff_queue_feeders_active(runtime) is True
+
+
+def test_unladen_shuttle_can_use_same_footprint_bridge_for_two_cell_retreat():
+    service, runtime, robot, other = _opposing_shuttle_runtime(base_row=96)
+    task = find_task(runtime.state["tasks"], robot["currentTaskId"])
+    task["phase"] = "pickup_from_shuttle"
+    robot.update(
+        currentCellId=cell_id(96, 0),
+        currentRow=96,
+        currentCol=0,
+        currentLayer=1,
+        lastCellId=cell_id(97, 0),
+        carrying=[],
+    )
+    occupied = {
+        (robot["currentCellId"], 1.0),
+        (other["currentCellId"], 1.0),
+    }
+    assert service._robot_collision_footprint(
+        runtime, robot, cell_id(96, 0), 1,
+    ) == service._robot_collision_footprint(
+        runtime, robot, cell_id(97, 0), 1,
+    )
+    assert service._robot_collision_footprint(
+        runtime, robot, cell_id(98, 0), 1,
+    ) != service._robot_collision_footprint(
+        runtime, robot, cell_id(97, 0), 1,
+    )
+
+    assert service._retreat_unladen_shuttle_two_cells(
+        runtime,
+        robot,
+        occupied,
+        set(),
+        set(),
+    ) is True
+    assert robot["currentCellId"] == cell_id(97, 0)
+    assert robot["path"] == [cell_id(97, 0), cell_id(98, 0)]
+    assert task["phase"] == "yielding_for_handoff_queue"
+
+
+def test_shuttle_resumes_unfinished_pickup_when_priority_vehicle_finishes():
+    service, runtime, yielding, priority = _opposing_shuttle_runtime(base_row=96)
+    task = find_task(runtime.state["tasks"], yielding["currentTaskId"])
+    start = yielding["currentCellId"]
+    stale_bay = cell_id(96, 1)
+    pickup = cell_id(99, 0)
+    task.update(
+        phase="yielding_for_traffic",
+        trafficYieldForRobotId=priority["id"],
+        trafficYieldResumePhase="pickup_from_shuttle",
+        trafficYieldResumeCellId=pickup,
+        trafficYieldResumeLayer=1,
+    )
+    yielding.update(
+        status="blocked",
+        path=[start, stale_bay],
+        pathLayers=[1, 1],
+        pathStages=[task["phase"]] * 2,
+        targetCellId=stale_bay,
+        waitTicks=8,
+    )
+    priority.update(status="idle", currentTaskId=None)
+
+    service._move_robots(runtime)
+
+    assert yielding["currentCellId"] == start
+    assert yielding["path"][-1] == pickup
+    assert yielding["status"] == "moving"
+    assert yielding["waitTicks"] == 0
+    assert task["phase"] == "pickup_from_shuttle"
+    assert "trafficYieldForRobotId" not in task
+
+
+def test_shuttle_head_on_never_synthesizes_a_nonexistent_side_cell():
+    # Regression for the real r93c47 -> r94c47 incident.  The former
+    # row+/-1 recovery would accept a parseable coordinate even when it did not
+    # exist in the Shuttle graph. A planned escape may use a verified bay.
+    service, runtime, first, second = _opposing_shuttle_runtime(base_row=96)
+    first["id"] = "shuttle-z"
+    second["id"] = "shuttle-a"
+    first.update(status="blocked", lastCellId=None)
+    second.update(status="blocked", lastCellId=None)
+    original = (first["currentCellId"], second["currentCellId"])
+    occupied = {
+        (first["currentCellId"], 1.0),
+        (second["currentCellId"], 1.0),
+    }
+
+    assert service._clear_shuttle_head_on(runtime, first, second, occupied, set(), set()) is True
+    assert (first["currentCellId"], second["currentCellId"]) == original
+    for robot in (first, second):
+        for cell, layer in zip(robot["path"], robot["pathLayers"], strict=True):
+            _, row, col = parse_cell_id(cell)
+            assert shuttle_state_is_walkable(runtime.topology, row, col, layer)
+
+
+def test_ground_shuttle_corner_livelock_uses_clearance_bay_before_resuming():
+    """Regression for the r75c43/r76c43/r78c44 three-Shuttle lock.
+
+    The unladen pickup must move east into a physically clear bay instead of
+    alternating between c43 and c44 while two pallet-return vehicles wait.
+    """
+
+    cells = [
+        {
+            "id": cell_id(row, col),
+            "floor": "1F",
+            "row": row,
+            "col": col,
+            "type": "conveyor",
+            "walkable": True,
+            "conveyorGround": True,
+            "conveyorAnchor": {"row": row if row % 2 == 0 else row - 1, "col": col},
+        }
+        for row in range(74, 80)
+        for col in range(35, 48)
+    ]
+    topology = {
+        "id": "ground-corner-livelock-topology",
+        "name": "Ground corner livelock topology",
+        "meta": {"version": "2.0.0", "viewport": {"x": 0, "y": 0, "zoom": 1}, "tags": []},
+        "grid": {"rows": 80, "cols": 50, "cellSize": 32, "originX": 0, "originY": 0},
+        "zones": [],
+        "cells": cells,
+        "nodes": [
+            {"id": "shuttle-robot-03", "type": "shuttle_robot", "floor": "1F", "row": 76, "col": 43},
+            {"id": "shuttle-robot-05", "type": "shuttle_robot", "floor": "1F", "row": 75, "col": 44},
+            {"id": "shuttle-robot-07", "type": "shuttle_robot", "floor": "1F", "row": 78, "col": 44},
+        ],
+    }
+    config = {
+        **TWO_ROBOT_CONFIG,
+        "id": "ground-corner-livelock-config",
+        "topologyId": topology["id"],
+        "robots": [
+            {"id": robot_id, "type": "shuttle", "startNode": robot_id, "speed": 1.0, "battery": 100, "enabled": True}
+            for robot_id in ("shuttle-robot-03", "shuttle-robot-05", "shuttle-robot-07")
+        ],
+    }
+    service = _service()
+    runtime = service._create_runtime("ground-corner-livelock-run", topology, config)
+    runtime.state["tasks"] = [
+        {
+            "id": "task-return-03",
+            "taskKind": "empty_pallet_return",
+            "status": "in_progress",
+            "phase": "delivery_empty_pallet",
+            "phaseLabel": "回收空托盘",
+            "history": [],
+        },
+        {
+            "id": "task-pick-05",
+            "taskKind": "shuttle_order_pick",
+            "status": "assigned",
+            "phase": "pickup_from_shuttle",
+            "phaseLabel": "四向车取货",
+            "history": [],
+        },
+        {
+            "id": "task-return-07",
+            "taskKind": "empty_pallet_return",
+            "status": "in_progress",
+            "phase": "delivery_empty_pallet",
+            "phaseLabel": "回收空托盘",
+            "history": [],
+        },
+    ]
+    priority, yielding, follower = runtime.state["robots"]
+    priority.update(
+        status="blocked",
+        currentTaskId="task-return-03",
+        lastCellId=cell_id(76, 44),
+        targetCellId=cell_id(76, 35),
+        targetLayer=1,
+        waitTicks=4,
+        path=[cell_id(76, 43), *[cell_id(75, col) for col in range(43, 34, -1)], cell_id(76, 35)],
+    )
+    yielding.update(
+        status="blocked",
+        currentTaskId="task-pick-05",
+        lastCellId=cell_id(75, 43),
+        targetCellId=cell_id(79, 44),
+        targetLayer=1,
+        waitTicks=4,
+        path=[cell_id(75, 44), cell_id(76, 44), cell_id(77, 44), cell_id(78, 44), cell_id(79, 44)],
+    )
+    follower.update(
+        status="blocked",
+        currentTaskId="task-return-07",
+        lastCellId=cell_id(79, 44),
+        targetCellId=cell_id(76, 35),
+        targetLayer=1,
+        waitTicks=4,
+        path=[
+            cell_id(78, 44),
+            cell_id(77, 44),
+            cell_id(76, 44),
+            cell_id(76, 43),
+            *[cell_id(75, col) for col in range(43, 34, -1)],
+            cell_id(76, 35),
+        ],
+    )
+    for robot in (priority, yielding, follower):
+        robot["pathLayers"] = [1] * len(robot["path"])
+        robot["pathStages"] = [find_task(runtime.state["tasks"], robot["currentTaskId"])["phase"]] * len(robot["path"])
+    occupied = {(robot["currentCellId"], 1.0) for robot in runtime.state["robots"]}
+
+    service._update_shuttle_progress_watchdogs(runtime)
+    pallet_traffic = service._refresh_empty_pallet_traffic(runtime)
+    reservations = service._build_shuttle_reservation_plan(runtime, runtime.state["robots"])
+    assert pallet_traffic["ownerRobotId"] == "shuttle-robot-03"
+    assert pallet_traffic["queue"] == ["task-return-07"]
+    assert reservations["shuttle-robot-03"]["allowed"] is True
+    assert reservations["shuttle-robot-05"]["allowed"] is False
+    assert reservations["shuttle-robot-05"]["blockerRobotId"] == "shuttle-robot-03"
+    assert reservations["shuttle-robot-05"]["reason"] == "SWEPT_FOOTPRINT_CONFLICT"
+
+    assert service._clear_shuttle_head_on(runtime, priority, yielding, occupied, set(), set()) is True
+    yield_task = find_task(runtime.state["tasks"], "task-pick-05")
+    assert yield_task["phase"] == "yielding_for_traffic"
+    assert yielding["targetCellId"] == cell_id(75, 45)
+    assert yielding["targetCellId"] != yielding["lastCellId"]
+    assert not service._robot_collision_footprint(
+        runtime,
+        yielding,
+        yielding["targetCellId"],
+        1,
+    ).intersection(service._robot_collision_footprint(runtime, priority, cell_id(75, 43), 1))
+
+    # At the bay, keep waiting while the pallet-return convoy still reserves
+    # the crossing; do not silently perform the original pickup action.
+    yielding.update(
+        currentCellId=cell_id(75, 45),
+        currentNode=cell_id(75, 45),
+        currentRow=75,
+        currentCol=45,
+        path=[cell_id(75, 45)],
+        pathLayers=[1],
+    )
+    service._advance_robot_phase(runtime, yielding, yield_task, occupied)
+    assert yield_task["phase"] == "yielding_for_traffic"
+    assert yielding["status"] == "waiting"
+
+    # Once both priority vehicles have cleared the branch, the original task
+    # is dynamically replanned from the bay and resumes normally.
+    priority.update(currentCellId=cell_id(75, 35), currentRow=75, currentCol=35, path=[cell_id(75, 35)])
+    follower.update(currentCellId=cell_id(79, 35), currentRow=79, currentCol=35, path=[cell_id(79, 35)])
+    service._advance_robot_phase(runtime, yielding, yield_task, occupied)
+    assert yield_task["phase"] == "pickup_from_shuttle"
+    assert yielding["status"] == "moving"
+    assert yielding["path"][0] == cell_id(75, 45)
+    assert yielding["path"][-1] == cell_id(79, 44)
+
+
+def test_shuttle_oscillation_guard_detects_same_phase_a_b_a_b_cycle():
+    service, runtime, robot, _other = _opposing_shuttle_runtime()
+    task = find_task(runtime.state["tasks"], robot["currentTaskId"])
+    cell_a = cell_id(0, 0)
+    cell_b = cell_id(0, 1)
+    cell_c = cell_id(0, 2)
+    robot.update(
+        currentCellId=cell_b,
+        currentRow=0,
+        currentCol=1,
+        path=[cell_b, cell_a, cell_b],
+        pathLayers=[1, 1, 1],
+        pathStages=["moving", "moving", "moving"],
+    )
+    robot["trafficMoveHistory"] = [
+        {"cellId": cell_a, "layer": 1, "phase": "moving"},
+        {"cellId": cell_b, "layer": 1, "phase": "moving"},
+        {"cellId": cell_a, "layer": 1, "phase": "moving"},
+        {"cellId": cell_b, "layer": 1, "phase": "moving"},
+    ]
+
+    assert service._would_repeat_shuttle_oscillation(
+        robot,
+        task,
+        cell_a,
+        1,
+    ) is True
+
+    # A newly planned A -> C continuation exits the old cycle and must run.
+    robot["path"] = [cell_b, cell_a, cell_c]
+    assert service._would_repeat_shuttle_oscillation(
+        robot,
+        task,
+        cell_a,
+        1,
+    ) is False
+
+    robot["path"] = [cell_b, cell_a, cell_b]
+    task["phase"] = "delivery_to_port"
+    assert service._would_repeat_shuttle_oscillation(
+        robot,
+        task,
+        cell_a,
+        1,
+    ) is False
+
+
+def test_shuttle_cycle_erasure_removes_loop_but_keeps_escape_route():
+    service, _runtime, robot, _other = _opposing_shuttle_runtime()
+    cell_a = cell_id(0, 0)
+    cell_b = cell_id(0, 1)
+    cell_c = cell_id(0, 2)
+    robot.update(
+        path=[cell_b, cell_a, cell_b, cell_c],
+        pathLayers=[1, 1, 1, 1],
+        pathStages=["moving"] * 4,
+    )
+
+    assert service._erase_shuttle_path_cycles(robot) is True
+    assert robot["path"] == [cell_b, cell_c]
+    assert robot["pathLayers"] == [1, 1]
+
+
+def test_three_sample_a_b_a_history_does_not_self_lock_valid_escape():
+    service, runtime, robot, _other = _opposing_shuttle_runtime()
+    runtime.state["robots"] = [robot]
+    runtime.state["tasks"] = [runtime.state["tasks"][0]]
+    cell_a = cell_id(0, 0)
+    cell_b = cell_id(0, 1)
+    cell_c = cell_id(0, 2)
+    robot.update(
+        currentCellId=cell_a,
+        currentNode=cell_a,
+        currentRow=0,
+        currentCol=0,
+        lastCellId=cell_b,
+        targetCellId=cell_c,
+        status="moving",
+        waitTicks=500,
+        path=[cell_a, cell_b, cell_c],
+        pathLayers=[1, 1, 1],
+        pathStages=["moving", "moving", "moving"],
+        trafficMoveHistory=[
+            {"cellId": cell_a, "layer": 1, "phase": "moving"},
+            {"cellId": cell_b, "layer": 1, "phase": "moving"},
+            {"cellId": cell_a, "layer": 1, "phase": "moving"},
+        ],
+    )
+
+    service._move_robots(runtime)
+
+    assert robot["currentCellId"] == cell_b
+    assert "往返活锁" not in robot["phaseLabel"]
 
 
 def test_ctu_reroute_does_not_immediately_reverse_into_last_cell():
@@ -1023,14 +1565,14 @@ def test_ctu_yields_to_adjacent_free_cell_when_no_reroute_is_available():
     robot = runtime.state["robots"][0]
     robot["targetCellId"] = "cell-r0-c2"
 
-    occupied = {"cell-r0-c0", "cell-r0-c1"}
+    occupied = {("cell-r0-c0", 1.0), ("cell-r0-c1", 1.0)}
     reserved = set()
     assert service._yield_ctu(runtime, robot, occupied, reserved) is True
     assert robot["currentCellId"] == "cell-r1-c0"
     assert robot["targetCellId"] == "cell-r0-c2"
     assert robot["yieldTicks"] == 2
-    assert "cell-r1-c0" in occupied
-    assert "cell-r0-c0" not in occupied
+    assert ("cell-r1-c0", 1.0) in occupied
+    assert ("cell-r0-c0", 1.0) not in occupied
 
 
 def test_completed_robot_returns_to_standby_while_other_tasks_are_unfinished(monkeypatch):
@@ -1637,6 +2179,180 @@ def test_dock_tasks_keep_dock_delivery_without_plan_target():
     assert tasks
     assert all(task["deliveryCellId"] == "cell-r9-c8" for task in tasks)
     assert all(not task.get("armHandoff") for task in tasks)
+
+
+def test_handoff_dispatch_fetches_in_parallel_but_admits_one_shuttle(monkeypatch):
+    monkeypatch.setattr(SimulationService, "_arm_handoff_target", lambda self, topo: dict(_HANDOFF_TARGET))
+    topology = _handoff_topology()
+    topology["zones"][1]["slotAisles"]["8,2"] = 1
+    topology["nodes"].append(
+        {"id": "shuttle-02", "type": "shuttle_robot", "row": 8, "col": 2, "zoneId": "zone-shuttle", "capacity": 1, "label": "SHUTTLE-02"}
+    )
+    service = _service()
+    def promote_without_synthetic_path(_runtime, robot, task, phase, _target, target_layer=None):
+        task["phase"] = phase
+        robot["status"] = "moving"
+        return True
+
+    monkeypatch.setattr(service, "_set_robot_leg", promote_without_synthetic_path)
+    runtime = service._create_runtime(
+        "run-handoff-traffic",
+        topology,
+        build_simulation_config(topology),
+        [],
+        [],
+    )
+    task_a = service._build_task(
+        topology, "handoff-a", "shuttle", "cross_zone",
+        [{"cellId": "cell-r8-c0", "layer": 1}], "cell-r9-c9", False, 2,
+    )
+    task_b = service._build_task(
+        topology, "handoff-b", "shuttle", "cross_zone",
+        [{"cellId": "cell-r8-c2", "layer": 1}], "cell-r9-c9", False, 2,
+    )
+    task_a["armHandoff"] = True
+    task_b["armHandoff"] = True
+    runtime.state["tasks"] = [task_a, task_b]
+
+    service._assign_tasks(runtime)
+
+    assigned = [task for task in runtime.state["tasks"] if task["status"] == "assigned"]
+    pending = [task for task in runtime.state["tasks"] if task["status"] == "pending"]
+    assert len(assigned) == 2
+    assert len(pending) == 0
+    # Both Shuttles may fetch simultaneously, but an unladen pickup task must
+    # not reserve the arm ahead of a peer that finishes loading first.
+    service._refresh_handoff_traffic(runtime)
+    traffic = runtime.state["handoffTraffic"]
+    assert traffic["ownerRobotId"] is None
+    first_loaded = assigned[0]
+    loaded_robot = next(
+        robot for robot in runtime.state["robots"]
+        if robot["id"] == first_loaded["assignedRobotId"]
+    )
+    first_loaded["phase"] = "waiting_handoff_slot"
+    first_loaded["handoffQueuedTick"] = runtime.state["tick"]
+    loaded_robot["carrying"] = [{"skuId": "SKU-DOCK"}]
+    service._refresh_handoff_traffic(runtime)
+    assert traffic["ownerRobotId"] in {task["assignedRobotId"] for task in assigned}
+
+    owner = next(robot for robot in runtime.state["robots"] if robot["id"] == traffic["ownerRobotId"])
+    owner_task = next(task for task in assigned if task["assignedRobotId"] == owner["id"])
+    # Being geometrically near the handoff during pickup is not a critical-zone
+    # entry.  Otherwise a vehicle leaving its standby position for the rack
+    # releases ownership before it has delivered anything.
+    owner_task["phase"] = "pickup_from_shuttle"
+    traffic["clearanceCells"] = 20
+    service._refresh_handoff_traffic(runtime)
+    assert traffic["entered"] is False
+    owner_task["phase"] = "delivery_to_port"
+    traffic["clearanceCells"] = 8
+    owner["currentCellId"] = "cell-r9-c9"
+    service._refresh_handoff_traffic(runtime)
+    assert traffic["entered"] is True
+    owner["currentCellId"] = "cell-r8-c0"
+    service._refresh_handoff_traffic(runtime)
+    # The complete final delivery leg is serialized. A valid route may move
+    # away from the handoff geometrically, so distance alone must not release
+    # the token and admit a second loaded Shuttle into the corridor.
+    assert traffic["ownerRobotId"] == owner["id"]
+
+
+def test_handoff_owner_is_retained_for_complete_pallet_return(monkeypatch):
+    monkeypatch.setattr(SimulationService, "_arm_handoff_target", lambda self, topo: dict(_HANDOFF_TARGET))
+    topology = _handoff_topology()
+    service = _service()
+    runtime = service._create_runtime(
+        "run-handoff-return-traffic",
+        topology,
+        build_simulation_config(topology),
+        [],
+        [],
+    )
+    robot = next(item for item in runtime.state["robots"] if item["type"] == "shuttle")
+    task = service._build_task(
+        topology,
+        "handoff-return",
+        "shuttle",
+        "cross_zone",
+        [{"cellId": "cell-r8-c0", "layer": 1}],
+        "cell-r9-c9",
+        False,
+        2,
+    )
+    task.update({
+        "status": "in_progress",
+        "phase": "return_pallet_to_lane",
+        "assignedRobotId": robot["id"],
+        "handoffTraffic": True,
+    })
+    runtime.state["tasks"] = [task]
+    robot.update({
+        "currentTaskId": task["id"],
+        "currentCellId": "cell-r8-c0",
+        "status": "moving",
+    })
+    traffic = runtime.state["handoffTraffic"]
+    traffic.update({
+        "ownerRobotId": robot["id"],
+        "ownerTaskId": task["id"],
+        "entered": True,
+    })
+
+    # Leaving the small handoff radius is not enough: the return vehicle still
+    # occupies the same long, single-lane route used by the next inbound one.
+    service._refresh_handoff_traffic(runtime)
+    assert traffic["ownerRobotId"] == robot["id"]
+
+    task["status"] = "completed"
+    service._refresh_handoff_traffic(runtime)
+    assert traffic["ownerRobotId"] is None
+
+
+def test_handoff_waiter_retreats_only_enough_to_clear_branch(monkeypatch):
+    monkeypatch.setattr(SimulationService, "_arm_handoff_target", lambda self, topo: dict(_HANDOFF_TARGET))
+    topology = _handoff_topology()
+    service = _service()
+    runtime = service._create_runtime(
+        "run-handoff-staging-retreat",
+        topology,
+        build_simulation_config(topology),
+        [],
+        [],
+    )
+    robot = next(item for item in runtime.state["robots"] if item["type"] == "shuttle")
+    approach = [f"cell-r8-c{col}" for col in range(8)]
+    task = service._build_task(
+        topology,
+        "handoff-waiter",
+        "shuttle",
+        "cross_zone",
+        [{"cellId": approach[0], "layer": 1}],
+        "cell-r9-c9",
+        False,
+        2,
+    )
+    task.update({
+        "status": "assigned",
+        "phase": "waiting_handoff_slot",
+        "assignedRobotId": robot["id"],
+        "handoffStagingApproachCells": approach,
+        "handoffStagingApproachLayers": [1] * len(approach),
+    })
+    runtime.state["tasks"] = [task]
+    robot.update({
+        "currentTaskId": task["id"],
+        "currentCellId": approach[-1],
+        "currentLayer": 1,
+        "carrying": [{"skuId": "SKU-DOCK"}],
+        "status": "waiting",
+    })
+
+    assert service._retreat_handoff_staging(runtime, robot) is True
+    assert task["phase"] == "yielding_handoff_staging"
+    assert robot["path"] == list(reversed(approach))[:6]
+    assert len(robot["path"]) == 6
+    assert task["handoffStagingApproachCells"][-1] == robot["path"][-1]
 
 
 def test_arm_handoff_serves_waiting_shuttle_then_releases(monkeypatch):

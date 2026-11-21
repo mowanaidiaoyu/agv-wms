@@ -50,7 +50,11 @@ from app.services.deadlock_runtime_adapter import (  # noqa: E402
     DIAGNOSTICS_NAMESPACE,
     DeadlockRuntimeObserver,
 )
-from app.services.simulation import RunRuntime, SimulationService  # noqa: E402
+from app.services.simulation import (  # noqa: E402
+    DEADLOCK_ALERT_AFTER_TICKS,
+    RunRuntime,
+    SimulationService,
+)
 
 
 class MemoryRepository:
@@ -650,8 +654,8 @@ def test_legacy_deadlock_alert_remains_separate() -> None:
     service, runtime = _runtime()
     for robot in runtime.state["robots"]:
         robot["status"] = "blocked"
-        robot["waitTicks"] = 3
-    runtime.state["tick"] = 3
+        robot["waitTicks"] = DEADLOCK_ALERT_AFTER_TICKS
+    runtime.state["tick"] = DEADLOCK_ALERT_AFTER_TICKS
     service._detect_contention(runtime)
     assert "deadlock_detected" in _event_types(service)
     assert "deadlock_episode_started" not in _event_types(service)

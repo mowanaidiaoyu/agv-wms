@@ -78,6 +78,18 @@ export const GOODS_CATEGORY_COLORS: Record<string, string> = {
 
 export const GOODS_DEFAULT_COLOR = '#94a3b8'
 
+/**
+ * Building floors and Shuttle rack levels are independent coordinates.
+ * `currentFloor` selects the warehouse floor; `currentLayer` only controls the
+ * vehicle's Y position inside that floor's four-level Shuttle rack.
+ */
+export function simulationRobotVisibleOnFloor(
+  robot: { currentFloor?: string; currentLayer?: number },
+  activeFloor: string,
+): boolean {
+  return (robot.currentFloor ?? GROUND_FLOOR) === activeFloor
+}
+
 export type SceneColor = string
 
 export type Direction3D = { dx: number; dz: number }

@@ -7,6 +7,8 @@ import {
   Clock3,
   GitBranch,
   MapPin,
+  Maximize2,
+  Minimize2,
   Package2,
   Plus,
   ShoppingCart,
@@ -328,45 +330,6 @@ export function OrderComposer({
     }
   }
 
-  function applyTemplate(templatePriority: SimulationOrderPriority, startIndex: number, count: number) {
-    const selected = catalog.slice(startIndex, startIndex + count)
-    if (!selected.length) {
-      setFormError('商品目录不足，无法应用该订单模板。')
-      return
-    }
-    setFormError('')
-    setPriority(templatePriority)
-    setDispatchMode(templatePriority === 'urgent' ? 'compact' : 'balanced')
-    setLines(selected.map((sku, index) => ({
-      id: `line-template-${index + 1}-${Date.now()}`,
-      skuId: sku.skuId,
-      skuName: sku.name,
-      spec: sku.spec,
-      quantity: index === 0 && templatePriority === 'normal' ? 2 : 1,
-      qtyMode: 'boxes' as const,
-    })))
-  }
-
-  function applyFleetTemplate() {
-    const selected = catalog.slice(0, 7)
-    if (selected.length < 7) {
-      setFormError('商品目录不足 7 种，无法生成多车协同订单。')
-      return
-    }
-    setFormError('')
-    setPriority('normal')
-    setDispatchMode('parallel')
-    setMaxParallelCtu(7)
-    setLines(selected.map((sku, index) => ({
-      id: `line-fleet-${index + 1}-${Date.now()}`,
-      skuId: sku.skuId,
-      skuName: sku.name,
-      spec: sku.spec,
-      quantity: 2,
-      qtyMode: 'boxes' as const,
-    })))
-  }
-
   return (
     <aside className={`simulation-order-composer ${open ? 'open' : ''}`} aria-hidden={!open}>
       <div className="simulation-order-composer-header">
@@ -384,21 +347,6 @@ export function OrderComposer({
             <button type="button" onClick={onOpenRunConfig}>{runActive ? '查看冻结配置' : '打开运行配置'}</button>
           </div>
         </details> : null}
-        <section>
-          <h3>快速模板</h3>
-          <div className="simulation-order-templates">
-            <button type="button" onClick={() => applyTemplate('normal', 0, 3)}>
-              <Package2 size={17} /><span><b>CTU多箱订单</b><small>3种SKU，自动组合取货</small></span>
-            </button>
-            <button type="button" onClick={() => applyTemplate('urgent', 5, 2)}>
-              <Zap size={17} /><span><b>紧急插单</b><small>高优先级进入任务队列</small></span>
-            </button>
-            <button type="button" onClick={applyFleetTemplate}>
-              <Bot size={17} /><span><b>多车协同订单</b><small>一张订单拆为 7 个 CTU 任务</small></span>
-            </button>
-          </div>
-        </section>
-
         <section>
           <h3>订单信息</h3>
           <div className="simulation-order-priority">
@@ -498,6 +446,7 @@ export function OrderOrchestrationPanel({
   tasks: SimulationTask[]
   onFocusRobot?: (robotId: string) => void
 }) {
+  const [expanded, setExpanded] = useState(false)
   if (!order) return null
   const decomposition = order.decomposition
   const requested = decomposition?.requestedQuantity ?? orderBoxes(order)
@@ -508,14 +457,34 @@ export function OrderOrchestrationPanel({
   const shuttleTasks = decomposition?.shuttleTaskCount ?? 0
   const ctuTasks = decomposition?.ctuTaskCount ?? 0
   const strategy = order.dispatchMode ?? decomposition?.strategy ?? 'balanced'
+  if (!expanded) {
+    return (
+      <button
+        className="simulation-order-orchestration-toggle"
+        type="button"
+        aria-label="展开订单编排"
+        aria-expanded={false}
+        aria-controls="simulation-order-orchestration-panel"
+        onClick={() => setExpanded(true)}
+      >
+        <GitBranch size={16} />
+        <span><b>订单编排</b><small>{tasks.length ? `${assigned}/${tasks.length} 已分配` : '等待任务拆解'}</small></span>
+        <em>{taskCount || 0}</em>
+        <Maximize2 size={14} />
+      </button>
+    )
+  }
   return (
-    <section className="simulation-order-orchestration" aria-label="订单拆解与 CTU 分配">
+    <section id="simulation-order-orchestration-panel" className="simulation-order-orchestration" aria-label="订单拆解与 CTU 分配">
       <header>
         <span><GitBranch size={15} /><b>订单编排</b><small>{dispatchModeLabels[strategy]}</small></span>
-        <strong>
-          {requestedPieces} 件 / {requested} 箱 → {taskCount || '待拆解'} 个任务
-          {taskCount ? `（四向车 ${shuttleTasks} · CTU ${ctuTasks}）` : ''}
-        </strong>
+        <div className="simulation-order-orchestration-heading-actions">
+          <strong>
+            {requestedPieces} 件 / {requested} 箱 → {taskCount || '待拆解'} 个任务
+            {taskCount ? `（四向车 ${shuttleTasks} · CTU ${ctuTasks}）` : ''}
+          </strong>
+          <button type="button" aria-label="收起订单编排" onClick={() => setExpanded(false)}><Minimize2 size={14} /></button>
+        </div>
       </header>
       <div className="simulation-order-orchestration-flow">
         <span className={decomposition ? 'done' : 'active'}><Boxes size={14} /><b>库存匹配</b><small>{decomposition ? `${allocated}/${requested} 箱` : '启动后匹配'}</small></span>
@@ -525,7 +494,12 @@ export function OrderOrchestrationPanel({
         <span className={assigned === tasks.length && tasks.length ? 'done' : tasks.length ? 'active' : ''}><Bot size={14} /><b>CTU 分配</b><small>{assigned}/{tasks.length || 0} 已分配</small></span>
       </div>
       {tasks.length ? (
-        <div className="simulation-order-task-map">
+        <div
+          className="simulation-order-task-map"
+          role="region"
+          aria-label={`任务列表，共 ${tasks.length} 个任务`}
+          tabIndex={0}
+        >
           {tasks.map((task, index) => (
             <button
               className="simulation-order-task-card"

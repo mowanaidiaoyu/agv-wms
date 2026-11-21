@@ -14,6 +14,8 @@ from app.services.pathfinding import (
 from app.services.simulation import (
     EMPTY_PALLET_RETURN_CELL_ID,
     EMPTY_PALLET_TASK_KIND,
+    HANDOFF_FIXED_CELL_ID,
+    HANDOFF_QUEUE_SLOT_CELL_IDS,
     SimulationService,
 )
 from app.services.simulation_config import build_simulation_config
@@ -67,6 +69,64 @@ def _place_shuttle(runtime, robot, cell: str, layer: int = 1) -> None:
     robot["status"] = "handling"
     robot["carrying"] = []
     robot["load"] = 0
+
+
+def test_fixed_handoff_queue_uses_west_admission_then_allocates_front_slot() -> None:
+    topology = _topology()
+    service, runtime = _runtime(topology)
+    assert runtime.arm_handoff["handoffCellId"] == HANDOFF_FIXED_CELL_ID
+    assert HANDOFF_QUEUE_SLOT_CELL_IDS == tuple(
+        f"cell-r92-c{col}" for col in (41, 39, 37, 35, 33, 31, 29, 27)
+    )
+
+    robot = next(item for item in runtime.state["robots"] if item["type"] == "shuttle")
+    admission_cell = HANDOFF_QUEUE_SLOT_CELL_IDS[-1]
+    _place_shuttle(runtime, robot, admission_cell, 1)
+    task = service._build_task(
+        topology,
+        "task-fixed-queue-admission",
+        "shuttle",
+        "cross_zone",
+        [{"cellId": "cell-r96-c33", "layer": 1, "depth": 1}],
+        HANDOFF_FIXED_CELL_ID,
+        False,
+        3,
+    )
+    task.update({
+        "status": "active",
+        "phase": "to_handoff_staging",
+        "phaseLabel": "载货前往机械臂等待区",
+        "assignedRobotId": robot["id"],
+        "armHandoff": True,
+        "handoffQueueAdmitted": False,
+        "handoffStagingCellId": admission_cell,
+        "handoffStagingLayer": 1,
+    })
+    robot["currentTaskId"] = task["id"]
+    robot["carrying"] = [{"skuId": "SKU-QUEUE"}]
+    runtime.state["tasks"] = [task]
+
+    service._advance_robot_phase(runtime, robot, task)
+
+    assert task["handoffQueueAdmitted"] is True
+    assert task["handoffStagingCellId"] == HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+    assert task["handoffQueuedTick"] == runtime.state["tick"]
+    assert robot["targetCellId"] == HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+    assert robot["path"][0] == admission_cell
+    assert robot["path"][-1] == HANDOFF_QUEUE_SLOT_CELL_IDS[0]
+
+
+def test_fixed_handoff_return_route_keeps_queue_modules_clear() -> None:
+    topology = _topology()
+    service, runtime = _runtime(topology)
+
+    blocked = service._handoff_return_route_blocked_states(runtime)
+
+    assert blocked is not None
+    assert (92, 41, 1) in blocked
+    assert (93, 41, 1) in blocked
+    assert (92, 43, 1) not in blocked
+    assert (92, 45, 1) not in blocked
 
 
 def test_pickup_marks_pallet_empty_only_when_lane_becomes_empty() -> None:

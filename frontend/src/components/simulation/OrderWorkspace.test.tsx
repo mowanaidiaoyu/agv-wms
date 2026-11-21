@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { GoodsCatalogSku, SimulationOrder, SimulationTask } from '../../types'
 import { OrderComposer, OrderOrchestrationPanel, OrderRail } from './OrderWorkspace'
@@ -43,25 +43,13 @@ describe('OrderComposer', () => {
     }))
   })
 
-  it('creates one parallel order from the multi-vehicle collaboration template', () => {
-    const onSubmit = vi.fn()
-    const fleetCatalog = Array.from({ length: 7 }, (_, index) => ({
-      skuId: `SKU-${index + 1}`,
-      name: `协同商品${index + 1}`,
-      spec: `BOX-${index + 1}`,
-    }))
-    render(<OrderComposer open catalog={fleetCatalog} onClose={vi.fn()} onSubmit={onSubmit} />)
+  it('does not render the obsolete quick-order templates', () => {
+    render(<OrderComposer open catalog={catalog} onClose={vi.fn()} onSubmit={vi.fn()} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /多车协同订单/ }))
-    expect(screen.getByText(/7 种SKU · 14 件 · 并行优先/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '提交订单' }))
-
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
-      dispatchMode: 'parallel',
-      maxParallelCtu: 7,
-      lines: expect.arrayContaining([expect.objectContaining({ quantity: 2 })]),
-    }))
-    expect(onSubmit.mock.calls[0][0].lines).toHaveLength(7)
+    expect(screen.queryByText('快速模板')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /CTU多箱订单/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /紧急插单/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /多车协同订单/ })).not.toBeInTheDocument()
   })
 
   it('shows the actual reason and retry entry when the catalog fails', () => {
@@ -150,6 +138,9 @@ describe('OrderOrchestrationPanel', () => {
 
     const { unmount } = render(<OrderOrchestrationPanel order={order} tasks={[task]} />)
 
+    expect(screen.queryByLabelText('订单拆解与 CTU 分配')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '展开订单编排' })).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '展开订单编排' }))
     const taskCard = screen.getAllByTitle(task.id).find((element) => element.tagName === 'BUTTON')
     expect(taskCard).toBeDefined()
     expect(taskCard).toHaveClass('simulation-order-task-card')
@@ -157,6 +148,8 @@ describe('OrderOrchestrationPanel', () => {
     expect(screen.getByText('ctu-01')).toHaveClass('simulation-order-task-robot')
     expect(screen.getByText(/1F A区库位 · 出口队列 2/)).toHaveAttribute('title', '1F A区库位')
     expect(screen.queryByText(task.assignedPortLabel as string)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '收起订单编排' }))
+    expect(screen.queryByLabelText('订单拆解与 CTU 分配')).not.toBeInTheDocument()
 
     unmount()
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
@@ -178,7 +171,31 @@ describe('OrderOrchestrationPanel', () => {
     } as SimulationTask
 
     render(<OrderOrchestrationPanel order={order} tasks={[task]} />)
+    fireEvent.click(screen.getByRole('button', { name: '展开订单编排' }))
     expect(screen.getByText('输送线出入口 3')).toBeInTheDocument()
     expect(screen.getAllByText('等待分配')).toHaveLength(2)
+  })
+
+  it('keeps all fourteen tasks available inside the scrollable task region', () => {
+    const order = {
+      id: 'ORD-014', priority: 'normal', targetStation: 'station-a', createdAt: '2026-11-12T00:00:00Z', lines: [],
+      status: 'executing', statusLabel: '执行中', taskIds: [], totalTasks: 14,
+      completedTasks: 0, progress: 0,
+    } as SimulationOrder
+    const tasks = Array.from({ length: 14 }, (_, index) => ({
+      id: `task-${index + 1}`, orderId: order.id, assignedRobotId: `shuttle-${index + 1}`,
+      assignedPortLabel: '出库口 01', robotType: 'shuttle', mode: 'cross_zone', status: 'active',
+      phase: 'delivery_to_port', phaseLabel: '前往交付', sourceCellId: 'cell-r1-c1', sourceLayer: 1,
+      targetCellId: 'cell-r2-c2', targetLayer: 1, deliveryCellId: 'cell-r2-c2', lines: [],
+      currentLineIndex: 0, picked: 0, priority: 2, etaTicks: 0, urgent: false,
+      remainingTicks: 0, history: [], createdTick: 0, startedTick: 0, completedTick: null,
+    })) as SimulationTask[]
+
+    render(<OrderOrchestrationPanel order={order} tasks={tasks} />)
+    fireEvent.click(screen.getByRole('button', { name: '展开订单编排' }))
+
+    const taskRegion = screen.getByRole('region', { name: '任务列表，共 14 个任务' })
+    expect(taskRegion).toHaveAttribute('tabindex', '0')
+    expect(within(taskRegion).getAllByRole('button')).toHaveLength(14)
   })
 })

@@ -87,6 +87,7 @@ def _derived_bundle(topology: dict[str, Any]) -> dict[str, Any]:
         "walkable_no_storage": None,
         "shuttle_cells": None,
         "shuttle_servable": None,
+        "shuttle_collision_snap": None,
     }
     _derived_cache[id(topology)] = (topology, bundle)
     return bundle
@@ -468,6 +469,161 @@ def _build_shuttle_lookup_uncached(
                         for cell in cells:
                             aisle.add((cell[0], cell[1], layer))
     return zone_at, aisle, lift
+
+
+def shuttle_state_is_walkable(
+    topology: dict[str, Any],
+    row: int,
+    col: int,
+    layer: int | float,
+) -> bool:
+    """Return whether a Shuttle may physically occupy an ordinary route state.
+
+    Unlike ``shortest_path_shuttle`` this helper does not grant the usual
+    start/goal exemption.  It is used by recovery and yielding code, where a
+    synthesized coordinate must never become a legal position merely because
+    it was supplied as an endpoint.
+    """
+
+    row_value = int(row)
+    col_value = int(col)
+    layer_value = int(layer)
+    zone_at, aisle, _lift = build_shuttle_lookup(topology)
+    if (row_value, col_value) in zone_at:
+        return (row_value, col_value, layer_value) in aisle
+    if layer_value != 1:
+        return False
+
+    bundle = _derived_bundle(topology)
+    if bundle["shuttle_cells"] is None:
+        elevated, ground, gates = _shuttle_outzone_sets(topology)
+        blocked: set[tuple[int, int]] = set()
+        for cell in topology.get("cells", []):
+            if cell.get("type") == "blocked" or not cell.get("walkable", True):
+                blocked.add((int(cell["row"]), int(cell["col"])))
+        bundle["shuttle_cells"] = (blocked, elevated, ground, gates)
+    blocked, elevated, ground, _gates = bundle["shuttle_cells"]
+    grid = topology.get("grid", {})
+    rows = int(grid.get("rows") or 0)
+    cols = int(grid.get("cols") or 0)
+    if rows > 0 and cols > 0 and not (0 <= row_value < rows and 0 <= col_value < cols):
+        return False
+    if (row_value, col_value) in blocked or (row_value, col_value) in elevated:
+        return False
+    return (row_value, col_value) in ground
+
+
+def build_shuttle_collision_snap_lookup(
+    topology: dict[str, Any],
+) -> dict[tuple[int, int], tuple[int, int, bool]]:
+    """Map Shuttle logical cells to the same 2x2 centre lines used by the UI.
+
+    A Shuttle body is about two grid cells wide.  The renderer therefore snaps
+    both rows (or columns) of a 2x2 aisle/conveyor block to one physical centre
+    line.  Treating those logical cells as independent occupancy positions lets
+    two vehicles share one rendered position.  This lookup is the backend side
+    of that coordinate contract: ``(row, col) -> (anchor_row, anchor_col,
+    horizontal)``.
+    """
+    bundle = _derived_bundle(topology)
+    cached = bundle["shuttle_collision_snap"]
+    if cached is not None:
+        return cached
+
+    # Keep insertion/override order aligned with Simulation3DScene:
+    # handoff nodes, aisle slots, and finally authoritative conveyor cells.
+    cell_anchors: dict[tuple[int, int], tuple[int, int]] = {}
+    conveyor_anchor_by_position: dict[tuple[int, int], tuple[int, int]] = {}
+    for cell in topology.get("cells", []):
+        if cell.get("type") != "conveyor" or not cell.get("conveyorGround"):
+            continue
+        anchor = cell.get("conveyorAnchor") or {"row": cell["row"], "col": cell["col"]}
+        conveyor_anchor_by_position[(int(cell["row"]), int(cell["col"]))] = (
+            int(anchor["row"]),
+            int(anchor["col"]),
+        )
+
+    def add_block(anchor_row: int, anchor_col: int) -> None:
+        for d_row in range(2):
+            for d_col in range(2):
+                cell_anchors[(anchor_row + d_row, anchor_col + d_col)] = (anchor_row, anchor_col)
+
+    for node in topology.get("nodes", []):
+        if node.get("type") not in {"shuttle_dock", "picking_handoff"}:
+            continue
+        position = (int(node["row"]), int(node["col"]))
+        anchor_row, anchor_col = conveyor_anchor_by_position.get(position, position)
+        add_block(anchor_row, anchor_col)
+
+    for zone in topology.get("zones", []):
+        if zone.get("type") != "shuttle":
+            continue
+        for key in (zone.get("slotAisles") or {}):
+            try:
+                anchor_row, anchor_col = (int(value) for value in str(key).split(",", maxsplit=1))
+            except (TypeError, ValueError):
+                continue
+            add_block(anchor_row, anchor_col)
+
+    for position, anchor in conveyor_anchor_by_position.items():
+        cell_anchors[position] = anchor
+
+    anchors = set(cell_anchors.values())
+    lookup = {
+        position: (
+            anchor[0],
+            anchor[1],
+            (anchor[0], anchor[1] - 2) in anchors or (anchor[0], anchor[1] + 2) in anchors,
+        )
+        for position, anchor in cell_anchors.items()
+    }
+    bundle["shuttle_collision_snap"] = lookup
+    return lookup
+
+
+def shuttle_collision_footprint(
+    topology: dict[str, Any],
+    row: int,
+    col: int,
+    layer: int | float,
+) -> frozenset[tuple[int, int, float]]:
+    """Return the four physical grid squares occupied by one Shuttle body."""
+    snap = build_shuttle_collision_snap_lookup(topology).get((int(row), int(col)))
+    if snap is None:
+        base_row, base_col = int(row), int(col)
+    else:
+        anchor_row, anchor_col, horizontal = snap
+        base_row = anchor_row if horizontal else int(row)
+        base_col = int(col) if horizontal else anchor_col
+    level = float(layer)
+    return frozenset(
+        (base_row + d_row, base_col + d_col, level)
+        for d_row in range(2)
+        for d_col in range(2)
+    )
+
+
+def expand_shuttle_blocked_states(
+    topology: dict[str, Any],
+    occupied_states: set[tuple[int, int, int]],
+) -> set[tuple[int, int, int]]:
+    """Expand vehicle centres into pathfinder states whose 2x2 bodies collide."""
+    blocked: set[tuple[int, int, int]] = set()
+    for row, col, layer in occupied_states:
+        occupied = shuttle_collision_footprint(topology, row, col, layer)
+        # A 2x2 footprint can only intersect centres within two logical cells.
+        # Snapped row/column pairs are also contained by this neighbourhood.
+        for candidate_row in range(row - 2, row + 3):
+            for candidate_col in range(col - 2, col + 3):
+                candidate = shuttle_collision_footprint(
+                    topology,
+                    candidate_row,
+                    candidate_col,
+                    layer,
+                )
+                if occupied.intersection(candidate):
+                    blocked.add((candidate_row, candidate_col, layer))
+    return blocked
 
 
 def shuttle_rack_slots(topology: dict[str, Any]) -> list[tuple[str, int]]:

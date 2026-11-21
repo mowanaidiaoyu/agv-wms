@@ -23,6 +23,7 @@ import {
   buildGoodsSceneBoxes,
   buildSceneSpec,
   robotWorldPosition,
+  simulationRobotVisibleOnFloor,
   buildGroundBeltLookup,
   shuttleGroundSnapPosition,
   shuttleTrackWorldPosition,
@@ -651,7 +652,7 @@ function TaskTargetMarker({
   )
 }
 
-function RobotFocusMarker({ robotId, phase }: { robotId: string; phase: string }) {
+function RobotFocusMarker() {
   return (
     <group>
       <mesh position={[0, 0.04, 0]} rotation={[Math.PI / 2, 0, 0]}>
@@ -662,12 +663,6 @@ function RobotFocusMarker({ robotId, phase }: { robotId: string; phase: string }
         <coneGeometry args={[0.26, 0.72, 16]} />
         <meshBasicMaterial color="#22d3ee" transparent opacity={0.9} depthTest={false} />
       </mesh>
-      <Html position={[0, 9.8, 0]} center zIndexRange={[29, 19]}>
-        <div className="simulation-scene-label simulation-scene-robot-label">
-          <b>{robotId}</b>
-          <span>{phase}</span>
-        </div>
-      </Html>
     </group>
   )
 }
@@ -906,12 +901,6 @@ function ShuttleLiftView({
           />
         </mesh>
       </SmoothLiftCab>
-      <Html position={[0, SHUTTLE_RACK_BASE_Y + height + 0.75, 0]} center zIndexRange={[27, 17]}>
-        <div className={`simulation-scene-label shuttle-lift-label ${active ? 'active' : ''}`}>
-          <b>{lift.label}</b>
-          <span>{active ? activeTask?.phaseLabel : 'L1～L4'}</span>
-        </div>
-      </Html>
     </group>
   )
 }
@@ -2288,15 +2277,10 @@ function Simulation3DScene({
       })}
 
       {robots
-        // 多层视图下，只渲染 activeFloor 层的 shuttle（避免同 xy 不同层俯视时重叠）。
-        // activeFloor 对 CTU 只接受 '1F'（CTU 库恒为 1 层）。
-        .filter((robot) => {
-          if (robot.type === 'shuttle') {
-            const layer = Number(activeFloor.replace(/[^0-9]/g, '')) || 1
-            return (robot.currentLayer ?? 1) === layer
-          }
-          return (robot.currentFloor ?? '1F') === activeFloor
-        })
+        // activeFloor is a building-floor filter. Shuttle currentLayer is an
+        // internal rack level and is already represented by the model's Y
+        // coordinate, so L2-L4 vehicles must remain visible on building 1F.
+        .filter((robot) => simulationRobotVisibleOnFloor(robot, activeFloor))
         .map((robot) => {
         const position: [number, number, number] = robot.type === 'shuttle'
           ? shuttleVehiclePosition(robot)
@@ -2314,10 +2298,7 @@ function Simulation3DScene({
               <CtuCart load={robot.load} carrying={robot.carrying} action={robot.handlingAction} paused={paused} />
             ) : <ShuttleCartModel load={robot.load} carrying={robot.carrying} paused={paused} />}
             {robot.id === (selectedRobotId || focusRobot?.id) ? (
-              <RobotFocusMarker
-                robotId={robot.id}
-                phase={`${robot.phaseLabel || focusTask?.phaseLabel || '执行任务'} · ${robot.load}/${robot.capacity} 箱`}
-              />
+              <RobotFocusMarker />
             ) : null}
           </RobotGroup>
         )
