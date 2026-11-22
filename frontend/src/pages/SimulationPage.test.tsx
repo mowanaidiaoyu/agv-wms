@@ -387,6 +387,19 @@ describe('SimulationPage', () => {
     await waitFor(() => expect(usePlatformStore.getState().selectedRunId).toBe('run-restored'))
   })
 
+  it('shows the waiting pallet total above the six-pallet batch limit', async () => {
+    const state = simulationStateFixture('run-pallet-count')
+    vi.mocked(api.getSimulationState).mockResolvedValue({
+      ...state,
+      emptyPalletStack: { cellId: 'cell-r76-c35', count: 8, capacity: 6, overflow: 2 },
+    })
+    renderSimulationPage('/simulation?topologyId=topology-test&runId=run-pallet-count')
+    await waitFor(() => {
+      const counter = screen.getByTitle('(76,35) 回收区当前待取的空托盘总数')
+      expect(counter.querySelector('strong')).toHaveTextContent(/^8$/)
+    })
+  })
+
   it('exits a completed Run view into a blank editable draft without mutating the historical Run', async () => {
     const state = {
       ...simulationStateFixture('run-history'),

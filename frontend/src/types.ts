@@ -1589,12 +1589,13 @@ export interface SimulationState {
   orders?: SimulationOrder[]
   inventory?: GoodsSlot[]
   shuttleDocks?: ShuttleDockState[]
-  /** 空托盘在 (76,35) 地面输送线上的堆积层数（最多 6 层，超出记 overflow）。 */
+  /** (76,35) 回收区待取总数。capacity 是每趟搬运的上限。 */
   emptyPalletStack?: {
     cellId: string
     count: number
     capacity: number
     overflow: number
+    stacks?: Array<{ sourceCellId?: string | null; sourceLayer?: number | null }>
   } | null
   /** 5 个出货口放置区的空托盘承载位：键 = 出货口行号，count = 该处空托盘层数。 */
   palletDocks?: Record<string, { count: number; availableEmpty?: number }> | null
@@ -1602,9 +1603,11 @@ export interface SimulationState {
     armId: string
     pickupCellId: string
     dropoffCellId: string
+    deliveryArmId?: string
+    portCellId?: string
     dropZoneId: string
     route: Array<{ blockId: string; row: number; col: number; deck: ConveyorDeckKey; ground: boolean }>
-    conveyorCells: TopologyCell[]
+    conveyorCells?: TopologyCell[]
   } | null
   palletArm?: {
     armId: string
@@ -1627,6 +1630,7 @@ export interface SimulationState {
   }>
   palletDropZone?: {
     zoneId: string
+    armId?: string
     row: number
     col: number
     deck: ConveyorDeckKey
@@ -1674,11 +1678,14 @@ export interface SimulationState {
     status: string
     stage: string | null
     remainingTicks: number
+    stageStartedTick?: number | null
+    stageDurationTicks?: number | null
     taskId: string | null
     cargoToken: string | null
     portCellId: string | null
     dropCellId: string | null
     cargo?: {
+      kind?: string
       orderId?: string | null
       skuId?: string | null
       skuName?: string | null

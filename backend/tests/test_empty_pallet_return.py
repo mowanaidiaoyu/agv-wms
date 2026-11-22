@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from app.services.pathfinding import (
     build_shuttle_lookup,
     cell_id,
@@ -19,6 +21,7 @@ from app.services.simulation import (
     EMPTY_PALLET_TASK_KIND,
     HANDOFF_FIXED_CELL_ID,
     HANDOFF_QUEUE_SLOT_CELL_IDS,
+    PALLET_COLLECT_CLEAR_CELL_ID,
     PALLET_COLLECT_EXIT_CELL_ID,
     PALLET_COLLECT_SPUR,
     SimulationService,
@@ -98,14 +101,21 @@ def _collect_task(service, runtime, carrier):
     return task
 
 
-def test_pallet_collect_spur_recovers_trapped_idle_shuttle_and_hands_off_once() -> None:
+@pytest.mark.parametrize(("start_col", "blocker_cell", "clear_cell"), [
+    (46, "cell-r75-c48", PALLET_COLLECT_EXIT_CELL_ID),
+    (44, "cell-r76-c43", PALLET_COLLECT_CLEAR_CELL_ID),
+])
+def test_pallet_collect_spur_recovers_trapped_idle_shuttle_and_hands_off_once(
+    start_col: int, blocker_cell: str, clear_cell: str,
+) -> None:
     service, runtime = _runtime(_topology())
     carrier, blocker = [r for r in runtime.state["robots"] if r["type"] == "shuttle"][:2]
-    start = "cell-r74-c46"
+    start = cell_id(74, start_col)
     _place_collect_vehicle(runtime, carrier, start, status="blocked")
-    _place_collect_vehicle(runtime, blocker, "cell-r75-c48", status="idle")
+    _place_collect_vehicle(runtime, blocker, blocker_cell, status="idle")
+    path = [cell_id(74, col) for col in range(start_col, 48)]
     carrier.update(
-        path=[start, EMPTY_PALLET_COLLECT_CELL_ID], pathLayers=[1, 1],
+        path=path, pathLayers=[1] * len(path),
         targetCellId=EMPTY_PALLET_COLLECT_CELL_ID, targetLayer=1,
     )
     task = _collect_task(service, runtime, carrier)
@@ -117,7 +127,7 @@ def test_pallet_collect_spur_recovers_trapped_idle_shuttle_and_hands_off_once() 
         carrier_body = service._robot_collision_footprint(runtime, carrier)
         blocker_body = service._robot_collision_footprint(runtime, blocker)
         assert not carrier_body & blocker_body
-        if blocker["currentCellId"] == PALLET_COLLECT_EXIT_CELL_ID:
+        if blocker["currentCellId"] == clear_cell:
             blocker_cleared = True
         arm = runtime.state["palletArm"]
         if arm["taskId"] == task["id"] and handoff_tick is None:
@@ -136,46 +146,134 @@ def test_pallet_collect_spur_recovers_trapped_idle_shuttle_and_hands_off_once() 
     assert service._all_tasks_completed(runtime)
 
 
-def test_six_pallet_batch_is_picked_on_vehicle_and_follows_belt_into_drop_zone() -> None:
-    service, runtime = _runtime(_topology())
+def test_pallet_batches_debit_actual_pickup_and_follow_upper_belt_into_drop_zone() -> None:
+    topology = _topology()
+    service, runtime = _runtime(topology)
     runtime.state.update(tasks=[], orders=[], orderDriven=True)
     runtime.state["emptyPalletStack"].update(
-        count=6, stacks=[{"sourceCellId": "cell-r98-c23", "sourceLayer": 1} for _ in range(6)],
+        count=8, stacks=[{"sourceCellId": "cell-r98-c23", "sourceLayer": 1} for _ in range(8)],
     )
     config = runtime.state["palletTransport"]
     expected_route = [block["blockId"] for block in config["route"]]
-    actual_route = []
-    saw_pick = saw_place = False
-    for _ in range(250):
+    assert config["deliveryArmId"] == "arm-01"
+    assert config["portCellId"] == "cell-r102-c62"
+    assert not config.get("conveyorCells")
+    assert runtime.topology["cells"] == topology["cells"]
+    assert all(block_id in runtime.conveyor_graph["nodes"] for block_id in expected_route)
+    actual_routes: dict[str, list[str]] = {}
+    pickup_counts = []
+    previous_count = 8
+    arm_stages: set[tuple[int, str]] = set()
+    delivery_stages: set[tuple[int, str]] = set()
+    outlet_counts = set()
+    placed_counts = []
+    placed_count = 0
+    previous_placement = None
+    delivery_arm = next(arm for arm in runtime.state["pickingArms"] if arm["armId"] == "arm-01")
+    for _ in range(350):
         service._step_runtime(runtime, persist=False)
+        count = runtime.state["emptyPalletStack"]["count"]
+        if count != previous_count:
+            batch_size = previous_count - count
+            task = runtime.state["tasks"][-1]
+            carrier = next(robot for robot in runtime.state["robots"] if robot["id"] == task["assignedRobotId"])
+            assert carrier["currentCellId"] == EMPTY_PALLET_RETURN_CELL_ID
+            assert carrier["load"] == batch_size
+            pickup_counts.append((previous_count, count))
+            previous_count = count
         arm = runtime.state["palletArm"]
         if arm["stage"] in {"pick", "place"}:
             carrier = next(robot for robot in runtime.state["robots"] if robot["id"] == arm["robotId"])
-            assert arm["cargo"]["qty"] == 6
+            quantity = arm["cargo"]["qty"]
+            arm_stages.add((quantity, arm["stage"]))
             if arm["stage"] == "pick":
-                saw_pick = True
                 assert carrier["currentCellId"] == EMPTY_PALLET_COLLECT_CELL_ID
-                assert carrier["load"] == 6
+                assert carrier["load"] == quantity
             else:
-                saw_place = True
                 assert carrier["load"] == 0
         for item in runtime.state["palletConveyorItems"]:
-            assert item["palletCount"] == 6
-            if not actual_route or actual_route[-1] != item["currentBlockId"]:
-                actual_route.append(item["currentBlockId"])
+            assert item["deck"] == "upper"
+            if item["status"] in {"waiting_arm", "being_picked"}:
+                assert item["currentBlockId"] == "1F:102:62:upper"
+                assert not service._pallet_belt_has_room(runtime, item["currentBlockId"])
+                outlet_counts.add(item["palletCount"])
+            path = actual_routes.setdefault(item["id"], [])
+            if not path or path[-1] != item["currentBlockId"]:
+                path.append(item["currentBlockId"])
+        total_placed = (runtime.state["palletDropZone"] or {}).get("count", 0)
+        if total_placed != placed_count:
+            assert previous_placement == total_placed - placed_count
+            placed_count = total_placed
+            placed_counts.append(total_placed)
+        previous_placement = None
+        if delivery_arm["stage"] in {"pick", "place"}:
+            cargo = delivery_arm["cargo"]
+            stage = delivery_arm["stage"]
+            assert cargo["kind"] == "empty_pallet"
+            assert delivery_arm["stageDurationTicks"] >= 14
+            assert delivery_arm["portCellId"] == "cell-r102-c62"
+            assert delivery_arm["dropCellId"] == "cell-r104-c68"
+            assert any(item["id"] == cargo["palletId"] for item in runtime.state["palletConveyorItems"]) == (stage == "pick")
+            assert not service._all_tasks_completed(runtime)
+            delivery_stages.add((cargo["qty"], stage))
+            if stage == "place":
+                previous_placement = cargo["qty"]
         if service._all_tasks_completed(runtime):
             break
 
-    assert saw_pick and saw_place
-    assert len(runtime.state["tasks"]) == 1
-    assert runtime.state["tasks"][0]["status"] == "completed"
-    assert actual_route == expected_route
-    assert actual_route[0] == "1F:78:50:lower"
+    assert arm_stages == {(6, "pick"), (6, "place"), (2, "pick"), (2, "place")}
+    assert delivery_stages == arm_stages
+    assert outlet_counts == {6, 2}
+    assert placed_counts == [6, 8]
+    assert pickup_counts == [(8, 2), (2, 0)]
+    assert [task["palletCount"] for task in runtime.state["tasks"]] == [6, 2]
+    assert list(actual_routes.values()) == [expected_route, expected_route]
+    assert expected_route[0] == "1F:78:50:upper"
+    assert expected_route[-2:] == ["1F:102:60:upper", "1F:102:62:upper"]
     assert runtime.state["emptyPalletStack"]["count"] == 0
     assert runtime.state["palletDropZone"] == {
-        "zoneId": "zone-drop_zone", "row": 102, "col": 66, "deck": "lower", "count": 6,
+        "zoneId": "zone-drop_zone", "row": 104, "col": 68, "deck": "upper", "armId": "arm-01", "count": 8,
     }
+    assert runtime.state["armDropBoxes"] == []
     assert service._all_tasks_completed(runtime)
+
+
+def test_pallet_waits_in_shared_outlet_until_arm_finishes_placing_carton() -> None:
+    service, runtime = _runtime(_topology())
+    config = runtime.state["palletTransport"]
+    port_cell_id = config["portCellId"]
+    runtime.state["armBeltBoxes"] = [{"cellId": port_cell_id, "taskId": "carton", "placedTick": 0}]
+    assert service._spawn_pallet_conveyor_item(runtime, {"cargo": {"qty": 6}, "taskId": "pallet"})
+    pallet = runtime.state["palletConveyorItems"][0]
+    trunk = config["route"][-2]
+    pallet.update(
+        currentBlockId=trunk["blockId"], currentRow=trunk["row"], currentCol=trunk["col"],
+        routeIndex=len(config["route"]) - 2, tickCounter=pallet["speedTicks"],
+    )
+    arm = next(arm for arm in runtime.state["pickingArms"] if arm["armId"] == "arm-01")
+
+    service._advance_pallet_conveyor(runtime)
+    assert pallet["currentBlockId"] == trunk["blockId"]
+    service._advance_picking_arms(runtime)
+    assert arm["stage"] == "pick" and arm["taskId"] == "carton"
+    service._advance_pallet_conveyor(runtime)
+    assert pallet["currentBlockId"] == trunk["blockId"]
+
+    waited_during_place = False
+    for _ in range(20):
+        runtime.state["tick"] += 1
+        service._advance_picking_arms(runtime)
+        service._advance_pallet_conveyor(runtime)
+        if pallet["status"] == "waiting_arm":
+            waited_during_place |= arm["stage"] == "place" and arm["taskId"] == "carton"
+            assert not service._pallet_belt_has_room(runtime, pallet["currentBlockId"])
+        if pallet["status"] == "being_picked":
+            break
+    assert arm["stage"] == "pick" and arm["taskId"] == "pallet"
+    assert waited_during_place
+    assert pallet["status"] == "being_picked"
+    assert runtime.state["palletDropZone"] is None
+    assert [box["taskId"] for box in runtime.state["armDropBoxes"]] == ["carton"]
 
 
 def test_pallet_collect_spur_holds_following_carrier_before_turnout() -> None:
@@ -435,7 +533,7 @@ def test_pallet_return_task_targets_the_original_layer() -> None:
     assert return_task["targetLayer"] == lane_layer
 
 
-def test_pallet_stack_caps_at_six_layers_and_counts_overflow() -> None:
+def test_pallet_stack_counts_all_trays_above_batch_capacity() -> None:
     topology = _topology()
     service, runtime = _runtime(topology)
     robot = next(item for item in runtime.state["robots"] if item["type"] == "shuttle")
@@ -458,7 +556,7 @@ def test_pallet_stack_caps_at_six_layers_and_counts_overflow() -> None:
         service._deliver_empty_pallet(runtime, robot, task)
 
     stack = runtime.state["emptyPalletStack"]
-    assert stack["count"] == 6
+    assert stack["count"] == len(stack["stacks"]) == 8
     assert stack["overflow"] == 2
 
 

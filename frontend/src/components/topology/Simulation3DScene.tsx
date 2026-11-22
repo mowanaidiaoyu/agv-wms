@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
-import type { ReactNode } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Group, MOUSE, Mesh, Vector3 } from 'three'
@@ -19,6 +19,7 @@ import {
   FLOOR_HEIGHT,
   GOODS_CATEGORY_COLORS,
   GOODS_DEFAULT_COLOR,
+  OUTBOUND_CARTON_MATERIAL,
   SHUTTLE_RACK_BASE_Y,
   ZONE_LEVEL_HEIGHT,
   buildGoodsSceneBoxes,
@@ -43,7 +44,7 @@ import {
   traceConveyorDeckRoute,
   type ConveyorRouteStatus,
 } from '../../lib/topology'
-import { advanceInterpolationElapsed, interpolateScalar, interpolationProgress } from '../../lib/simulationMotion'
+import { advanceInterpolationElapsed, conveyorPositionOnRoute, interpolateScalar, interpolationProgress } from '../../lib/simulationMotion'
 import type {
   GoodsSlot,
   ShuttleContract,
@@ -100,8 +101,6 @@ export type Simulation3DSceneProps = {
   simulationTick?: number
 }
 
-const CTU_GOODS_COLOR = '#fde047'
-const CTU_GOODS_EMISSIVE = '#ca8a04'
 // 回库箱（picking_return）：与出货货物同色系区分，避免"凭空出现的箱子"被误认为幽灵箱
 const RETURN_BOX_COLOR = '#60a5fa'
 const CONVEYOR_CARGO_SIZE: [number, number, number] = [0.5, 0.3, 0.42]
@@ -342,7 +341,7 @@ function CtuCart({
       {visibleCarrying.slice(0, CTU_ROBOT_LEVELS).map((slot, index) => (
         <mesh key={`carry-${slot.nodeId}-${slot.layer}`} position={[0, carryStartY + index * carryGap, 0.25]}>
           <boxGeometry args={[0.5, 0.3, 0.42]} />
-          <meshStandardMaterial color={CTU_GOODS_COLOR} emissive={CTU_GOODS_EMISSIVE} emissiveIntensity={0.3} roughness={0.52} />
+          <meshStandardMaterial color={OUTBOUND_CARTON_MATERIAL.color} emissive={OUTBOUND_CARTON_MATERIAL.emissive} emissiveIntensity={0.3} roughness={0.52} />
         </mesh>
       ))}
 
@@ -362,7 +361,7 @@ function CtuCart({
           {showTransferBox ? (
             <mesh position={[0, 0.2, -0.3]}>
               <boxGeometry args={[0.5, 0.3, 0.42]} />
-              <meshStandardMaterial color="#fde047" emissive="#ca8a04" emissiveIntensity={0.48} roughness={0.5} />
+          <meshStandardMaterial color={OUTBOUND_CARTON_MATERIAL.color} emissive={OUTBOUND_CARTON_MATERIAL.emissive} emissiveIntensity={0.48} roughness={0.5} />
             </mesh>
           ) : null}
         </group>
@@ -380,11 +379,14 @@ const LIFT_ENTRY_DWELL_SECONDS = 0.35
 const LIFT_EXIT_DWELL_SECONDS = 0.4
 const LIFT_SPEED = 0.9
 
+type ConveyorBlockTrack = { points: [number, number, number][]; index: number }
+
 /**
  * 交付到输送线出入口的货箱：从带面下方升到滚筒上，模拟「货物从输送线下方进入」，
  * 升到位后沿输送方向移动；遇到升降移栽机时抬到第二层，停留后缩小消失。
  */
 function DeliveredBox({
+  name,
   position,
   color,
   path,
@@ -395,9 +397,12 @@ function DeliveredBox({
   hold = false,
   skipRise = false,
   smoothFollow = false,
-  travelSpeed = DELIVERY_SPEED,
+  blockTrack,
+  atOutlet = false,
+  tickInterval = 0.3,
   paused = false,
 }: {
+  name: string
   position: [number, number, number]
   color: string
   path: [number, number, number][]
@@ -411,13 +416,23 @@ function DeliveredBox({
   skipRise?: boolean
   /** 后端逐块位置更新时平滑跟随，避免跨模块中心瞬移。 */
   smoothFollow?: boolean
-  /** 沿完整路径播放的世界单位/秒；机械臂输送按仿真 tick 对齐。 */
-  travelSpeed?: number
+  blockTrack?: ConveyorBlockTrack
+  atOutlet?: boolean
+  tickInterval?: number
   /** 仿真暂停时冻结路径播放与平滑跟随（否则暂停后箱子还在自己滑行）。 */
   paused?: boolean
 }) {
   const ref = useRef<Group>(null)
   const platformRef = useRef<Group>(null)
+  const invalidate = useThree((state) => state.invalidate)
+  const initialBlockPosition = useRef(blockTrack ? blockTrack.points[blockTrack.index] : undefined)
+  const blockMotion = useRef(blockTrack ? {
+    points: blockTrack.points,
+    cursor: blockTrack.index,
+    from: blockTrack.index,
+    target: blockTrack.index,
+    elapsed: 0,
+  } : null)
   // 路径播放的累计时钟：只在仿真运行时推进，暂停时冻结（否则 dock 机械臂
   // 线的固定带速箱子在暂停后仍会自己滑完整条路径，看起来像幽灵动画）。
   const playClockRef = useRef(0)
@@ -443,18 +458,49 @@ function DeliveredBox({
       const liftMoveSeconds = vertical ? length / LIFT_SPEED : 0
       const duration = vertical
         ? LIFT_ENTRY_DWELL_SECONDS + liftMoveSeconds + LIFT_EXIT_DWELL_SECONDS
-        : length / Math.max(0.01, travelSpeed)
+        : length / DELIVERY_SPEED
       segments.push({ from, to, length, startTime: totalDuration, duration, vertical, liftMoveSeconds })
       totalDuration += duration
     }
     return { segments, totalDuration }
-  }, [path, travelSpeed])
+  }, [path])
   const travelEnd = (skipRise ? 0 : DELIVERY_RISE_SECONDS) + route.totalDuration
   const fadeStart = travelEnd + DELIVERY_DWELL_SECONDS
+  const material = color === OUTBOUND_CARTON_MATERIAL.color
+    ? OUTBOUND_CARTON_MATERIAL
+    : { color, emissive: color, emissiveIntensity: 0.18, roughness: 0.55, metalness: 0.12 }
 
-  useFrame(({ invalidate }, delta) => {
+  useEffect(() => {
+    invalidate()
+  }, [invalidate, blockTrack?.index, atOutlet, paused, tickInterval])
+
+  useFrame((_, delta) => {
     const group = ref.current
     if (!group) return
+    const track = blockMotion.current
+    if (track && (blockTrack || atOutlet)) {
+      const target = blockTrack?.index ?? track.points.length - 1
+      if (blockTrack) track.points = blockTrack.points
+      else if (track.points[target] !== position) track.points = [...track.points.slice(0, target), position]
+      const duration = tickInterval * 0.85
+      if (track.cursor !== track.target) {
+        track.elapsed = advanceInterpolationElapsed(track.elapsed, delta, duration, paused)
+        track.cursor = interpolateScalar(track.from, track.target, interpolationProgress(track.elapsed, duration))
+      }
+      if (track.target !== target) {
+        if (target < track.target) track.cursor = target
+        track.from = track.cursor
+        track.target = target
+        track.elapsed = 0
+      }
+      const [x, y, z] = conveyorPositionOnRoute(track.points, track.cursor)
+      group.position.set(x, y, z)
+      const cell = worldToCell(x, z, cols, rows)
+      const blockKey = blockLookup.get(`${cell.row}:${cell.col}`)
+      if (blockKey) activeBlocks.current.set(blockKey, performance.now())
+      if (!paused && track.cursor !== target) invalidate()
+      return
+    }
     if (!paused) playClockRef.current += delta
     const elapsed = playClockRef.current
     const riseSeconds = skipRise ? 0 : DELIVERY_RISE_SECONDS
@@ -512,16 +558,10 @@ function DeliveredBox({
   })
 
   return (
-    <group ref={ref} position={[position[0], position[1] - (skipRise ? 0 : 0.9), position[2]]}>
-      <mesh>
+    <group ref={ref} name={name} position={initialBlockPosition.current ?? [position[0], position[1] - (skipRise ? 0 : 0.9), position[2]]}>
+      <mesh castShadow={atOutlet}>
         <boxGeometry args={CONVEYOR_CARGO_SIZE} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.18}
-          roughness={0.55}
-          metalness={0.12}
-        />
+        <meshStandardMaterial {...material} />
       </mesh>
       {/* 升降移载机的随动载货台：进站停稳、抬升、出站停稳期间与货箱一起运动。 */}
       <group ref={platformRef} position={[0, -0.2, 0]} visible={false}>
@@ -956,7 +996,7 @@ function EmptyPalletStackView({
   )
 }
 function Simulation3DScene({
-  topology: baseTopology,
+  topology,
   goods,
   robots,
   tasks,
@@ -997,16 +1037,13 @@ function Simulation3DScene({
   palletDropZone = null,
   simulationTick = 0,
 }: Simulation3DSceneProps) {
-  // Keep the layout reference stable across simulation ticks.
-  const palletConnectorKey = JSON.stringify(palletTransport?.conveyorCells ?? [])
-  const topology = useMemo(() => {
-    const cells = JSON.parse(palletConnectorKey) as TopologyPayload['cells']
-    if (!cells.length) return baseTopology
-    const replaced = new Set(cells.map((cell) => cell.id))
-    return { ...baseTopology, cells: [...baseTopology.cells.filter((cell) => !replaced.has(cell.id)), ...cells] }
-  }, [baseTopology, palletConnectorKey])
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
+  const palletBeltPositions = useMemo(() => new Set(
+    topology.cells
+      .filter((cell) => cell.type === 'conveyor' && (cell.floor ?? '1F') === '1F')
+      .map((cell) => `${cell.row}:${cell.col}`),
+  ), [topology.cells])
 
   // 四向车 2×2 车体吸附表：地面输送块 / 出货位闸口 / 交接处 / 巷道槽位都是 2×2 结构。
   // 闸口与巷道槽位转成伪输送块参与走向判定（锚点优先取真实格的 conveyorAnchor），
@@ -1091,6 +1128,7 @@ function Simulation3DScene({
   const palletArmId = palletTransport?.armId
   const palletPickupCellId = palletTransport?.pickupCellId
   const palletDropoffCellId = palletTransport?.dropoffCellId
+  const palletUsesUpperDeck = palletTransport?.route[0]?.deck === 'upper'
   // 机械臂底座节点（picking_arm）覆盖布局计划的安装位：编辑器里把底座放哪里，机械臂就装在哪里；
   // 拣货位节点（picking_handoff）覆盖取货点：四向车实际停在该节点所在格（后端 handoffCellId 同源）。
   // 放置区（drop_zone）纵向中列：侧臂把出货口的货箱放到这一列的对应行上。
@@ -1130,10 +1168,13 @@ function Simulation3DScene({
             primary: false,
             layout: {
               ...template, armId: node.id, installation,
-              kinematics: {
+              kinematics: palletUsesUpperDeck ? template.kinematics : {
                 ...template.kinematics,
-                upperArmLength: 1.2, forearmLength: 2.6, shoulderHeight: 1.6,
-                safeTravelHeight: 2.7, linkCollisionRadius: 0.15,
+                upperArmLength: 1.2,
+                forearmLength: 2.6,
+                shoulderHeight: 1.6,
+                safeTravelHeight: 2.7,
+                linkCollisionRadius: 0.15,
               },
               pickup: {
                 ...template.pickup,
@@ -1144,8 +1185,8 @@ function Simulation3DScene({
               dropoff: {
                 ...template.dropoff,
                 topologyCellId: palletDropoffCellId,
-                position: { ...template.dropoff.position, row: dropoff.row, col: dropoff.col, level: 1 },
-                beltHeight: CONVEYOR_DECK_BASE,
+                position: { ...template.dropoff.position, row: dropoff.row, col: dropoff.col, level: palletUsesUpperDeck ? 2 : 1 },
+                beltHeight: palletUsesUpperDeck ? upperBeltHeight : CONVEYOR_DECK_BASE,
               },
               previewConveyorPath: [],
             },
@@ -1189,7 +1230,7 @@ function Simulation3DScene({
         },
       }
     })
-  }, [armHandoffNode, armNodes, dropZoneCol, layoutPlan, palletArmId, palletDropoffCellId, palletPickupCellId, topology.cells])
+  }, [armHandoffNode, armNodes, dropZoneCol, layoutPlan, palletArmId, palletDropoffCellId, palletPickupCellId, palletUsesUpperDeck, topology.cells])
   // 取货点世界坐标：与四向车停靠位置同一套 2×2 吸附算法，保证机械臂抓的是车上的货。
   const armPickupWorld = useMemo(() => {
     if (!armHandoffNode) return undefined
@@ -1262,17 +1303,13 @@ function Simulation3DScene({
         box.beltHeight ?? (level > 1 ? CONVEYOR_DECK_BASE + (level - 1) * CONVEYOR_DECK_STEP : CONVEYOR_GROUND_BELT_Y),
       )
       const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, level, spec.cols, spec.rows)
-      const [offsetX, offsetZ] = endpointSlots[index] ?? [0, 0]
-      // 终点快照沿用运输中货箱的类别色：箱子到站不换色，只切换数据所有权。
-      const beltColor = GOODS_CATEGORY_COLORS[box.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+      const [offsetX, offsetZ] = uniqueBoxes.filter(([, other]) => other.cellId === box.cellId).length > 1
+        ? (endpointSlots[index] ?? [0, 0])
+        : [0, 0]
       return {
-        key: `arm-belt-${taskKey}`,
+        key: `${taskKey}-0-transport`,
         position: [x + offsetX, beltBase + 0.16, z + offsetZ] as [number, number, number],
-        // 与运输中的 DeliveredBox 使用相同尺寸，完成瞬间只切换数据所有权，
-        // 不会像在终点又突然生成一只更大的黄色方块。
-        size: CONVEYOR_CARGO_SIZE,
-        color: beltColor,
-        emissive: beltColor,
+        color: OUTBOUND_CARTON_MATERIAL.color,
       }
     }).filter((box): box is NonNullable<typeof box> => box !== null)
   }, [armBeltBoxes, pickingArmPreviewVisible, spec.cols, spec.rows])
@@ -1337,7 +1374,6 @@ function Simulation3DScene({
       perCell.set(cellKey, slotIndex + 1)
       const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, 1, spec.cols, spec.rows)
       const [offsetX, offsetZ] = slots[slotIndex % slots.length]
-      const color = GOODS_CATEGORY_COLORS[box.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
       return {
         key: `arm-drop-${box.taskId ?? index}-${slotIndex}`,
         // 放置区每个落位默认有空托盘，货箱要抬到托盘面上，不能陷进托盘里。
@@ -1347,9 +1383,6 @@ function Simulation3DScene({
             + Math.floor(slotIndex / slots.length) * 0.3,
           z + offsetZ,
         ] as [number, number, number],
-        size: CONVEYOR_CARGO_SIZE,
-        color,
-        emissive: color,
       }
     }).filter((box): box is NonNullable<typeof box> => box !== null)
   }, [armDropBoxes, spec.cols, spec.rows])
@@ -1448,7 +1481,7 @@ function Simulation3DScene({
       hold: boolean
       skipRise: boolean
       smoothFollow?: boolean
-      travelSpeed?: number
+      blockTrack?: ConveyorBlockTrack
     }[] = []
 
     const nearestConveyor = (row: number, col: number, floor: string, preferGround = false) => {
@@ -1868,40 +1901,27 @@ function Simulation3DScene({
           worldZ(trailRow, rows) - CELL / 2,
         ]
       }
-      // 机械臂货箱与 CTU 货箱共用完整路径播放器。后端 route 只保存
-      // 2×2 模块锚点，因此在相邻模块中心之间补入共同边界点，形成
-      // “模块中心 → 模块出口/下一模块入口 → 下一模块中心”的连续路径。
-      const armTransportCenters = task.phase === 'arm_conveyor_delivery'
-        ? (activeTransport?.route ?? []).flatMap((blockId) => {
-            const parts = blockId.split(':')
-            if (parts.length < 4) return []
-            const floor = parts[parts.length - 4]
-            const row = Number(parts[parts.length - 3])
-            const col = Number(parts[parts.length - 2])
-            const deck = parts[parts.length - 1]
-            if (!Number.isFinite(row) || !Number.isFinite(col)) return []
-            const routeFloorIndex = Math.max(0, spec.floors.indexOf(floor))
-            const y = routeFloorIndex * FLOOR_HEIGHT
-              + CONVEYOR_DECK_BASE
-              + 0.16
-              + (deck === 'upper' ? CONVEYOR_DECK_STEP : 0)
-            return [[
-              worldX(col, cols) + CELL / 2,
-              y,
-              worldZ(row, rows) - CELL / 2,
-            ] as [number, number, number]]
-          })
+      const armRoute = task.phase === 'arm_conveyor_delivery' && task.taskKind !== 'picking_return'
+        ? activeTransport?.route ?? []
         : []
-      const armTransportPath = armTransportCenters.flatMap((center, index) => {
-        if (index === 0) return [center]
-        const previous = armTransportCenters[index - 1]
-        const boundary: [number, number, number] = [
-          (previous[0] + center[0]) / 2,
-          (previous[1] + center[1]) / 2,
-          (previous[2] + center[2]) / 2,
-        ]
-        return [boundary, center]
+      // Use the backend's route so a skipped tick still follows each bend in the belt.
+      const armTransportCenters = armRoute.flatMap((blockId) => {
+        const parts = blockId.split(':')
+        if (parts.length !== 4) return []
+        const [floor, rowValue, colValue, deck] = parts
+        const row = Number(rowValue)
+        const col = Number(colValue)
+        if (!Number.isFinite(row) || !Number.isFinite(col)) return []
+        const routeFloorIndex = Math.max(0, spec.floors.indexOf(floor))
+        const y = routeFloorIndex * FLOOR_HEIGHT
+          + CONVEYOR_DECK_BASE + 0.16
+          + (deck === 'upper' ? CONVEYOR_DECK_STEP : 0)
+        return [[worldX(col, cols) + CELL / 2, y, worldZ(row, rows) - CELL / 2] as [number, number, number]]
       })
+      const trackedBelts = activeTransport && Number.isInteger(activeTransport.index)
+        && armTransportCenters.length > 1 && armTransportCenters.length === armRoute.length
+      const outboundCarton = task.phase === 'arm_conveyor_delivery' || Boolean(task.armPlacedCellId)
+        || task.taskKind === 'placed_goods_delivery' || task.robotType === 'ctu' || robot?.type === 'ctu'
       slots.forEach((line, lineIndex) => {
         const index = counters.get(anchorKey) ?? 0
         counters.set(anchorKey, index + 1)
@@ -1918,39 +1938,21 @@ function Simulation3DScene({
         ]
         const boxColor = task.taskKind === 'picking_return'
           ? RETURN_BOX_COLOR
-          : task.taskKind === 'placed_goods_delivery'
-          ? GOODS_CATEGORY_COLORS[task.transitGoods?.[0]?.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
-          : task.phase === 'arm_conveyor_delivery' || Boolean(task.armPlacedCellId)
-          ? CTU_GOODS_COLOR
-          : task.robotType === 'ctu' || robot?.type === 'ctu'
-          ? CTU_GOODS_COLOR
-          : GOODS_CATEGORY_COLORS[line.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
+          : outboundCarton
+            ? OUTBOUND_CARTON_MATERIAL.color
+            : GOODS_CATEGORY_COLORS[line.largeCategory ?? ''] ?? GOODS_DEFAULT_COLOR
         // 同任务多箱：一箱一箱排队（后箱落后前箱一个模块），不再并排偏移
         if (transportPoint) {
-          // 拣货分裂的 fwd/回库子任务与拣货链路同线同速（1 块/tick），
-          // 使用块级平滑跟随；dock 机械臂线保持固定带速连续路径播放。
-          if (
-            task.phase === 'arm_conveyor_delivery'
-            && armTransportPath.length > 1
-            && task.taskKind !== 'placed_goods_delivery'
-            && task.taskKind !== 'picking_return'
-          ) {
-            const continuousPath = armTransportPath.map((point) => [
-              point[0],
-              point[1],
-              point[2],
-            ] as [number, number, number])
+          if (trackedBelts) {
+            const blockIndex = Math.max(0, Math.min(armTransportCenters.length - 1, activeTransport.index - lineIndex))
             boxes.push({
               key: `${task.id}-${lineIndex}-transport`,
-              position: continuousPath[0],
-              path: continuousPath,
+              position: armTransportCenters[blockIndex],
+              path: [],
               color: boxColor,
               hold: true,
               skipRise: true,
-              smoothFollow: false,
-              // 与 CTU 货箱使用完全相同的固定输送速度，不再随 1×/2×/4×
-              // 仿真 tick 被成倍放大。
-              travelSpeed: DELIVERY_SPEED,
+              blockTrack: { points: armTransportCenters, index: blockIndex },
             })
             return
           }
@@ -2129,7 +2131,10 @@ function Simulation3DScene({
           rows={spec.rows}
         />
       )}
-      {activeFloor === '1F' && palletConveyorItems.filter((item) => item.status === 'moving').map((item) => (
+      {activeFloor === '1F' && palletConveyorItems.filter((item) => (
+        palletBeltPositions.has(`${item.currentRow}:${item.currentCol}`)
+        && (item.status === 'moving' || item.status === 'waiting_arm' || item.status === 'being_picked')
+      )).map((item) => (
         <RobotGroup key={item.id} paused={paused} transitionDuration={transitionDuration * 3} position={[
           worldX(item.currentCol, spec.cols) + CELL / 2,
           CONVEYOR_DECK_BASE + (item.deck === 'upper' ? CONVEYOR_DECK_STEP : 0),
@@ -2140,9 +2145,9 @@ function Simulation3DScene({
       ))}
       {activeFloor === '1F' && palletDropZone && palletDropZone.count > 0 && (
         <group position={[
-          worldX(palletStorageZone ? palletStorageZone.x + palletStorageZone.width - 1 : palletDropZone.col, spec.cols),
+          worldX(!palletDropZone.armId && palletStorageZone ? palletStorageZone.x + palletStorageZone.width - 1 : palletDropZone.col, spec.cols),
           FLOOR_TOP_SURFACE_Y,
-          worldZ(palletStorageZone ? palletStorageZone.y + Math.min(3, palletStorageZone.height - 1) : palletDropZone.row, spec.rows),
+          worldZ(!palletDropZone.armId && palletStorageZone ? palletStorageZone.y + Math.min(3, palletStorageZone.height - 1) : palletDropZone.row, spec.rows),
         ]}>
           <PalletStackModel count={palletDropZone.count} />
           <Html position={[0, 1.05, 0]} center distanceFactor={10}>
@@ -2203,9 +2208,13 @@ function Simulation3DScene({
         />
       ))}
 
-      {deliveryStage.boxes.map((box) => (
+      {/* Keep the in-flight mesh mounted as its task hands the carton to the outlet snapshot. */}
+      {[...deliveryStage.boxes, ...armBeltVisuals.map((box): (typeof deliveryStage.boxes)[number] & { atOutlet: true } => ({
+        ...box, path: [box.position], hold: true, skipRise: true, atOutlet: true,
+      }))].map((box) => (
         <DeliveredBox
           key={box.key}
+          name={box.key}
           position={box.position}
           color={box.color}
           path={box.path}
@@ -2216,7 +2225,9 @@ function Simulation3DScene({
           hold={box.hold}
           skipRise={box.skipRise}
           smoothFollow={box.smoothFollow}
-          travelSpeed={box.travelSpeed}
+          blockTrack={box.blockTrack}
+          atOutlet={'atOutlet' in box}
+          tickInterval={transitionDuration}
           paused={paused}
         />
       ))}
@@ -2269,18 +2280,26 @@ function Simulation3DScene({
       {activeFloor === '1F'
         ? armLayouts.map((arm) => {
             const isPalletArm = arm.id === palletArmId
-            const palletPlayback = isPalletArm && palletArm?.status === 'busy' && palletArm.stage
-              && palletArm.stageStartedTick != null && palletArm.stageDurationTicks
+            const secondary = arm.primary ? undefined : secondaryArmStates.get(arm.id)
+            const secondaryPallet = secondary?.cargo?.kind === 'empty_pallet'
+            const palletMotion = isPalletArm ? palletArm : secondaryPallet ? secondary : undefined
+            const palletStage = palletMotion?.stage
+            const palletPlayback: ComponentProps<typeof PickingArmHandoff>['palletPlayback'] =
+              palletMotion?.status === 'busy' && (palletStage === 'pick' || palletStage === 'place')
+              && palletMotion.stageStartedTick != null && palletMotion.stageDurationTicks
               ? {
-                  stage: palletArm.stage,
-                  count: palletArm.cargo?.qty ?? 1,
+                  stage: palletStage,
+                  count: palletMotion.cargo?.qty ?? 1,
                   tick: simulationTick,
                   tickInterval: transitionDuration,
-                  stageStartedTick: palletArm.stageStartedTick,
-                  stageDurationTicks: palletArm.stageDurationTicks,
+                  stageStartedTick: palletMotion.stageStartedTick,
+                  stageDurationTicks: palletMotion.stageDurationTicks,
                 }
               : undefined
-            const secondary = arm.primary ? undefined : secondaryArmStates.get(arm.id)
+            const palletDropCell = secondaryPallet && secondary?.dropCellId ? parseCellId(secondary.dropCellId) : null
+            const dropoffWorld = palletDropCell
+              ? [worldX(palletDropCell.col, spec.cols), worldZ(palletDropCell.row, spec.rows)] as [number, number]
+              : armCellWorld(isPalletArm ? palletDropoffCellId : secondary?.dropCellId)
             const secondaryBusy = Boolean(secondary?.cargoToken)
             const secondaryCargo: PickingArmCargo = {
               toteId: secondary?.taskId ?? `${arm.id}-idle`,
@@ -2292,7 +2311,9 @@ function Simulation3DScene({
               <PickingArmHandoff
                 key={`${arm.id}:${arm.primary ? armPlaybackKey : isPalletArm ? 'pallet' : secondary?.cargoToken ?? 'idle'}`}
                 topology={topology}
-                layout={arm.layout}
+                layout={secondaryPallet ? {
+                  ...arm.layout, dropoff: { ...arm.layout.dropoff, beltHeight: FLOOR_TOP_SURFACE_Y },
+                } : arm.layout}
                 cargo={arm.primary ? armDisplayedCargo : secondaryCargo}
                 preview={arm.primary && armPreviewing}
                 previewCycleToken={pickingArmPreviewCycleToken}
@@ -2305,7 +2326,7 @@ function Simulation3DScene({
                     : (secondaryArmSignals.get(arm.id) ?? ARM_IDLE_SIGNALS)
                 }
                 pickupOverrideXZ={arm.primary ? armPickupWorld : isPalletArm ? palletPickupWorld : armCellWorld(secondary?.portCellId)}
-                dropoffOverrideXZ={arm.primary ? undefined : armCellWorld(isPalletArm ? palletDropoffCellId : secondary?.dropCellId)}
+                dropoffOverrideXZ={arm.primary ? undefined : dropoffWorld}
                 variant={arm.primary && armLive ? 'live' : arm.primary && armPreviewing ? 'preview' : secondaryBusy || palletPlayback ? 'live' : 'idle'}
                 palletPlayback={palletPlayback}
               />
@@ -2313,17 +2334,10 @@ function Simulation3DScene({
           })
         : null}
 
-      {armBeltVisuals.map((box) => (
-        <mesh key={box.key} position={box.position} castShadow>
-          <boxGeometry args={box.size} />
-          <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />
-        </mesh>
-      ))}
-
       {armDropVisuals.map((box) => (
         <mesh key={box.key} position={box.position} castShadow>
-          <boxGeometry args={box.size} />
-          <meshStandardMaterial color={box.color} emissive={box.emissive} emissiveIntensity={0.14} roughness={0.5} metalness={0.1} />
+          <boxGeometry args={CONVEYOR_CARGO_SIZE} />
+          <meshStandardMaterial {...OUTBOUND_CARTON_MATERIAL} />
         </mesh>
       ))}
 

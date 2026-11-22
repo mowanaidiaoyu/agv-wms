@@ -104,8 +104,8 @@ export function palletArmPlaybackPose(
   progress: number,
 ): PickingArmState {
   const segments = stage === 'pick'
-    ? ([['approach', 0.8], ['grip', 1]] as const)
-    : ([['lift', 0.22], ['rotate', 0.6], ['place', 0.92], ['release', 1]] as const)
+    ? ([['approach', 0.64], ['grip', 1]] as const)
+    : ([['lift', 0.22], ['rotate', 0.55], ['place', 0.82], ['release', 1]] as const)
   const p = Math.max(0, Math.min(1, progress))
   let start = 0
   for (const [phase, end] of segments) {

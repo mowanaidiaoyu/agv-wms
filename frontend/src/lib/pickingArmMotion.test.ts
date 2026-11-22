@@ -48,8 +48,10 @@ function step(
 
 describe('picking arm handoff motion', () => {
   it('moves the pallet stack to the gripper only after the server completes pickup', () => {
+    expect(palletArmPlaybackPose('pick', 0.75).phase).toBe('grip')
     expect(palletArmPlaybackPose('pick', 1)).toMatchObject({ phase: 'grip', totePlacement: 'none' })
     expect(palletArmPlaybackPose('place', 0)).toMatchObject({ phase: 'lift', totePlacement: 'gripper' })
+    expect(palletArmPlaybackPose('place', 0.9)).toMatchObject({ phase: 'release', totePlacement: 'gripper' })
     expect(pickingArmPose(palletArmPlaybackPose('place', 1), points).target).toEqual(points.dropoff)
   })
 

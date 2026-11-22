@@ -77,6 +77,13 @@ export const GOODS_CATEGORY_COLORS: Record<string, string> = {
 }
 
 export const GOODS_DEFAULT_COLOR = '#94a3b8'
+export const OUTBOUND_CARTON_MATERIAL = {
+  color: '#fde047',
+  emissive: '#ca8a04',
+  emissiveIntensity: 0.24,
+  roughness: 0.52,
+  metalness: 0.1,
+} as const
 
 /**
  * Building floors and Shuttle rack levels are independent coordinates.

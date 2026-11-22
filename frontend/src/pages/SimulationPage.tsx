@@ -823,10 +823,10 @@ export function SimulationPage() {
           </span>
           <span><small>Tick</small><strong>{currentState?.tick ?? 0}</strong></span>
           <span><small>事件</small><LiveEventCount persistedCount={currentState?.eventCount} /></span>
-          <span title="四向车库货位取空后的空托盘，堆叠在 (76,35) 输送线上">
+          <span title="(76,35) 回收区当前待取的空托盘总数">
             <small>空托盘</small>
             <strong>
-              {currentState?.emptyPalletStack?.count ?? 0}/{currentState?.emptyPalletStack?.capacity ?? 6}
+              {Math.max(currentState?.emptyPalletStack?.count ?? 0, currentState?.emptyPalletStack?.stacks?.length ?? 0)}
             </strong>
           </span>
         </div>

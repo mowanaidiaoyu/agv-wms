@@ -18,7 +18,7 @@ import {
   solvePickingArmJoints,
   type CollisionBox,
 } from '../../lib/pickingArmSafety'
-import { worldX, worldZ } from '../../lib/topology3d'
+import { OUTBOUND_CARTON_MATERIAL, worldX, worldZ } from '../../lib/topology3d'
 import type { PickingArmLayout, TopologyPayload } from '../../types'
 import { PALLET_LAYER_HEIGHT, PalletStackModel } from './PalletStackModel'
 
@@ -57,6 +57,15 @@ export interface PickingArmHandoffProps {
 
 const TOTE_HEIGHT = 0.3
 const PALLET_GRIP_CLEARANCE = 0.16
+const UPPER_BELT_PALLET_GRIP_CLEARANCE = 0.24
+const PALLET_PHASE_LABELS: Partial<Record<PickingArmPhase, string>> = {
+  approach: '接近托盘',
+  grip: '夹紧托盘',
+  lift: '抬起托盘',
+  rotate: '转运托盘',
+  place: '下降到放置点',
+  release: '松开夹爪',
+}
 
 function OrderTote({ cargo, status }: { cargo: PickingArmCargo; status: string }) {
   return (
@@ -64,13 +73,7 @@ function OrderTote({ cargo, status }: { cargo: PickingArmCargo; status: string }
       <mesh castShadow receiveShadow>
         {/* 与四向车载箱、输送中货箱使用同一套黄色货箱外观，保证交接连续可见。 */}
         <boxGeometry args={[0.5, TOTE_HEIGHT, 0.42]} />
-        <meshStandardMaterial
-          color="#fde047"
-          emissive="#ca8a04"
-          emissiveIntensity={0.24}
-          roughness={0.52}
-          metalness={0.1}
-        />
+        <meshStandardMaterial {...OUTBOUND_CARTON_MATERIAL} />
       </mesh>
       <mesh position={[0, 0.04, 0.217]}>
         <boxGeometry args={[0.4, 0.14, 0.012]} />
@@ -124,8 +127,14 @@ export function PickingArmHandoff({
     worldZ(layout.installation.row, rows),
   ], [cols, layout.installation.col, layout.installation.row, layout.mountHeight, rows])
   const palletCount = palletPlayback?.count ?? 0
-  const gripOffset = palletCount > 0
-    ? palletCount * PALLET_LAYER_HEIGHT + PALLET_GRIP_CLEARANCE
+  const palletGrip = palletCount > 0
+  const underUpperDeck = palletGrip
+    && layout.pickup.position.level === 1 && layout.dropoff.position.level === 1
+  const palletGripClearance = layout.pickup.position.level === 2 || layout.dropoff.position.level === 2
+    ? UPPER_BELT_PALLET_GRIP_CLEARANCE
+    : PALLET_GRIP_CLEARANCE
+  const gripOffset = palletGrip
+    ? palletCount * PALLET_LAYER_HEIGHT + palletGripClearance
     : TOTE_HEIGHT + 0.18
   const pickup = useMemo<[number, number, number]>(() => pickupOverrideXZ
     ? [
@@ -158,11 +167,11 @@ export function PickingArmHandoff({
     dropLift: [
       dropoff[0] * 0.55,
       // Approach the lower deck from the side, below its upper return belt.
-      palletCount > 0 ? dropoff[1] - 0.03 : layout.kinematics.safeTravelHeight,
+      underUpperDeck ? dropoff[1] - 0.03 : layout.kinematics.safeTravelHeight,
       dropoff[2] * 0.55,
     ] as [number, number, number],
     dropoff,
-  }), [dropoff, layout.kinematics.safeTravelHeight, palletCount, pickup])
+  }), [dropoff, layout.kinematics.safeTravelHeight, pickup, underUpperDeck])
   const collisionObstacles = useMemo<CollisionBox[]>(() => topology.cells.flatMap((cell) => {
     if (cell.type !== 'conveyor') return []
     const x = worldX(cell.col, cols) - base[0]
@@ -255,8 +264,9 @@ export function PickingArmHandoff({
     if (palletPlayback) {
       if (palletClock.current.tick !== palletPlayback.tick) {
         palletClock.current = { tick: palletPlayback.tick, elapsed: 0 }
+      } else if (!paused) {
+        palletClock.current.elapsed += delta
       }
-      if (!paused) palletClock.current.elapsed += delta
     }
     const candidateState = palletPlayback ? palletArmPlaybackPose(
       palletPlayback.stage,
@@ -308,9 +318,12 @@ export function PickingArmHandoff({
     if (waistRef.current) waistRef.current.rotation.y = joints.yaw
     if (shoulderRef.current) shoulderRef.current.rotation.z = joints.shoulder
     if (elbowRef.current) elbowRef.current.rotation.z = joints.elbow
-    if (wristRef.current) wristRef.current.rotation.z = -(joints.shoulder + joints.elbow)
-    if (leftFingerRef.current) leftFingerRef.current.position.y = pose.gripperGap
-    if (rightFingerRef.current) rightFingerRef.current.position.y = -pose.gripperGap
+    if (wristRef.current) {
+      wristRef.current.rotation.z = -(joints.shoulder + joints.elbow) - (palletGrip ? Math.PI / 2 : 0)
+    }
+    const gripperGap = palletGrip ? 0.4 + (pose.gripperGap - 0.07) * 0.8 : pose.gripperGap
+    if (leftFingerRef.current) leftFingerRef.current.position.y = gripperGap
+    if (rightFingerRef.current) rightFingerRef.current.position.y = -gripperGap
 
     const tote = toteRef.current
     if (tote) {
@@ -389,16 +402,16 @@ export function PickingArmHandoff({
                 <cylinderGeometry args={[0.16, 0.16, 0.3, 18]} />
                 <meshStandardMaterial color="#374151" roughness={0.3} metalness={0.75} />
               </mesh>
-              <mesh position={[0.18, 0, 0]} castShadow>
-                <boxGeometry args={[0.36, 0.18, 0.28]} />
+              <mesh position={[palletGrip ? 0.1 : 0.18, 0, 0]} castShadow>
+                <boxGeometry args={palletGrip ? [0.2, 0.8, 0.28] : [0.36, 0.18, 0.28]} />
                 <meshStandardMaterial color="#111827" roughness={0.32} metalness={0.7} />
               </mesh>
-              <mesh ref={leftFingerRef} position={[0.35, 0.24, 0]} castShadow>
-                <boxGeometry args={[0.28, 0.08, 0.08]} />
+              <mesh ref={leftFingerRef} position={[palletGrip ? 0.15 : 0.35, 0.24, 0]} castShadow>
+                <boxGeometry args={palletGrip ? [0.15, 0.09, 0.12] : [0.28, 0.08, 0.08]} />
                 <meshStandardMaterial color="#9ca3af" metalness={0.82} roughness={0.25} />
               </mesh>
-              <mesh ref={rightFingerRef} position={[0.35, -0.24, 0]} castShadow>
-                <boxGeometry args={[0.28, 0.08, 0.08]} />
+              <mesh ref={rightFingerRef} position={[palletGrip ? 0.15 : 0.35, -0.24, 0]} castShadow>
+                <boxGeometry args={palletGrip ? [0.15, 0.09, 0.12] : [0.28, 0.08, 0.08]} />
                 <meshStandardMaterial color="#9ca3af" metalness={0.82} roughness={0.25} />
               </mesh>
             </group>
@@ -415,7 +428,7 @@ export function PickingArmHandoff({
         <div className="picking-arm-device-label">
           <strong>{layout.armId}</strong>
           <span>{palletPlayback
-            ? `${palletPlayback.stage === 'pick' ? '抓取' : '放置'} · ${palletCount} 个空托盘`
+            ? `${PALLET_PHASE_LABELS[phase] ?? (palletPlayback.stage === 'pick' ? '抓取' : '放置')} · ${palletCount} 个空托盘`
             : variant === 'preview' ? `预览 · ${phase}` : variant === 'live' ? `运行中 · ${phase}` : `待机 · ${phase}`}</span>
           {!palletPlayback && <span>{cargoPlaybackState}</span>}
           {collisionMessage ? <span className="danger">碰撞阻止：{collisionMessage}</span> : null}
