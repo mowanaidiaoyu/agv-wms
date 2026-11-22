@@ -45,6 +45,7 @@ import type {
   SimulationAlert,
   SimulationOrder,
   SimulationOrderInput,
+  SimulationState,
 } from '../types'
 
 const Simulation3DScene = lazy(() => import('../components/topology/Simulation3DScene'))
@@ -1213,7 +1214,9 @@ export function SimulationPage() {
                 </div>
                 <div className="simulation-task-focus-goods">
                   <span>{focusLine?.skuName || focusLine?.skuId || '前往出库交付点'}</span>
-                  <small>{focusRobot ? `车载 ${focusRobot.load}/${focusRobot.capacity} 箱` : '等待设备接单'}</small>
+                  <small>{focusRobot?.carrying?.some((cargo) => cargo.kind === 'empty_pallet')
+                    ? `车载 ${focusRobot.load} 个空托盘`
+                    : focusRobot ? `车载 ${focusRobot.load}/${focusRobot.capacity} 箱` : '等待设备接单'}</small>
                 </div>
               </div>
             ) : null}
@@ -1268,6 +1271,11 @@ export function SimulationPage() {
                     armBeltBoxes={currentState?.armBeltBoxes ?? []}
                     emptyPalletStack={currentState?.emptyPalletStack ?? null}
                     palletDocks={currentState?.palletDocks ?? DEFAULT_PALLET_DOCKS}
+                    palletTransport={currentState?.palletTransport}
+                    palletArm={currentState?.palletArm}
+                    palletConveyorItems={currentState?.palletConveyorItems}
+                    palletDropZone={currentState?.palletDropZone}
+                    simulationTick={currentState?.tick}
                     armSecondaryRuntime={currentState?.pickingArms ?? []}
                     armDropBoxes={currentState?.armDropBoxes ?? []}
                     simulationActive={simulationActive}

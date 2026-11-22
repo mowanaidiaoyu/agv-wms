@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import type { Group } from 'three'
 import type { GoodsSlot } from '../../types'
+import { PalletStackModel } from './PalletStackModel'
 
 const GOODS_COLOR = '#fde047'
 const GOODS_EMISSIVE = '#ca8a04'
@@ -23,7 +24,9 @@ export function ShuttleCartModel({
 }) {
   const platformRef = useRef<Group>(null)
   const invalidate = useThree((state) => state.invalidate)
-  const carryingPallet = Boolean(carrying?.some((item) => item.kind === 'empty_pallet'))
+  const palletCount = (carrying ?? []).reduce(
+    (total, item) => total + (item.kind === 'empty_pallet' ? (item.qty ?? 1) : 0), 0,
+  )
   // 托盘上的余货：机械臂只取走订单要的箱，剩下的货随托盘回库，必须仍然可见。
   const palletGoods = (carrying ?? []).filter((item) => item.kind === 'pallet_goods')
   const loaded = load > 0 || Boolean(carrying?.length)
@@ -96,11 +99,10 @@ export function ShuttleCartModel({
           <meshStandardMaterial color="#cbd5e1" roughness={0.32} metalness={0.72} />
         </RoundedBox>
         {loaded ? (
-          carryingPallet ? (
-            <mesh position={[0, 0.1, 0]} castShadow>
-              <boxGeometry args={[1.1, 0.14, 1.1]} />
-              <meshStandardMaterial color={PALLET_COLOR} roughness={0.72} metalness={0.16} />
-            </mesh>
+          palletCount > 0 ? (
+            <group position={[0, 0.07, 0]}>
+              <PalletStackModel count={palletCount} />
+            </group>
           ) : palletGoods.length > 0 ? (
             <group>
               <mesh position={[0, 0.1, 0]} castShadow>

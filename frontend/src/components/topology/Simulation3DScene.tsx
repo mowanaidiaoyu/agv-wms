@@ -8,6 +8,7 @@ import { TransportLayoutPreview } from './TransportLayoutPreview'
 import { PickingArmHandoff, type PickingArmCargo } from './PickingArmHandoff'
 import type { PickingArmSignals } from '../../lib/pickingArmMotion'
 import { ShuttleCartModel } from './ShuttleCartModel'
+import { PalletStackModel, SHUTTLE_PALLET_BASE_Y } from './PalletStackModel'
 import {
   CELL,
   CONVEYOR_DECK_BASE,
@@ -92,6 +93,11 @@ export type Simulation3DSceneProps = {
   emptyPalletStack?: SimulationState['emptyPalletStack']
   /** 5 个出货口放置区默认承载的空托盘（state.palletDocks，键 = 出货口行号） */
   palletDocks?: SimulationState['palletDocks']
+  palletTransport?: SimulationState['palletTransport']
+  palletArm?: SimulationState['palletArm']
+  palletConveyorItems?: SimulationState['palletConveyorItems']
+  palletDropZone?: SimulationState['palletDropZone']
+  simulationTick?: number
 }
 
 const CTU_GOODS_COLOR = '#fde047'
@@ -943,20 +949,14 @@ function EmptyPalletStackView({
   // (76,35) 是 2×2 地面输送块的锚点格：块中心 = 格中心 + 半格偏移。
   const x = worldX(cell.col, cols) + CELL / 2
   const z = worldZ(cell.row, rows) - CELL / 2
-  const palletH = PALLET_THICKNESS
   return (
     <group position={[x, CONVEYOR_GROUND_BELT_Y, z]}>
-      {Array.from({ length: count }, (_, index) => (
-        <mesh key={index} position={[0, palletH / 2 + index * (palletH + 0.01), 0]}>
-          <boxGeometry args={[1.1, palletH, 1.1]} />
-          <meshStandardMaterial color="#b45309" roughness={0.72} metalness={0.16} />
-        </mesh>
-      ))}
+      <PalletStackModel count={count} />
     </group>
   )
 }
 function Simulation3DScene({
-  topology,
+  topology: baseTopology,
   goods,
   robots,
   tasks,
@@ -991,7 +991,20 @@ function Simulation3DScene({
   speedMultiplier = 1,
   emptyPalletStack = null,
   palletDocks = null,
+  palletTransport = null,
+  palletArm = null,
+  palletConveyorItems = [],
+  palletDropZone = null,
+  simulationTick = 0,
 }: Simulation3DSceneProps) {
+  // Keep the layout reference stable across simulation ticks.
+  const palletConnectorKey = JSON.stringify(palletTransport?.conveyorCells ?? [])
+  const topology = useMemo(() => {
+    const cells = JSON.parse(palletConnectorKey) as TopologyPayload['cells']
+    if (!cells.length) return baseTopology
+    const replaced = new Set(cells.map((cell) => cell.id))
+    return { ...baseTopology, cells: [...baseTopology.cells.filter((cell) => !replaced.has(cell.id)), ...cells] }
+  }, [baseTopology, palletConnectorKey])
   // 拓扑层与高频动态状态彻底分离：机器人 tick 不再重建数万件货架构件。
   const spec = useMemo(() => buildSceneSpec(topology), [topology])
 
@@ -1075,6 +1088,9 @@ function Simulation3DScene({
   const armLive = Boolean(armRuntime?.taskId)
   const armNodes = useMemo(() => topology.nodes.filter((node) => node.type === 'picking_arm'), [topology])
   const armHandoffNode = useMemo(() => topology.nodes.find((node) => node.type === 'picking_handoff'), [topology])
+  const palletArmId = palletTransport?.armId
+  const palletPickupCellId = palletTransport?.pickupCellId
+  const palletDropoffCellId = palletTransport?.dropoffCellId
   // 机械臂底座节点（picking_arm）覆盖布局计划的安装位：编辑器里把底座放哪里，机械臂就装在哪里；
   // 拣货位节点（picking_handoff）覆盖取货点：四向车实际停在该节点所在格（后端 handoffCellId 同源）。
   // 放置区（drop_zone）纵向中列：侧臂把出货口的货箱放到这一列的对应行上。
@@ -1082,6 +1098,7 @@ function Simulation3DScene({
     const dropZone = topology.zones.find((zone) => zone.type === 'drop_zone')
     return dropZone ? dropZone.x + Math.floor(dropZone.width / 2) : 67
   }, [topology.zones])
+  const palletStorageZone = topology.zones.find((zone) => zone.id === palletTransport?.dropZoneId)
   // 新增的臂没有 picking_handoff，负责把侧向出货口（col 62 上层帽口）的货箱搬进放置区：
   // 取货点 = 最近出货口，放货点 = 放置区内同一行的落位。
   const armLayouts = useMemo(() => {
@@ -1103,6 +1120,37 @@ function Simulation3DScene({
             }
           : template.pickup
         return { id: node.id, primary: true, layout: { ...template, installation, pickup } }
+      }
+      if (node.id === palletArmId && palletPickupCellId && palletDropoffCellId) {
+        const pickup = parseCellId(palletPickupCellId)
+        const dropoff = parseCellId(palletDropoffCellId)
+        if (pickup && dropoff) {
+          return {
+            id: node.id,
+            primary: false,
+            layout: {
+              ...template, armId: node.id, installation,
+              kinematics: {
+                ...template.kinematics,
+                upperArmLength: 1.2, forearmLength: 2.6, shoulderHeight: 1.6,
+                safeTravelHeight: 2.7, linkCollisionRadius: 0.15,
+              },
+              pickup: {
+                ...template.pickup,
+                topologyCellId: palletPickupCellId,
+                position: { ...template.pickup.position, row: pickup.row, col: pickup.col, level: 1 },
+                beltHeight: CONVEYOR_GROUND_BELT_Y + SHUTTLE_PALLET_BASE_Y,
+              },
+              dropoff: {
+                ...template.dropoff,
+                topologyCellId: palletDropoffCellId,
+                position: { ...template.dropoff.position, row: dropoff.row, col: dropoff.col, level: 1 },
+                beltHeight: CONVEYOR_DECK_BASE,
+              },
+              previewConveyorPath: [],
+            },
+          }
+        }
       }
       const nearestPort = portCells.reduce<(typeof portCells)[number] | undefined>((best, cell) => {
         if (!best) return cell
@@ -1141,7 +1189,7 @@ function Simulation3DScene({
         },
       }
     })
-  }, [armHandoffNode, armNodes, dropZoneCol, layoutPlan, topology.cells])
+  }, [armHandoffNode, armNodes, dropZoneCol, layoutPlan, palletArmId, palletDropoffCellId, palletPickupCellId, topology.cells])
   // 取货点世界坐标：与四向车停靠位置同一套 2×2 吸附算法，保证机械臂抓的是车上的货。
   const armPickupWorld = useMemo(() => {
     if (!armHandoffNode) return undefined
@@ -1264,6 +1312,14 @@ function Simulation3DScene({
     const [x, , z] = shuttleTrackWorldPosition(parsed.row, parsed.col, 1, spec.cols, spec.rows)
     return [x, z]
   }, [spec.cols, spec.rows])
+  const palletPickupWorld = useMemo(() => {
+    const cell = palletPickupCellId ? parseCellId(palletPickupCellId) : null
+    if (!cell) return undefined
+    const snap = groundBeltLookup.get(`${cell.row},${cell.col}`)
+    if (!snap) return armCellWorld(palletPickupCellId)
+    const [x, , z] = shuttleGroundSnapPosition(cell.row, cell.col, snap, spec.cols, spec.rows)
+    return [x, z] as [number, number]
+  }, [armCellWorld, groundBeltLookup, palletPickupCellId, spec.cols, spec.rows])
   // 机械臂已搬进放置区的货箱：按落位格渲染，同格多箱用小网格错开。
   const armDropVisuals = useMemo(() => {
     const boxes = (armDropBoxes ?? []).slice(-24)
@@ -1525,7 +1581,7 @@ function Simulation3DScene({
       // 空托盘回收 / 余货回库是库内维护任务，按 lines 兜底会渲染成一个
       // 沿地面输送线滑动后消失的灰白色幽灵箱；托盘本身由
       // EmptyPalletStackView（(76,35) 堆叠）和 ShuttleCartModel（车载）负责。
-      if (task.taskKind === 'empty_pallet_return' || task.taskKind === 'pallet_return_to_lane') continue
+      if (['empty_pallet_return', 'empty_pallet_reposition', 'pallet_return_to_lane'].includes(task.taskKind ?? '')) continue
 
       // 占块门控待上线的子箱：路线首块被前箱占用时不渲染，
       // 前箱前进腾出位置后后箱才出现——避免多个箱重叠在同一块上。
@@ -2073,6 +2129,27 @@ function Simulation3DScene({
           rows={spec.rows}
         />
       )}
+      {activeFloor === '1F' && palletConveyorItems.filter((item) => item.status === 'moving').map((item) => (
+        <RobotGroup key={item.id} paused={paused} transitionDuration={transitionDuration * 3} position={[
+          worldX(item.currentCol, spec.cols) + CELL / 2,
+          CONVEYOR_DECK_BASE + (item.deck === 'upper' ? CONVEYOR_DECK_STEP : 0),
+          worldZ(item.currentRow, spec.rows) - CELL / 2,
+        ]}>
+          <PalletStackModel count={item.palletCount ?? 1} />
+        </RobotGroup>
+      ))}
+      {activeFloor === '1F' && palletDropZone && palletDropZone.count > 0 && (
+        <group position={[
+          worldX(palletStorageZone ? palletStorageZone.x + palletStorageZone.width - 1 : palletDropZone.col, spec.cols),
+          FLOOR_TOP_SURFACE_Y,
+          worldZ(palletStorageZone ? palletStorageZone.y + Math.min(3, palletStorageZone.height - 1) : palletDropZone.row, spec.rows),
+        ]}>
+          <PalletStackModel count={palletDropZone.count} />
+          <Html position={[0, 1.05, 0]} center distanceFactor={10}>
+            <span className="picking-arm-device-label">空托盘 ×{palletDropZone.count}</span>
+          </Html>
+        </group>
+      )}
 
       {/* 放置区托盘格位：基础托盘永远存在。空托盘棕色（#b45309），已承载托盘深灰（#3f3f46）。 */}
       {activeFloor === '1F' &&
@@ -2191,6 +2268,18 @@ function Simulation3DScene({
 
       {activeFloor === '1F'
         ? armLayouts.map((arm) => {
+            const isPalletArm = arm.id === palletArmId
+            const palletPlayback = isPalletArm && palletArm?.status === 'busy' && palletArm.stage
+              && palletArm.stageStartedTick != null && palletArm.stageDurationTicks
+              ? {
+                  stage: palletArm.stage,
+                  count: palletArm.cargo?.qty ?? 1,
+                  tick: simulationTick,
+                  tickInterval: transitionDuration,
+                  stageStartedTick: palletArm.stageStartedTick,
+                  stageDurationTicks: palletArm.stageDurationTicks,
+                }
+              : undefined
             const secondary = arm.primary ? undefined : secondaryArmStates.get(arm.id)
             const secondaryBusy = Boolean(secondary?.cargoToken)
             const secondaryCargo: PickingArmCargo = {
@@ -2201,7 +2290,7 @@ function Simulation3DScene({
             }
             return (
               <PickingArmHandoff
-                key={`${arm.id}:${arm.primary ? armPlaybackKey : secondary?.cargoToken ?? 'idle'}`}
+                key={`${arm.id}:${arm.primary ? armPlaybackKey : isPalletArm ? 'pallet' : secondary?.cargoToken ?? 'idle'}`}
                 topology={topology}
                 layout={arm.layout}
                 cargo={arm.primary ? armDisplayedCargo : secondaryCargo}
@@ -2215,9 +2304,10 @@ function Simulation3DScene({
                     ? (armLive ? armAuthoritativeSignals : ARM_IDLE_SIGNALS)
                     : (secondaryArmSignals.get(arm.id) ?? ARM_IDLE_SIGNALS)
                 }
-                pickupOverrideXZ={arm.primary ? armPickupWorld : armCellWorld(secondary?.portCellId)}
-                dropoffOverrideXZ={arm.primary ? undefined : armCellWorld(secondary?.dropCellId)}
-                variant={arm.primary && armLive ? 'live' : arm.primary && armPreviewing ? 'preview' : secondaryBusy ? 'live' : 'idle'}
+                pickupOverrideXZ={arm.primary ? armPickupWorld : isPalletArm ? palletPickupWorld : armCellWorld(secondary?.portCellId)}
+                dropoffOverrideXZ={arm.primary ? undefined : armCellWorld(isPalletArm ? palletDropoffCellId : secondary?.dropCellId)}
+                variant={arm.primary && armLive ? 'live' : arm.primary && armPreviewing ? 'preview' : secondaryBusy || palletPlayback ? 'live' : 'idle'}
+                palletPlayback={palletPlayback}
               />
             )
           })

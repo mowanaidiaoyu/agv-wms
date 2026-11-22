@@ -4,6 +4,7 @@ import {
   advancePickingArm,
   canDeclarePickingArmDelivery,
   createInitialPickingArmState,
+  palletArmPlaybackPose,
   pickingArmPose,
   resetPickingArmState,
   type PickingArmSignals,
@@ -46,6 +47,12 @@ function step(
 }
 
 describe('picking arm handoff motion', () => {
+  it('moves the pallet stack to the gripper only after the server completes pickup', () => {
+    expect(palletArmPlaybackPose('pick', 1)).toMatchObject({ phase: 'grip', totePlacement: 'none' })
+    expect(palletArmPlaybackPose('place', 0)).toMatchObject({ phase: 'lift', totePlacement: 'gripper' })
+    expect(pickingArmPose(palletArmPlaybackPose('place', 1), points).target).toEqual(points.dropoff)
+  })
+
   it('starts idle with no duplicated tote', () => {
     expect(createInitialPickingArmState()).toMatchObject({
       phase: 'idle',

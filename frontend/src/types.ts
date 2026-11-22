@@ -1543,6 +1543,7 @@ export interface GoodsSlot {
   nodeId: string
   cellId: string
   layer: number
+  depth?: number
   /** 车载物类型：empty_pallet = 空托盘（四向车回收途中），缺省为普通货物 */
   kind?: string | null
   skuId?: string | null
@@ -1596,7 +1597,41 @@ export interface SimulationState {
     overflow: number
   } | null
   /** 5 个出货口放置区的空托盘承载位：键 = 出货口行号，count = 该处空托盘层数。 */
-  palletDocks?: Record<string, { count: number }> | null
+  palletDocks?: Record<string, { count: number; availableEmpty?: number }> | null
+  palletTransport?: {
+    armId: string
+    pickupCellId: string
+    dropoffCellId: string
+    dropZoneId: string
+    route: Array<{ blockId: string; row: number; col: number; deck: ConveyorDeckKey; ground: boolean }>
+    conveyorCells: TopologyCell[]
+  } | null
+  palletArm?: {
+    armId: string
+    status: string
+    stage: 'pick' | 'place' | null
+    stageStartedTick?: number
+    stageDurationTicks?: number
+    taskId: string | null
+    robotId?: string | null
+    cargo?: { kind: string; qty?: number } | null
+  } | null
+  palletConveyorItems?: Array<{
+    id: string
+    currentRow: number
+    currentCol: number
+    deck: ConveyorDeckKey
+    palletCount?: number
+    currentBlockId?: string
+    status: string
+  }>
+  palletDropZone?: {
+    zoneId: string
+    row: number
+    col: number
+    deck: ConveyorDeckKey
+    count: number
+  } | null
   transferInventory?: TransferInventoryBalance[]
   transferEvents?: TransferInventoryEvent[]
   alerts: SimulationAlert[]
@@ -1706,22 +1741,6 @@ export interface SimulationEvent {
   type?: string
   payload: Record<string, unknown>
   created_at?: string
-}
-
-export type MetricImplementationStatus = 'IMPLEMENTED' | 'PARTIAL' | 'UNAVAILABLE'
-export type MetricDataQuality = 'GOOD' | 'DEGRADED' | 'MISSING_SOURCE' | 'SUCCESS_ONLY_SAMPLE' | 'INVALID'
-
-export interface ContractMetric<T = unknown> {
-  metricId: string
-  displayName?: string
-  value: T | null
-  unit: string
-  sampleCount: number | null
-  implementationStatus: MetricImplementationStatus
-  dataQuality: MetricDataQuality | string
-  reason: string | null
-  acceptanceEligible: boolean
-  [key: string]: unknown
 }
 
 export interface TaskMetricSummary {

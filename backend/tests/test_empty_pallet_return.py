@@ -8,14 +8,19 @@ from typing import Any
 from app.services.pathfinding import (
     build_shuttle_lookup,
     cell_id,
+    parse_cell_id,
     shortest_path_shuttle,
     shuttle_servable_slots,
 )
 from app.services.simulation import (
+    EMPTY_PALLET_COLLECT_CELL_ID,
+    EMPTY_PALLET_COLLECT_TASK_KIND,
     EMPTY_PALLET_RETURN_CELL_ID,
     EMPTY_PALLET_TASK_KIND,
     HANDOFF_FIXED_CELL_ID,
     HANDOFF_QUEUE_SLOT_CELL_IDS,
+    PALLET_COLLECT_EXIT_CELL_ID,
+    PALLET_COLLECT_SPUR,
     SimulationService,
 )
 from app.services.simulation_config import build_simulation_config
@@ -69,6 +74,125 @@ def _place_shuttle(runtime, robot, cell: str, layer: int = 1) -> None:
     robot["status"] = "handling"
     robot["carrying"] = []
     robot["load"] = 0
+
+
+def _place_collect_vehicle(runtime, robot, cell: str, *, status: str) -> None:
+    _place_shuttle(runtime, robot, cell)
+    floor, row, col = parse_cell_id(cell)
+    robot.update(currentNode=cell, currentFloor=floor, currentRow=row, currentCol=col, status=status)
+
+
+def _collect_task(service, runtime, carrier):
+    task = service._build_task(
+        runtime.topology, "collect-recovery", "shuttle", "cross_zone",
+        [{"cellId": EMPTY_PALLET_RETURN_CELL_ID, "layer": 1}],
+        EMPTY_PALLET_COLLECT_CELL_ID, False, 3,
+    )
+    task.update(
+        taskKind=EMPTY_PALLET_COLLECT_TASK_KIND, status="in_progress",
+        phase="delivery_to_collect", phaseLabel="送到机械臂入主线点",
+        assignedRobotId=carrier["id"],
+    )
+    carrier.update(currentTaskId=task["id"], carrying=[{"kind": "empty_pallet"}], load=1)
+    runtime.state.update(tasks=[task], orderDriven=True)
+    return task
+
+
+def test_pallet_collect_spur_recovers_trapped_idle_shuttle_and_hands_off_once() -> None:
+    service, runtime = _runtime(_topology())
+    carrier, blocker = [r for r in runtime.state["robots"] if r["type"] == "shuttle"][:2]
+    start = "cell-r74-c46"
+    _place_collect_vehicle(runtime, carrier, start, status="blocked")
+    _place_collect_vehicle(runtime, blocker, "cell-r75-c48", status="idle")
+    carrier.update(
+        path=[start, EMPTY_PALLET_COLLECT_CELL_ID], pathLayers=[1, 1],
+        targetCellId=EMPTY_PALLET_COLLECT_CELL_ID, targetLayer=1,
+    )
+    task = _collect_task(service, runtime, carrier)
+    runtime.state["emptyPalletStack"]["count"] = 6
+    handoff_tick = None
+    blocker_cleared = False
+    for _ in range(135):
+        service._step_runtime(runtime, persist=False)
+        carrier_body = service._robot_collision_footprint(runtime, carrier)
+        blocker_body = service._robot_collision_footprint(runtime, blocker)
+        assert not carrier_body & blocker_body
+        if blocker["currentCellId"] == PALLET_COLLECT_EXIT_CELL_ID:
+            blocker_cleared = True
+        arm = runtime.state["palletArm"]
+        if arm["taskId"] == task["id"] and handoff_tick is None:
+            assert blocker_cleared
+            assert carrier["currentCellId"] == EMPTY_PALLET_COLLECT_CELL_ID
+            assert carrier["load"] == 1
+            handoff_tick = runtime.state["tick"]
+        if service._all_tasks_completed(runtime):
+            break
+
+    assert handoff_tick is not None
+    assert task["status"] == "completed" and task["completedTick"] > handoff_tick
+    assert not service._robot_collision_footprint(runtime, carrier) & PALLET_COLLECT_SPUR
+    assert runtime.state["emptyPalletStack"]["count"] == 5
+    assert runtime.state["palletDropZone"]["count"] == 1
+    assert service._all_tasks_completed(runtime)
+
+
+def test_six_pallet_batch_is_picked_on_vehicle_and_follows_belt_into_drop_zone() -> None:
+    service, runtime = _runtime(_topology())
+    runtime.state.update(tasks=[], orders=[], orderDriven=True)
+    runtime.state["emptyPalletStack"].update(
+        count=6, stacks=[{"sourceCellId": "cell-r98-c23", "sourceLayer": 1} for _ in range(6)],
+    )
+    config = runtime.state["palletTransport"]
+    expected_route = [block["blockId"] for block in config["route"]]
+    actual_route = []
+    saw_pick = saw_place = False
+    for _ in range(250):
+        service._step_runtime(runtime, persist=False)
+        arm = runtime.state["palletArm"]
+        if arm["stage"] in {"pick", "place"}:
+            carrier = next(robot for robot in runtime.state["robots"] if robot["id"] == arm["robotId"])
+            assert arm["cargo"]["qty"] == 6
+            if arm["stage"] == "pick":
+                saw_pick = True
+                assert carrier["currentCellId"] == EMPTY_PALLET_COLLECT_CELL_ID
+                assert carrier["load"] == 6
+            else:
+                saw_place = True
+                assert carrier["load"] == 0
+        for item in runtime.state["palletConveyorItems"]:
+            assert item["palletCount"] == 6
+            if not actual_route or actual_route[-1] != item["currentBlockId"]:
+                actual_route.append(item["currentBlockId"])
+        if service._all_tasks_completed(runtime):
+            break
+
+    assert saw_pick and saw_place
+    assert len(runtime.state["tasks"]) == 1
+    assert runtime.state["tasks"][0]["status"] == "completed"
+    assert actual_route == expected_route
+    assert actual_route[0] == "1F:78:50:lower"
+    assert runtime.state["emptyPalletStack"]["count"] == 0
+    assert runtime.state["palletDropZone"] == {
+        "zoneId": "zone-drop_zone", "row": 102, "col": 66, "deck": "lower", "count": 6,
+    }
+    assert service._all_tasks_completed(runtime)
+
+
+def test_pallet_collect_spur_holds_following_carrier_before_turnout() -> None:
+    service, runtime = _runtime(_topology())
+    carrier, departing = [r for r in runtime.state["robots"] if r["type"] == "shuttle"][:2]
+    _place_collect_vehicle(runtime, carrier, "cell-r74-c44", status="idle")
+    assert service._physical_move_blocker(runtime, carrier, "cell-r74-c45", 1, set()) == (None, True)
+
+    _place_collect_vehicle(runtime, carrier, "cell-r74-c41", status="moving")
+    _collect_task(service, runtime, carrier)
+    _place_collect_vehicle(runtime, departing, "cell-r77-c43", status="returning")
+    departing["palletCollectEvacuating"] = True
+    assert service._physical_move_blocker(runtime, carrier, "cell-r74-c42", 1, set()) == (None, True)
+
+    _place_collect_vehicle(runtime, departing, "cell-r80-c43", status="returning")
+    departing.pop("palletCollectEvacuating")
+    assert service._physical_move_blocker(runtime, carrier, "cell-r74-c42", 1, set()) == (None, False)
 
 
 def test_fixed_handoff_queue_uses_west_admission_then_allocates_front_slot() -> None:

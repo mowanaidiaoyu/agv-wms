@@ -32,8 +32,9 @@ import type {
   TransportLayoutPlan,
 } from '../types'
 
-const API_BASE = 'http://127.0.0.1:8001/api/v1'
-const WS_BASE = 'ws://127.0.0.1:8001/ws'
+const API_ORIGIN = (import.meta.env.VITE_AGV_API_ORIGIN || 'http://127.0.0.1:8001').replace(/\/+$/, '')
+const API_BASE = `${API_ORIGIN}/api/v1`
+const WS_BASE = `${API_ORIGIN.replace(/^http/, 'ws')}/ws`
 
 type ApiValidationIssue = {
   loc?: Array<string | number>

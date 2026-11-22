@@ -98,6 +98,30 @@ export function createInitialPickingArmState(
   }
 }
 
+/** The server owns pickup and release. Replay the pose inside its current stage. */
+export function palletArmPlaybackPose(
+  stage: 'pick' | 'place',
+  progress: number,
+): PickingArmState {
+  const segments = stage === 'pick'
+    ? ([['approach', 0.8], ['grip', 1]] as const)
+    : ([['lift', 0.22], ['rotate', 0.6], ['place', 0.92], ['release', 1]] as const)
+  const p = Math.max(0, Math.min(1, progress))
+  let start = 0
+  for (const [phase, end] of segments) {
+    if (p <= end) {
+      return {
+        ...createInitialPickingArmState(),
+        phase,
+        phaseElapsed: (p - start) / (end - start) * PICKING_ARM_PHASE_SECONDS[phase],
+        totePlacement: stage === 'place' ? 'gripper' : 'none',
+      }
+    }
+    start = end
+  }
+  return createInitialPickingArmState()
+}
+
 export function resetPickingArmState(
   state: PickingArmState,
   signals: PickingArmSignals,

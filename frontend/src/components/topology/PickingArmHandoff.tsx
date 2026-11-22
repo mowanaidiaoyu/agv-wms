@@ -5,6 +5,7 @@ import type { Group, Mesh } from 'three'
 import {
   advancePickingArm,
   createInitialPickingArmState,
+  palletArmPlaybackPose,
   pickingArmPose,
   toteStatusFor,
   type PickingArmPhase,
@@ -19,6 +20,7 @@ import {
 } from '../../lib/pickingArmSafety'
 import { worldX, worldZ } from '../../lib/topology3d'
 import type { PickingArmLayout, TopologyPayload } from '../../types'
+import { PALLET_LAYER_HEIGHT, PalletStackModel } from './PalletStackModel'
 
 export interface PickingArmCargo {
   toteId: string
@@ -43,9 +45,18 @@ export interface PickingArmHandoffProps {
   dropoffOverrideXZ?: [number, number]
   /** 标签形态：preview=预览循环 / live=仿真运行中 / idle=运行中待机 */
   variant?: 'preview' | 'live' | 'idle'
+  palletPlayback?: {
+    stage: 'pick' | 'place'
+    count: number
+    tick: number
+    stageStartedTick: number
+    stageDurationTicks: number
+    tickInterval: number
+  }
 }
 
 const TOTE_HEIGHT = 0.3
+const PALLET_GRIP_CLEARANCE = 0.16
 
 function OrderTote({ cargo, status }: { cargo: PickingArmCargo; status: string }) {
   return (
@@ -90,6 +101,7 @@ export function PickingArmHandoff({
   pickupOverrideXZ,
   dropoffOverrideXZ,
   variant = preview ? 'preview' : 'live',
+  palletPlayback,
 }: PickingArmHandoffProps) {
   const waistRef = useRef<Group>(null)
   const shoulderRef = useRef<Group>(null)
@@ -103,6 +115,7 @@ export function PickingArmHandoff({
   const [cargoPlaybackState, setCargoPlaybackState] = useState('waiting_for_release')
   const [collisionMessage, setCollisionMessage] = useState<string | null>(null)
   const collisionMessageRef = useRef<string | null>(null)
+  const palletClock = useRef({ tick: -1, elapsed: 0 })
   const invalidate = useThree((state) => state.invalidate)
   const { rows, cols } = topology.grid
   const base = useMemo<[number, number, number]>(() => [
@@ -110,37 +123,46 @@ export function PickingArmHandoff({
     layout.mountHeight,
     worldZ(layout.installation.row, rows),
   ], [cols, layout.installation.col, layout.installation.row, layout.mountHeight, rows])
+  const palletCount = palletPlayback?.count ?? 0
+  const gripOffset = palletCount > 0
+    ? palletCount * PALLET_LAYER_HEIGHT + PALLET_GRIP_CLEARANCE
+    : TOTE_HEIGHT + 0.18
   const pickup = useMemo<[number, number, number]>(() => pickupOverrideXZ
     ? [
         pickupOverrideXZ[0] - base[0],
-        layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
+        layout.pickup.beltHeight + gripOffset,
         pickupOverrideXZ[1] - base[2],
       ]
     : [
         worldX(layout.pickup.position.col, cols) - base[0],
-        layout.pickup.beltHeight + TOTE_HEIGHT + 0.18,
+        layout.pickup.beltHeight + gripOffset,
         worldZ(layout.pickup.position.row, rows) - base[2],
-      ], [base, cols, layout.pickup.beltHeight, layout.pickup.position.col, layout.pickup.position.row, pickupOverrideXZ, rows])
+      ], [base, cols, gripOffset, layout.pickup.beltHeight, layout.pickup.position.col, layout.pickup.position.row, pickupOverrideXZ, rows])
   const dropoff = useMemo<[number, number, number]>(() => dropoffOverrideXZ
     ? [
         dropoffOverrideXZ[0] - base[0],
-        layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
+        layout.dropoff.beltHeight + gripOffset,
         dropoffOverrideXZ[1] - base[2],
       ]
     : [
         worldX(layout.dropoff.position.col, cols) - base[0],
-        layout.dropoff.beltHeight + TOTE_HEIGHT + 0.18,
+        layout.dropoff.beltHeight + gripOffset,
         worldZ(layout.dropoff.position.row, rows) - base[2],
-      ], [base, cols, dropoffOverrideXZ, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
+      ], [base, cols, dropoffOverrideXZ, gripOffset, layout.dropoff.beltHeight, layout.dropoff.position.col, layout.dropoff.position.row, rows])
   const points = useMemo(() => ({
     // 待机姿态与拓扑编辑器的机械臂朝向一致（rotation.y = -0.62 rad，
     // yaw = atan2(-z, x) ⇒ 目标点取 [r·cos0.62, h, r·sin0.62]）。
-    home: [1.15, 6.0, 0.82] as [number, number, number],
+    home: [1.15, layout.kinematics.safeTravelHeight - 0.3, 0.82] as [number, number, number],
     pickup,
     pickupLift: [pickup[0] * 0.55, layout.kinematics.safeTravelHeight, pickup[2] * 0.55] as [number, number, number],
-    dropLift: [dropoff[0] * 0.55, layout.kinematics.safeTravelHeight, dropoff[2] * 0.55] as [number, number, number],
+    dropLift: [
+      dropoff[0] * 0.55,
+      // Approach the lower deck from the side, below its upper return belt.
+      palletCount > 0 ? dropoff[1] - 0.03 : layout.kinematics.safeTravelHeight,
+      dropoff[2] * 0.55,
+    ] as [number, number, number],
     dropoff,
-  }), [dropoff, layout.kinematics.safeTravelHeight, pickup])
+  }), [dropoff, layout.kinematics.safeTravelHeight, palletCount, pickup])
   const collisionObstacles = useMemo<CollisionBox[]>(() => topology.cells.flatMap((cell) => {
     if (cell.type !== 'conveyor') return []
     const x = worldX(cell.col, cols) - base[0]
@@ -204,7 +226,7 @@ export function PickingArmHandoff({
         legalDropoffNode: authoritativeSignals?.legalDropoffNode ?? false,
         authoritativeHandoffCompleted: authoritativeSignals?.authoritativeHandoffCompleted ?? false,
       }, [authoritativeSignals, layout.dropoff.validationStatus, layout.pickup.validationStatus, preview, previewCycleToken])
-  const playbackToken = preview
+  const playbackToken = palletPlayback ? 'pallet-live' : preview
     ? `preview:${previewCycleToken}`
     : signals.cargoToken
       ? `live:${signals.cargoToken}`
@@ -224,13 +246,25 @@ export function PickingArmHandoff({
 
   useEffect(() => {
     invalidate()
-  }, [invalidate, paused, previewCycleToken, speedMultiplier])
+  }, [invalidate, palletPlayback?.tick, paused, previewCycleToken, speedMultiplier])
 
   useFrame((_, delta) => {
     const previousState = stateRef.current
     const previousPhase = stateRef.current.phase
     const previousCargoState = stateRef.current.cargoPlaybackState
-    const candidateState = advancePickingArm(stateRef.current, {
+    if (palletPlayback) {
+      if (palletClock.current.tick !== palletPlayback.tick) {
+        palletClock.current = { tick: palletPlayback.tick, elapsed: 0 }
+      }
+      if (!paused) palletClock.current.elapsed += delta
+    }
+    const candidateState = palletPlayback ? palletArmPlaybackPose(
+      palletPlayback.stage,
+      (
+        palletPlayback.tick - palletPlayback.stageStartedTick
+        + Math.min(1, palletClock.current.elapsed / Math.max(0.01, palletPlayback.tickInterval))
+      ) / Math.max(1, palletPlayback.stageDurationTicks),
+    ) : advancePickingArm(stateRef.current, {
       deltaSeconds: delta,
       speedMultiplier,
       paused,
@@ -284,7 +318,8 @@ export function PickingArmHandoff({
       if (stateRef.current.totePlacement === 'pickup') {
         tote.position.set(pickup[0], layout.pickup.beltHeight + TOTE_HEIGHT / 2, pickup[2])
       } else if (stateRef.current.totePlacement === 'gripper') {
-        tote.position.set(pose.target[0], pose.target[1] - 0.36, pose.target[2])
+        const offset = palletPlayback ? gripOffset : 0.36
+        tote.position.set(pose.target[0], pose.target[1] - offset, pose.target[2])
       } else if (stateRef.current.totePlacement === 'output') {
         const distance = stateRef.current.conveyorDistance
         const segment = conveyorRoute.segments.find((item) => distance <= item.start + item.length + 1e-9)
@@ -373,13 +408,16 @@ export function PickingArmHandoff({
       <group ref={toteRef} visible={false}>
         {/* drei Html 不会自动继承 Three.js 父组的 visible。待机时不挂载
             标签，避免隐藏货箱仍在机械臂底座显示 ORDER-PREVIEW/not_present。 */}
-        {variant !== 'idle' ? <OrderTote cargo={cargo} status={toteStatusFor(stateRef.current)} /> : null}
+        {palletPlayback ? <PalletStackModel count={palletCount} />
+          : variant !== 'idle' ? <OrderTote cargo={cargo} status={toteStatusFor(stateRef.current)} /> : null}
       </group>
       <Html position={[0, 4.15, 0]} center distanceFactor={11} zIndexRange={[22, 16]}>
         <div className="picking-arm-device-label">
           <strong>{layout.armId}</strong>
-          <span>{variant === 'preview' ? `预览 · ${phase}` : variant === 'live' ? `运行中 · ${phase}` : `待机 · ${phase}`}</span>
-          <span>{cargoPlaybackState}</span>
+          <span>{palletPlayback
+            ? `${palletPlayback.stage === 'pick' ? '抓取' : '放置'} · ${palletCount} 个空托盘`
+            : variant === 'preview' ? `预览 · ${phase}` : variant === 'live' ? `运行中 · ${phase}` : `待机 · ${phase}`}</span>
+          {!palletPlayback && <span>{cargoPlaybackState}</span>}
           {collisionMessage ? <span className="danger">碰撞阻止：{collisionMessage}</span> : null}
           {variant === 'preview' ? <small>proposed / 不代表已交付</small> : null}
         </div>

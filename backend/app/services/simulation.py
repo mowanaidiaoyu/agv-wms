@@ -53,6 +53,7 @@ from .motion_speed import (
     sim_tick_seconds,
     speed_for_edge,
 )
+from .pallet_conveyor import PALLET_ARM_ID, configure_pallet_transport
 from .pathfinding import (
     build_occupied_lookup,
     build_node_lookup,
@@ -123,9 +124,21 @@ TERMINAL_TASK_STATUSES = {"completed", "cancelled", "failed", "exception"}
 # 由四向车取走并送到 1F 地面输送线 (76,35)，在那里堆积计数（最多 6 层）。
 EMPTY_PALLET_RETURN_CELL_ID = "cell-r76-c35"
 EMPTY_PALLET_STACK_CAPACITY = 6
+PALLET_ARM_PICK_TICKS = 5
+PALLET_ARM_PLACE_TICKS = 7
 EMPTY_PALLET_TASK_KIND = "empty_pallet_return"
 # (76,35) 空托盘到 6 层后，四向车把托盘搬到 (74,47) 新机械臂入主线点。
 EMPTY_PALLET_COLLECT_CELL_ID = "cell-r74-c47"
+# Ground spur east of the c43/c44 turnout. Use body cells, including the
+# overhang of a Shuttle at the buffer stop in c48.
+PALLET_COLLECT_SPUR = frozenset(
+    (row, col, 1.0) for row in (74, 75) for col in range(46, 50)
+)
+PALLET_COLLECT_MOUTH = frozenset(
+    (row, col, 1.0) for row in (74, 75) for col in range(43, 46)
+)
+PALLET_COLLECT_EXIT_CELL_ID = "cell-r78-c43"
+PALLET_COLLECT_RETREAT_CELL_IDS = ("cell-r74-c41", "cell-r75-c41", "cell-r74-c40")
 EMPTY_PALLET_COLLECT_TASK_KIND = "empty_pallet_reposition"
 # 机械臂-02（78,47）把托盘放到 row 84 col 58 上层输送主干入口。
 EMPTY_PALLET_DROPOFF_CELL_ID = "cell-r84-c58"
@@ -1245,6 +1258,7 @@ class SimulationService:
         # pyc-new 显式分层输送模型：拓扑声明了 conveyorDecks/conveyorBinding 时编译逐块路由；
         # 未声明（当前 666 拓扑）时 explicit=False，仿真走原固定 tick 行为。
         conveyor_graph = compile_conveyor_graph(topology)
+        pallet_transport = configure_pallet_transport(topology, conveyor_graph)
         if conveyor_graph.get("explicit") and conveyor_graph.get("issues"):
             issue = conveyor_graph["issues"][0]
             raise ValueError(
@@ -1387,7 +1401,7 @@ class SimulationService:
                 for row in PALLET_DOCK_PORT_ROWS
             },
             "palletArm": {
-                "armId": "picking-arm-02",
+                "armId": PALLET_ARM_ID,
                 "status": "idle",
                 "stage": None,
                 "remainingTicks": 0,
@@ -1396,6 +1410,8 @@ class SimulationService:
                 "pendingQueue": [],
             },
             "palletConveyorItems": [],
+            "palletTransport": pallet_transport,
+            "palletDropZone": None,
             # 只持久化游标：箱/货道认领是运行时临时状态（键为元组，无法 JSON 序列化），
             # 后续插入订单时会依据在途任务重新推导。
             "shuttleBatch": {"cursor": int(shuttle_batch.get("cursor") or 0)},
@@ -4260,7 +4276,21 @@ class SimulationService:
         orders = runtime.state.get("orders", [])
         tasks_terminal = all(task.get("status") in TERMINAL_TASK_STATUSES for task in tasks)
         orders_terminal = all(order.get("status") in {"completed", "exception", "cancelled"} for order in orders)
-        return tasks_terminal and orders_terminal
+        pallet_arm = runtime.state.get("palletArm") or {}
+        pallet_transfer_pending = (
+            pallet_arm.get("status") == "busy"
+            or bool(pallet_arm.get("pendingQueue"))
+            or any(item.get("status") == "moving" for item in runtime.state.get("palletConveyorItems", []))
+        )
+        batch_pending = (
+            runtime.state.get("palletTransport")
+            and (runtime.state.get("emptyPalletStack") or {}).get("stacks")
+            and any(
+                robot["type"] == "shuttle" and robot.get("status") not in {"failed", "exception"}
+                for robot in runtime.state["robots"]
+            )
+        )
+        return tasks_terminal and orders_terminal and not (pallet_transfer_pending or batch_pending)
 
     def _tick_delay(self, runtime: RunRuntime) -> float:
         multiplier = runtime.speed_multiplier if runtime.speed_multiplier in SUPPORTED_SPEED_MULTIPLIERS else DEFAULT_SPEED_MULTIPLIER
@@ -4350,6 +4380,17 @@ class SimulationService:
         self._inject_faults(runtime, tick)
         self._inject_urgent_order(runtime, tick)
         self._assign_tasks(runtime)
+        if runtime.state.get("palletTransport"):
+            stack = runtime.state["emptyPalletStack"]
+            if stack.get("stacks") and (
+                len(stack["stacks"]) >= EMPTY_PALLET_STACK_CAPACITY
+                or all(
+                    task.get("status") in TERMINAL_TASK_STATUSES
+                    or task.get("taskKind") == EMPTY_PALLET_COLLECT_TASK_KIND
+                    for task in runtime.state["tasks"]
+                )
+            ):
+                self._spawn_pallet_reposition(runtime)
         self._move_robots(runtime)
         counters = runtime.state.setdefault("performanceCounters", {})
         blocked_count = sum(
@@ -4361,7 +4402,6 @@ class SimulationService:
                 robot["blockedWaitTicks"] = int(robot.get("blockedWaitTicks") or 0) + 1
         self._advance_picking_arm(runtime)
         self._advance_picking_arms(runtime)
-        # picking-arm-02：空托盘从 (74,47) 放到 (84,58) 上层输送 → 滑向 5 个出货口帽口
         self._advance_pallet_arm(runtime)
         self._advance_pallet_conveyor(runtime)
         self._advance_detached_conveyor_tasks(runtime)
@@ -4686,7 +4726,160 @@ class SimulationService:
             current_overlap = current.intersection(other_footprint)
             if not current_overlap or len(candidate_overlap) >= len(current_overlap):
                 return other, False
+        entering_spur = bool(candidate & PALLET_COLLECT_SPUR and not current & PALLET_COLLECT_SPUR)
+        entering_mouth = bool(candidate & PALLET_COLLECT_MOUTH and not current & PALLET_COLLECT_MOUTH)
+        if robot.get("type") == "shuttle" and (entering_spur or entering_mouth) and self._has_pallet_collect_spur(runtime):
+            task = find_task(runtime.state["tasks"], robot.get("currentTaskId"))
+            delivering = bool(
+                task and task.get("taskKind") == EMPTY_PALLET_COLLECT_TASK_KIND
+                and task.get("phase") == "delivery_to_collect"
+            )
+            # Hold a following carrier before the turnout so the vehicle
+            # with the spur can still turn out of it.
+            if delivering and not current & PALLET_COLLECT_SPUR and self._pallet_collect_spur_is_occupied(runtime, robot):
+                return None, True
+            if entering_spur and (
+                not delivering or not self._pallet_collect_maneuver_path(
+                    runtime, robot, PALLET_COLLECT_EXIT_CELL_ID, start=EMPTY_PALLET_COLLECT_CELL_ID,
+                )
+            ):
+                return None, True
         return None, bool(candidate.intersection(reserved_footprint))
+
+    def _has_pallet_collect_spur(self, runtime: RunRuntime) -> bool:
+        topology = runtime.topology
+        return (
+            shuttle_state_is_walkable(topology, 74, 47, 1)
+            and shuttle_state_is_walkable(topology, 74, 48, 1)
+            and shuttle_state_is_walkable(topology, 78, 43, 1)
+            and not shuttle_state_is_walkable(topology, 74, 49, 1)
+            and not shuttle_state_is_walkable(topology, 76, 47, 1)
+        )
+
+    def _pallet_collect_spur_is_occupied(self, runtime: RunRuntime, entrant: dict[str, Any]) -> bool:
+        return any(
+            other is not entrant
+            and (
+                other.get("palletCollectEvacuating")
+                or self._robot_collision_footprint(runtime, other).intersection(PALLET_COLLECT_SPUR)
+                or (find_task(runtime.state["tasks"], other.get("currentTaskId")) or {}).get("phase")
+                == "clearing_pallet_collect"
+            )
+            for other in runtime.state["robots"]
+        )
+
+    def _pallet_collect_maneuver_path(
+        self,
+        runtime: RunRuntime,
+        robot: dict[str, Any],
+        goal: str,
+        *,
+        start: str | None = None,
+        relocated: tuple[dict[str, Any], str] | None = None,
+    ) -> list[str]:
+        """Plan a short ground route against actual or proposed parked bodies."""
+        _, goal_row, goal_col = parse_cell_id(goal)
+        if not shuttle_state_is_walkable(runtime.topology, goal_row, goal_col, 1):
+            return []
+        obstacles: set[tuple[int, int, float]] = set()
+        for other in runtime.state["robots"]:
+            if other is robot:
+                continue
+            if relocated is not None and other is relocated[0]:
+                obstacles.update(self._robot_collision_footprint(runtime, other, relocated[1], 1))
+            else:
+                obstacles.update(self._robot_collision_footprint(runtime, other))
+        if self._robot_collision_footprint(runtime, robot, goal, 1).intersection(obstacles):
+            return []
+        blocked = {
+            (row, col, 1)
+            for row in range(74, 79)
+            for col in range(40, 49)
+            if shuttle_collision_footprint(runtime.topology, row, col, 1).intersection(obstacles)
+        }
+        path = shortest_path_shuttle(
+            runtime.topology, start or robot["currentCellId"], 1, goal, 1,
+            runtime.config["pathPolicy"], extra_blocked=blocked,
+        )
+        if 1 < len(path) <= 16 and all(
+            74 <= row <= 78 and 40 <= col <= 48 and layer == 1
+            and shuttle_state_is_walkable(runtime.topology, row, col, layer)
+            for row, col, layer in path[1:]
+        ):
+            return [cell_id(row, col) for row, col, _ in path]
+        return []
+
+    def _set_pallet_collect_maneuver(
+        self,
+        robot: dict[str, Any],
+        path: list[str],
+        phase: str,
+        label: str,
+    ) -> None:
+        robot.update(
+            path=path,
+            pathLayers=[1] * len(path),
+            pathStages=[phase] * len(path),
+            targetCellId=path[-1],
+            targetLayer=1,
+            waitTicks=0,
+            yieldTicks=0,
+            status="moving",
+            phaseLabel=label,
+        )
+
+    def _coordinate_pallet_collect_spur(self, runtime: RunRuntime) -> None:
+        if not self._has_pallet_collect_spur(runtime):
+            return
+        tasks = runtime.state["tasks"]
+        shuttles = [item for item in runtime.state["robots"] if item.get("type") == "shuttle"]
+        for robot in shuttles:
+            if robot.get("palletCollectEvacuating") and len(robot["path"]) <= 1:
+                robot.pop("palletCollectEvacuating")
+                home = robot.get("homeCellId")
+                if home and home != robot["currentCellId"] and self._robot_path_to(runtime, robot, home, 1):
+                    robot.update(status="returning", returningToStandby=True)
+                else:
+                    robot.update(status="idle", returningToStandby=False, phaseLabel="待命")
+
+        for idle in shuttles:
+            if (
+                idle.get("currentTaskId") or idle.get("carrying")
+                or idle.get("status") in {"failed", "exception"}
+                or idle.get("palletCollectEvacuating")
+                or not self._robot_collision_footprint(runtime, idle).intersection(PALLET_COLLECT_SPUR)
+            ):
+                continue
+            exit_path = self._pallet_collect_maneuver_path(runtime, idle, PALLET_COLLECT_EXIT_CELL_ID)
+            if exit_path:
+                self._set_pallet_collect_maneuver(idle, exit_path, "idle_yield", "空托盘支线 / 退出至岔口外")
+                idle.update(palletCollectEvacuating=True, returningToStandby=True)
+                continue
+            # A legacy snapshot can already contain a carrier between the
+            # idle Shuttle and the turnout. Verify both legs before backing
+            # the carrier out. Recheck the exit when the carrier has parked.
+            for carrier in shuttles:
+                if not (
+                    carrier.get("currentLayer") == 1
+                    and carrier.get("currentRow") in {74, 75}
+                    and 42 <= carrier.get("currentCol", 0) <= 48
+                ):
+                    continue
+                task = find_task(tasks, carrier.get("currentTaskId"))
+                if (
+                    not task or task.get("taskKind") != EMPTY_PALLET_COLLECT_TASK_KIND
+                    or task.get("phase") != "delivery_to_collect"
+                ):
+                    continue
+                for stop in PALLET_COLLECT_RETREAT_CELL_IDS:
+                    retreat_path = self._pallet_collect_maneuver_path(runtime, carrier, stop)
+                    if not retreat_path or not self._pallet_collect_maneuver_path(
+                        runtime, idle, PALLET_COLLECT_EXIT_CELL_ID, relocated=(carrier, stop),
+                    ):
+                        continue
+                    task.update(phase="retreat_from_pallet_collect", phaseLabel="空托盘支线 / 后退让行")
+                    self._set_pallet_collect_maneuver(carrier, retreat_path, task["phase"], task["phaseLabel"])
+                    break
 
     def _update_shuttle_progress_watchdogs(self, runtime: RunRuntime) -> None:
         """Track real task progress independently from status-label changes."""
@@ -4826,7 +5019,11 @@ class SimulationService:
         task_kind = str((task or {}).get("taskKind") or "")
         handoff = self._handoff_traffic_state(runtime)
         empty_pallet = runtime.state.get("emptyPalletTraffic") or {}
-        if phase.startswith("yielding_"):
+        if (
+            phase.startswith("yielding_")
+            or phase in {"retreat_from_pallet_collect", "clearing_pallet_collect"}
+            or robot.get("palletCollectEvacuating")
+        ):
             rank = 0
         elif robot.get("id") in {
             (handoff or {}).get("ownerRobotId"),
@@ -5094,6 +5291,7 @@ class SimulationService:
         return True
 
     def _move_robots(self, runtime: RunRuntime) -> None:
+        self._coordinate_pallet_collect_spur(runtime)
         self._update_shuttle_progress_watchdogs(runtime)
         empty_pallet_traffic = self._refresh_empty_pallet_traffic(runtime)
         movable = [robot for robot in runtime.state["robots"] if robot["status"] not in {"failed", "idle", "exception"}]
@@ -5967,6 +6165,7 @@ class SimulationService:
         blocked_states = expand_shuttle_blocked_states(runtime.topology, other_states)
 
         handoff_cell = str((runtime.arm_handoff or {}).get("handoffCellId") or "")
+        has_collect_spur = self._has_pallet_collect_spur(runtime)
 
         chosen_path: list[tuple[int, int, int]] | None = None
         # Eight logical cells is deliberately bounded: this is a local escape,
@@ -6002,6 +6201,7 @@ class SimulationService:
                     candidate_footprint.intersection(priority_corridor)
                     or candidate_footprint.intersection(other_footprints)
                     or candidate_footprint.intersection(reserved_footprint)
+                    or (has_collect_spur and candidate_footprint.intersection(PALLET_COLLECT_SPUR))
                 ):
                     continue
                 path = shortest_path_shuttle(
@@ -6036,7 +6236,7 @@ class SimulationService:
                     )
                     if step_footprint.intersection(
                         other_footprints | reserved_footprint
-                    ):
+                    ) or (has_collect_spur and step_footprint.intersection(PALLET_COLLECT_SPUR)):
                         escape_valid = False
                         break
                     overlap = len(step_footprint.intersection(priority_corridor))
@@ -6261,6 +6461,7 @@ class SimulationService:
         pending = deque([(start, start, 0)])
         visited = {start}
         handoff_cell = (runtime.arm_handoff or {}).get("handoffCellId")
+        has_collect_spur = self._has_pallet_collect_spur(runtime)
         obstacles = set(reserved_footprint)
         for other in runtime.state["robots"]:
             if other is not idle:
@@ -6288,7 +6489,9 @@ class SimulationService:
                 ):
                     continue
                 footprint = shuttle_collision_footprint(runtime.topology, *neighbor, layer)
-                if not footprint.intersection(obstacles):
+                if not footprint.intersection(obstacles) and not (
+                    has_collect_spur and footprint.intersection(PALLET_COLLECT_SPUR)
+                ):
                     pending.append((neighbor, first_step if distance else neighbor, distance + 1))
         return None
 
@@ -6520,6 +6723,19 @@ class SimulationService:
         onto a non-existent topology cell.
         """
         if blocker is None or blocker.get("type") != "shuttle" or blocker.get("status") in {"failed", "exception"}:
+            return False
+        # A planned spur evacuation must reach its exit without ordinary
+        # one-cell recovery changing its route. A parked body inside the
+        # spur is handled by the coordinator, including a two-vehicle retreat.
+        if any(
+            item.get("palletCollectEvacuating")
+            or (
+                not item.get("currentTaskId")
+                and self._robot_collision_footprint(runtime, item).intersection(PALLET_COLLECT_SPUR)
+                and self._has_pallet_collect_spur(runtime)
+            )
+            for item in (robot, blocker)
+        ):
             return False
         traffic = self._handoff_traffic_state(runtime)
         owner_id = traffic.get("ownerRobotId") if traffic else None
@@ -7105,7 +7321,7 @@ class SimulationService:
             "robot_position",
             {"robotId": robot["id"], "cellId": next_cell_id, "floor": floor, "row": row, "col": col, "layer": next_layer, "status": robot["status"]},
         )
-        if len(robot["path"]) <= 1:
+        if len(robot["path"]) <= 1 and not robot.get("palletCollectEvacuating"):
             robot["returningToStandby"] = False
             robot["status"] = "idle"
             robot["phaseLabel"] = "待命"
@@ -7556,21 +7772,14 @@ class SimulationService:
             },
         )
         # 满层触发 reposition：搬一个托盘到 (74,47) 新机械臂入主线点。
-        if int(stack.get("count") or 0) >= EMPTY_PALLET_STACK_CAPACITY:
+        if not runtime.state.get("palletTransport") and int(stack.get("count") or 0) >= EMPTY_PALLET_STACK_CAPACITY:
             self._spawn_pallet_reposition(runtime)
         robot["carrying"] = []
         robot["load"] = 0
         self._complete_task(runtime, robot, task, occupied_cells)
 
     def _spawn_pallet_reposition(self, runtime: RunRuntime) -> None:
-        """(76,35) 满层时，分配空闲 shuttle 搬 1 层到 (74,47)。
-
-        单一事实来源：只在此处生成 reposition 任务（不做轮询扫描补偿）。
-        去重键 = 固定源/目标 + taskKind，防止满层后又触发同一搬运循环。
-
-        count 不在此处减——留给 reposition 任务真正送达 (74,47) 时再减，
-        这样 overflow 计数能正确反映"堆叠点实际满层但 reposition 还没拉走"的积压。
-        """
+        """Dispatch one Shuttle to pick up the oldest available pallet stack."""
         stack = runtime.state.get("emptyPalletStack") or {}
         stacks = stack.get("stacks") or []
         if not stacks:
@@ -7582,24 +7791,21 @@ class SimulationService:
                 and t.get("status") in {"pending", "in_progress"}
             ):
                 return
+        pickup_cell = EMPTY_PALLET_RETURN_CELL_ID
         robot = next(
             (
                 r for r in runtime.state.get("robots", [])
                 if r.get("type") == "shuttle" and r.get("status") == "idle" and not r.get("currentTaskId")
+                and self._robot_path_to(runtime, r, pickup_cell, 1)
             ),
             None,
         )
         if robot is None:
             return
         tick = int(runtime.state["tick"])
-        tray = stacks.pop(0)  # 最早堆叠的先搬（FIFO）；count 暂不减，等 reposition 完成时再扣
+        tray = stacks[0]
         # 规划 shuttle 路径：从当前位置 → (76,35) → (74,47)。
         # 先让 robot 走到 (76,35) pickup，再到 (74,47) dropoff。
-        pickup_cell = EMPTY_PALLET_RETURN_CELL_ID
-        if not self._robot_path_to(runtime, robot, pickup_cell, 1):
-            # 暂时拿不到路径，把 tray 放回去等下次 tick 重入。
-            stacks.insert(0, tray)
-            return
         repo = runtime.topology
         reposition = self._build_task(
             repo,
@@ -7620,6 +7826,11 @@ class SimulationService:
         reposition["assignedRobotId"] = robot["id"]
         reposition["palletSourceCellId"] = tray.get("sourceCellId")
         reposition["palletSourceLayer"] = tray.get("sourceLayer")
+        if runtime.state.get("palletTransport"):
+            reposition["palletBatch"] = []
+            reposition["palletCount"] = min(len(stacks), EMPTY_PALLET_STACK_CAPACITY)
+        else:
+            stacks.pop(0)  # Legacy tasks reserve one tray at dispatch.
         reposition["etaTicks"] = max(len(robot.get("path") or []) + self._shuttle_path_len(runtime, EMPTY_PALLET_COLLECT_CELL_ID) - 1, 1)
         robot["currentTaskId"] = reposition["id"]
         robot["status"] = "moving"
@@ -7627,89 +7838,92 @@ class SimulationService:
         runtime.state["tasks"].append(reposition)
         self._record_event(
             runtime, tick, "pallet_reposition_started",
-            {"taskId": reposition["id"], "robotId": robot["id"], "traySource": tray},
+            {"taskId": reposition["id"], "robotId": robot["id"], "traySource": tray,
+             "palletCount": reposition.get("palletCount", 1)},
         )
 
     def _shuttle_path_len(self, runtime: RunRuntime, cell_id: str) -> int:
         """reposition eta 兜底：从 (76,35) 到 (74,47) 地面走约 3 格。"""
         return 3
 
-    # ---- picking-arm-02：空托盘入主线 ---------------------------------
-    # picking-arm-02（row 78, col 47）从 (74,47) 取空托盘 → 放到 (84,58) 上层输送主干入口。
-    # 简化状态机：pick → place 两阶段计时，place 完托盘加入 palletConveyorItems 沿上层输送线
-    # 滑向 5 个出货口帽口（row 102/106/110/114/118, col 62）。
-
-    # 5 个出货口帽口 row（col 都是 62）。托盘按 FIFO 轮询分配。
+    # Kept for existing snapshots and layouts without the new drop-zone connection.
     PALLET_PORT_ROWS = [102, 106, 110, 114, 118]
     PALLET_CONVEYOR_SPEED_TICKS = 3  # 每段输送（2 格）走 3 tick，与现有 delivery 节拍接近
     PALLET_DOCK_MAX_LAYERS = 3  # 帽口处最多堆 3 层空托盘
 
     def _start_pallet_arm_handoff(
-        self, runtime: RunRuntime, task: dict[str, Any]
+        self, runtime: RunRuntime, task: dict[str, Any], robot: dict[str, Any]
     ) -> None:
-        """shuttle 到达 (74,47) 后，触发 picking-arm-02 取托盘 → 放到 (84,58) 上层输送。
-
-        如果机械臂正在忙，托盘在 (74,47) 入口等待（堆叠计数）；但 reposition 任务已经完成，
-        shuttle 可以去接新活。托盘输送完全由机械臂计时 + palletConveyorItems 推进。
-        """
-        tick = int(runtime.state["tick"])
         arm_state = runtime.state.setdefault("palletArm", {
-            "armId": "picking-arm-02",
-            "status": "idle",
-            "stage": None,
-            "remainingTicks": 0,
-            "pendingQueue": [],  # 等待机械臂空闲的托盘
+            "armId": PALLET_ARM_ID, "status": "idle", "pendingQueue": [],
         })
-        # 如果机械臂正在忙，托盘排队等
+        job = {"taskId": task["id"], "robotId": robot["id"], "palletCount": int(task.get("palletCount") or 1)}
         if arm_state.get("status") != "idle":
-            arm_state.setdefault("pendingQueue", []).append({
-                "taskId": task.get("id"),
-                "acceptedTick": tick,
-            })
+            arm_state.setdefault("pendingQueue", []).append(job)
             self._record_event(
-                runtime, tick, "pallet_arm_queue",
+                runtime, int(runtime.state["tick"]), "pallet_arm_queue",
                 {"taskId": task["id"], "queueSize": len(arm_state.get("pendingQueue", []))},
             )
             return
-        # 启动 pick 阶段
-        arm_state["status"] = "busy"
-        arm_state["stage"] = "pick"
-        arm_state["remainingTicks"] = ARM_HANDOFF_PICK_TICKS
-        arm_state["taskId"] = task.get("id")
-        arm_state["cargo"] = {"kind": "empty_pallet", "acceptedTick": tick}
+        self._begin_pallet_arm_pick(runtime, arm_state, job)
+
+    def _begin_pallet_arm_pick(self, runtime: RunRuntime, arm: dict, job: dict) -> None:
+        tick = int(runtime.state["tick"])
+        arm.update(
+            status="busy", stage="pick", remainingTicks=PALLET_ARM_PICK_TICKS,
+            stageStartedTick=tick, stageDurationTicks=PALLET_ARM_PICK_TICKS,
+            taskId=job["taskId"], robotId=job.get("robotId"),
+            cargo={"kind": "empty_pallet", "qty": int(job.get("palletCount") or 1), "acceptedTick": tick},
+        )
         self._record_event(
             runtime, tick, "pallet_arm_pick_start",
-            {"taskId": task["id"], "armId": arm_state.get("armId")},
+            {"taskId": job["taskId"], "armId": arm.get("armId"), "palletCount": arm["cargo"]["qty"]},
         )
 
     def _advance_pallet_arm(self, runtime: RunRuntime) -> None:
-        """每个 tick 推进 picking-arm-02 的 pick→place 计时。place 完托盘入输送线。"""
         arm_state = runtime.state.get("palletArm")
         if not arm_state or arm_state.get("status") != "busy":
             return
         tick = int(runtime.state["tick"])
+        if arm_state.get("stageStartedTick") == tick:
+            return
         remaining = int(arm_state.get("remainingTicks", 0)) - 1
         arm_state["remainingTicks"] = max(0, remaining)
         if remaining > 0:
             return
         stage = arm_state.get("stage")
         if stage == "pick":
-            # pick 完 → place 到 dropoff
-            arm_state["stage"] = "place"
-            arm_state["remainingTicks"] = ARM_HANDOFF_PLACE_TICKS
+            robot = next((r for r in runtime.state["robots"] if r["id"] == arm_state.get("robotId")), None)
+            task = find_task(runtime.state["tasks"], arm_state.get("taskId"))
+            if robot and task and task.get("phase") == "waiting_pallet_collect_arm":
+                robot.update(carrying=[], load=0)
+                if "palletBatch" not in task:
+                    stack = runtime.state["emptyPalletStack"]
+                    stack["count"] = max(0, int(stack.get("count") or 0) - 1)
+                if self._has_pallet_collect_spur(runtime):
+                    task.update(phase="clearing_pallet_collect", phaseLabel="空托盘已交接 / 驶离支线")
+                    task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+                    self._advance_robot_phase(runtime, robot, task)
+                else:
+                    self._complete_task(runtime, robot, task)
+            arm_state.update(
+                stage="place", remainingTicks=PALLET_ARM_PLACE_TICKS,
+                stageStartedTick=tick, stageDurationTicks=PALLET_ARM_PLACE_TICKS,
+            )
             self._record_event(
                 runtime, tick, "pallet_arm_place_start",
                 {"taskId": arm_state.get("taskId"), "armId": arm_state.get("armId")},
             )
             return
         if stage == "place":
-            # place 完 → 创建 pallet conveyor item
-            self._spawn_pallet_conveyor_item(runtime, arm_state)
+            if not self._spawn_pallet_conveyor_item(runtime, arm_state):
+                return
             # 重置 arm 状态
             arm_state["status"] = "idle"
             arm_state["stage"] = None
             arm_state["remainingTicks"] = 0
             arm_state["taskId"] = None
+            arm_state["robotId"] = None
             arm_state["cargo"] = None
             # 处理排队
             pending = arm_state.get("pendingQueue") or []
@@ -7719,21 +7933,45 @@ class SimulationService:
                     runtime, tick, "pallet_arm_dequeue",
                     {"taskId": next_task.get("taskId")},
                 )
-                # 直接启动下一个 pick
-                arm_state["status"] = "busy"
-                arm_state["stage"] = "pick"
-                arm_state["remainingTicks"] = ARM_HANDOFF_PICK_TICKS
-                arm_state["taskId"] = next_task.get("taskId")
-                arm_state["cargo"] = {"kind": "empty_pallet", "acceptedTick": tick}
+                self._begin_pallet_arm_pick(runtime, arm_state, next_task)
 
-    def _spawn_pallet_conveyor_item(self, runtime: RunRuntime, arm_state: dict[str, Any]) -> None:
-        """机械臂 place 完成 → 在 dropoff 点 (row 84, col 58) 生成一个 pallet conveyor item。
+    def _pallet_belt_has_room(self, runtime: RunRuntime, block_id: str) -> bool:
+        capacity = int(runtime.conveyor_graph.get("nodes", {}).get(block_id, {}).get("capacity") or 1)
+        cartons = sum(
+            (task.get("conveyorTransport") or {}).get("currentBlockId") == block_id
+            for task in runtime.state["tasks"]
+            if task.get("status") not in TERMINAL_TASK_STATUSES and not task.get("pendingTransport")
+        )
+        pallets = sum(
+            item.get("currentBlockId") == block_id and item.get("status") == "moving"
+            for item in runtime.state["palletConveyorItems"]
+        )
+        return cartons + pallets < capacity
 
-        路径简化：从 dropoff node（upper）沿 col 60 upper 主干向南滑到目标帽口。
-        每个 item 有 row/col 位置，每 PALLET_CONVEYOR_SPEED_TICKS tick 向南移动 2 格（一个模块），
-        到目标帽口 col 62 后停留并被接收进 palletDocks。
-        """
+    def _spawn_pallet_conveyor_item(self, runtime: RunRuntime, arm_state: dict[str, Any]) -> bool:
         tick = int(runtime.state["tick"])
+        pallet_count = int((arm_state.get("cargo") or {}).get("qty") or 1)
+        transport = runtime.state.get("palletTransport")
+        if transport:
+            head = transport["route"][0]
+            if not self._pallet_belt_has_room(runtime, head["blockId"]):
+                return False
+            dropoff = transport["route"][-1]
+            item = {
+                "id": f"pallet-cv-{tick}-{arm_state['taskId']}",
+                "taskId": arm_state["taskId"], "kind": "empty_pallet", "palletCount": pallet_count,
+                "currentRow": head["row"], "currentCol": head["col"], "deck": head["deck"],
+                "currentBlockId": head["blockId"], "routeIndex": 0,
+                "targetRow": dropoff["row"], "targetCol": dropoff["col"],
+                "speedTicks": self.PALLET_CONVEYOR_SPEED_TICKS, "tickCounter": 0,
+                "acceptedTick": tick, "status": "moving",
+            }
+            runtime.state["palletConveyorItems"].append(item)
+            self._record_event(runtime, tick, "pallet_conveyor_spawned", {
+                "palletId": item["id"], "taskId": item["taskId"], "palletCount": pallet_count,
+                "cellId": transport["dropoffCellId"], "dropZoneId": transport["dropZoneId"],
+            })
+            return True
         docks = runtime.state.setdefault("palletDocks", {})
         # FIFO 轮询分配帽口：按 dock count 最小的优先（最简单是 round-robin）
         assigned_row = self.PALLET_PORT_ROWS[0]
@@ -7745,6 +7983,7 @@ class SimulationService:
         item = {
             "id": f"pallet-cv-{tick}-{arm_state.get('taskId','').replace('task-','')}",
             "kind": "empty_pallet",
+            "palletCount": pallet_count,
             "currentRow": 84,
             "currentCol": 58,
             "deck": "upper",
@@ -7760,11 +7999,13 @@ class SimulationService:
             runtime, tick, "pallet_conveyor_spawned",
             {"palletId": item["id"], "targetRow": assigned_row, "targetCol": 62},
         )
+        return True
 
     def _advance_pallet_conveyor(self, runtime: RunRuntime) -> None:
-        """每个 tick 推进 palletConveyorItems：从 dropoff 向南滑向目标帽口，到点后入 palletDocks。"""
+        """Advance each pallet stack by real conveyor blocks."""
         items = runtime.state.get("palletConveyorItems") or []
         tick = int(runtime.state["tick"])
+        transport = runtime.state.get("palletTransport")
         for item in items:
             if item.get("status") != "moving":
                 continue
@@ -7772,6 +8013,37 @@ class SimulationService:
             if int(item.get("tickCounter", 0)) < int(item.get("speedTicks", 0)):
                 continue
             item["tickCounter"] = 0
+            if transport and "routeIndex" in item:
+                route = transport["route"]
+                index = int(item["routeIndex"])
+                if index == len(route) - 1:
+                    quantity = int(item["palletCount"])
+                    zone = runtime.state.get("palletDropZone") or {
+                        "zoneId": transport["dropZoneId"], "row": item["currentRow"],
+                        "col": item["currentCol"], "deck": item["deck"], "count": 0,
+                    }
+                    zone["count"] += quantity
+                    runtime.state["palletDropZone"] = zone
+                    item["status"] = "delivered"
+                    self._record_event(runtime, tick, "pallet_drop_zone_arrived", {
+                        "taskId": item["taskId"], "palletCount": quantity,
+                        "zoneId": zone["zoneId"], "cellId": cell_id(zone["row"], zone["col"]),
+                        "totalPallets": zone["count"],
+                    })
+                else:
+                    next_block = route[index + 1]
+                    if not self._pallet_belt_has_room(runtime, next_block["blockId"]):
+                        item["tickCounter"] = item["speedTicks"]
+                        continue
+                    item.update(
+                        routeIndex=index + 1, currentBlockId=next_block["blockId"],
+                        currentRow=next_block["row"], currentCol=next_block["col"], deck=next_block["deck"],
+                    )
+                    self._record_event(runtime, tick, "pallet_conveyor_moved", {
+                        "palletId": item["id"], "row": item["currentRow"], "col": item["currentCol"],
+                        "blockId": item["currentBlockId"], "palletCount": item["palletCount"],
+                    })
+                continue
             cur_row = int(item["currentRow"])
             cur_col = int(item["currentCol"])
             target_row = int(item["targetRow"])
@@ -7806,8 +8078,9 @@ class SimulationService:
                 # 到达帽口：入 palletDocks
                 docks = runtime.state.setdefault("palletDocks", {})
                 dock = docks.setdefault(str(target_row), {"count": 0, "availableEmpty": 0})
-                dock["count"] = int(dock.get("count") or 0) + 1
-                dock["availableEmpty"] = int(dock.get("availableEmpty") or 0) + 1
+                quantity = int(item.get("palletCount") or 1)
+                dock["count"] = int(dock.get("count") or 0) + quantity
+                dock["availableEmpty"] = int(dock.get("availableEmpty") or 0) + quantity
                 item["status"] = "delivered"
                 self._record_event(
                     runtime, tick, "pallet_dock_arrived",
@@ -8502,6 +8775,11 @@ class SimulationService:
             return False
         head_block = str(pending.get("route", [""])[0])
         deck = pending.get("deck")
+        if any(
+            item.get("currentBlockId") == head_block and item.get("status") == "moving"
+            for item in runtime.state.get("palletConveyorItems", [])
+        ):
+            return False
         for other in runtime.state.get("tasks", []):
             if other.get("id") == task.get("id") or other.get("status") in TERMINAL_TASK_STATUSES:
                 continue
@@ -8989,7 +9267,10 @@ class SimulationService:
         next_block = route[index + 1]
         node = runtime.conveyor_graph.get("nodes", {}).get(next_block, {})
         capacity = max(1, int(node.get("capacity", 1) or 1))
-        occupying = 0
+        occupying = sum(
+            item.get("currentBlockId") == next_block and item.get("status") == "moving"
+            for item in runtime.state.get("palletConveyorItems", [])
+        )
         for other in runtime.state.get("tasks", []):
             if other.get("id") == task.get("id") or other.get("status") in TERMINAL_TASK_STATUSES:
                 continue
@@ -9341,6 +9622,8 @@ class SimulationService:
         robot: dict[str, Any],
         task: dict[str, Any],
         occupied_cells: set[tuple[str, float]] | None = None,
+        *,
+        return_to_standby: bool = False,
     ) -> None:
         """任务收尾：清空机器人、回到待命位并累加指标（原交付完成逻辑复用）。"""
         tick = runtime.state["tick"]
@@ -9366,7 +9649,12 @@ class SimulationService:
             other["id"] != task["id"] and other.get("status") not in TERMINAL_TASK_STATUSES
             for other in runtime.state.get("tasks", [])
         )
-        if has_unfinished_tasks and home_cell and home_cell != robot["currentCellId"] and self._robot_path_to(runtime, robot, home_cell, 1):
+        if (
+            (has_unfinished_tasks or return_to_standby)
+            and home_cell
+            and home_cell != robot["currentCellId"]
+            and self._robot_path_to(runtime, robot, home_cell, 1)
+        ):
             robot["returningToStandby"] = True
             robot["status"] = "returning"
             robot["phaseLabel"] = "返回待命位"
@@ -9678,51 +9966,79 @@ class SimulationService:
             return
 
         if task["phase"] == "pallet_pickup_from_stack":
-            """shuttle 到达 (76,35) → 从堆叠点取一个空托盘 → 再去 (74,47) 入主线点。
-
-            _spawn_pallet_reposition 已经让 shuttle 载着 path 到了这里；
-            现在"取托盘"只是一个逻辑动作（堆叠计数已预减），车载 carrying 标记一下。
-            """
+            if not self._robot_path_to(runtime, robot, EMPTY_PALLET_COLLECT_CELL_ID, 1):
+                robot.update(status="waiting", phaseLabel="等待路径到入主线点")
+                return
+            stack = runtime.state["emptyPalletStack"]
+            if "palletBatch" in task:
+                records = stack["stacks"]
+                batch = records[:EMPTY_PALLET_STACK_CAPACITY]
+                if not batch:
+                    self._complete_task(runtime, robot, task, occupied_cells)
+                    return
+                del records[:len(batch)]
+                stack["count"] = min(len(records), EMPTY_PALLET_STACK_CAPACITY)
+                task.update(palletBatch=batch, palletCount=len(batch))
+            count = int(task.get("palletCount") or 1)
             robot["carrying"] = [{
                 "kind": "empty_pallet",
                 "sourceCellId": task.get("palletSourceCellId"),
                 "sourceLayer": int(task.get("palletSourceLayer") or 1),
+                "qty": count,
             }]
-            robot["load"] = 1
+            robot["load"] = count
             self._record_event(
                 runtime, tick, "pallet_picked_from_stack",
-                {"taskId": task["id"], "robotId": robot["id"]},
+                {"taskId": task["id"], "robotId": robot["id"], "palletCount": count},
             )
-            if self._robot_path_to(runtime, robot, EMPTY_PALLET_COLLECT_CELL_ID, 1):
-                task["phase"] = "delivery_to_collect"
-                task["phaseLabel"] = "送到机械臂入主线点"
-                task["etaTicks"] = max(len(robot.get("path") or []) - 1, 1)
-                robot["status"] = "moving"
-                robot["phaseLabel"] = task["phaseLabel"]
-                task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+            task.update(phase="delivery_to_collect", phaseLabel="送到机械臂入主线点",
+                        etaTicks=max(len(robot["path"]) - 1, 1))
+            robot.update(status="moving", phaseLabel=task["phaseLabel"])
+            task["history"].append({"tick": tick, "phase": task["phase"], "status": task["status"]})
+            return
+
+        if task["phase"] in {"retreat_from_pallet_collect", "waiting_pallet_collect_entry"}:
+            task.update(phase="waiting_pallet_collect_entry", phaseLabel="空托盘支线 / 等待通道清空")
+            robot.update(status="waiting", phaseLabel=task["phaseLabel"])
+            if (
+                not self._pallet_collect_spur_is_occupied(runtime, robot)
+                and self._pallet_collect_maneuver_path(
+                    runtime, robot, PALLET_COLLECT_EXIT_CELL_ID, start=EMPTY_PALLET_COLLECT_CELL_ID,
+                )
+            ):
+                self._set_robot_leg(
+                    runtime, robot, task, "delivery_to_collect", EMPTY_PALLET_COLLECT_CELL_ID, target_layer=1,
+                )
+            return
+
+        if task["phase"] == "clearing_pallet_collect":
+            if robot["currentCellId"] == PALLET_COLLECT_EXIT_CELL_ID:
+                self._complete_task(runtime, robot, task, occupied_cells, return_to_standby=True)
+                return
+            exit_path = self._pallet_collect_maneuver_path(runtime, robot, PALLET_COLLECT_EXIT_CELL_ID)
+            if exit_path:
+                self._set_pallet_collect_maneuver(robot, exit_path, task["phase"], task["phaseLabel"])
             else:
-                task["phaseLabel"] = "等待路径到入主线点"
-                robot["status"] = "waiting"
+                robot.update(status="waiting", phaseLabel=task["phaseLabel"])
+            return
+
+        if task["phase"] == "waiting_pallet_collect_arm":
             return
 
         if task["phase"] == "delivery_to_collect":
-            """shuttle 到达 (74,47) → 把托盘交给 picking-arm-02 → 完成 reposition 任务。
-
-            在这里才真正从堆叠计数扣减（_spawn_pallet_reposition 里 pop tray 但不减 count，
-            让 overflow 能正确反映"堆叠点仍然满层"的积压）。
-            """
-            stack = runtime.state.setdefault("emptyPalletStack", {})
-            stack["count"] = max(0, int(stack.get("count") or 0) - 1)
+            if robot["currentCellId"] != EMPTY_PALLET_COLLECT_CELL_ID or robot.get("currentLayer") != 1:
+                self._set_robot_leg(
+                    runtime, robot, task, "delivery_to_collect", EMPTY_PALLET_COLLECT_CELL_ID, target_layer=1,
+                )
+                return
+            task.update(phase="waiting_pallet_collect_arm", phaseLabel="等待机械臂 02 取空托盘")
+            robot.update(status="handling", phaseLabel=task["phaseLabel"])
             self._record_event(
                 runtime, tick, "pallet_delivered_to_collect",
                 {"taskId": task["id"], "robotId": robot["id"], "cellId": EMPTY_PALLET_COLLECT_CELL_ID,
-                 "stackCount": stack["count"]},
+                 "palletCount": int(task.get("palletCount") or 1)},
             )
-            # 触发机械臂-02：从 (74,47) 取托盘 → 放到 (84,58) 上层输送入口
-            self._start_pallet_arm_handoff(runtime, task)
-            robot["carrying"] = []
-            robot["load"] = 0
-            self._complete_task(runtime, robot, task, occupied_cells)
+            self._start_pallet_arm_handoff(runtime, task, robot)
             return
 
         if task["phase"] == "return_pallet_to_lane":
@@ -10659,6 +10975,7 @@ class SimulationService:
             "yielding_handoff_staging": "等待区主动退出让行",
             "waiting_handoff_slot": "已取货 / 等待机械臂通行时隙",
             "delivery_to_port": "输送线交付",
+            "delivery_to_collect": "送到机械臂入主线点",
             "conveyor_transfer": "输送线转运",
             "conveyor_to_lift": "下层输送转运",
             "lift_to_upper": "升降移栽",
